@@ -376,14 +376,20 @@ async fn packing_honors_nested_gitignores_and_common_junk_without_parent_rules()
 async fn desktop_launcher_tracks_install_update_rollback_and_removal() -> anyhow::Result<()> {
     use haps::model::DesktopEntry;
     let tmp = tempdir()?;
-    let home = tmp.path().join("home with spaces $ and %");
+    let home = tmp.path().join("home with spaces $ and %f and \" quote");
     let entries = tmp.path().join("applications");
     let installed = Installation::new(home.clone())?.with_desktop_dir(Some(entries.clone()));
     let author = Keys::generate();
     let repo = Repository::local(tmp.path().join("repo"))?;
     let payload = tmp.path().join("payload");
+    let marker = tmp.path().join("launched");
     let make = |version: &str| {
         let mut spec = package(&payload, version);
+        fs::write(
+            payload.join("bin/hello"),
+            format!("#!/bin/sh\nprintf launched > '{}'\n", marker.display()),
+        )
+        .unwrap();
         fs::write(
             payload.join("icon.svg"),
             "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
@@ -402,6 +408,24 @@ async fn desktop_launcher_tracks_install_update_rollback_and_removal() -> anyhow
     let initial = fs::read_to_string(&entry)?;
     assert!(initial.contains(&first.event.id.to_hex()));
     assert!(initial.contains("Name=Hello\\sDesktop"));
+    if std::env::var_os("HAPS_TEST_DESKTOP").is_some() {
+        let output = std::process::Command::new("gio")
+            .arg("launch")
+            .arg(&entry)
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for _ in 0..100 {
+            if marker.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(fs::read_to_string(&marker)?, "launched");
+    }
     // Reinstallation repairs a missing desktop entry without downloading again.
     fs::remove_file(&entry)?;
     installed.install(&repo, &first).await?;

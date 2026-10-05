@@ -53,8 +53,11 @@ pub fn render(release: &Release, directory: &Path) -> Result<Option<String>> {
     let command = directory.join(&spec.commands[&desktop.command]);
     let icon = directory.join(&desktop.icon);
     let icon = icon.to_str().context("desktop icon path must be UTF-8")?;
+    // GIO checks the first Exec token before expanding %% in paths. A fixed
+    // env launcher avoids losing entries whose installation path contains %.
+    // The package executable remains a single escaped argument; no shell runs.
     Ok(Some(format!(
-        "[Desktop Entry]\nType=Application\nName={}\nExec={}\nIcon={}\nTerminal=false\nCategories=Network;\nX-Haps-Publisher={}\nX-Haps-Release={}\n",
+        "[Desktop Entry]\nType=Application\nName={}\nExec=/usr/bin/env -- {}\nIcon={}\nTerminal=false\nCategories=Network;\nX-Haps-Publisher={}\nX-Haps-Release={}\n",
         value(&desktop.name),
         executable(&command)?,
         value(icon),

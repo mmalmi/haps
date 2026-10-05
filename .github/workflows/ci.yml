@@ -31,3 +31,6 @@ jobs:
       - name: Test Omarchy integration
         if: runner.os == 'Linux'
         run: python3 -m unittest discover -s tests -p '*_test.py'
+      - name: Launch a desktop entry through GIO
+        if: runner.os == 'Linux'
+        run: HAPS_TEST_DESKTOP=1 cargo test --locked desktop_launcher_tracks_install_update_rollback_and_removal
