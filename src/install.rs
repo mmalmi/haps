@@ -57,7 +57,7 @@ impl Installation {
             .as_ref()
             .or(old.as_ref())
             .context("missing desktop release")?;
-        let old_text = old
+        let mut old_text = old
             .as_ref()
             .map(|r| crate::desktop::render(r, &self.version_dir(r)))
             .transpose()?
@@ -67,12 +67,23 @@ impl Installation {
             .map(|r| crate::desktop::render(r, &self.version_dir(r)))
             .transpose()?
             .flatten();
-        crate::desktop::transaction(
-            &directory.join(crate::desktop::filename(&self.home, release)),
-            old_text.as_deref(),
-            new_text.as_deref(),
-            || self.save(receipts),
-        )
+        let path = directory.join(crate::desktop::filename(&self.home, release));
+        let legacy = old
+            .as_ref()
+            .or(new.as_ref())
+            .map(|r| crate::desktop::render_legacy(r, &self.version_dir(r)))
+            .transpose()?
+            .flatten();
+        // Migrate only an exact launcher previously generated for this signed
+        // release. User edits still fail the transaction's ownership check.
+        if let Some(legacy) = legacy
+            && fs::read_to_string(&path).ok().as_ref() == Some(&legacy)
+        {
+            old_text = Some(legacy);
+        }
+        crate::desktop::transaction(&path, old_text.as_deref(), new_text.as_deref(), || {
+            self.save(receipts)
+        })
     }
     pub fn receipts(&self) -> Result<BTreeMap<String, Receipt>> {
         let file = self.home.join("installed.json");
@@ -266,4 +277,53 @@ pub fn load_keys(path: &Path) -> Result<nostr::Keys> {
     let key = fs::read_to_string(path)
         .context("signing key unavailable; run `haps identity init` or provide --key-file")?;
     nostr::Keys::parse(key.trim()).context("invalid secret key file")
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reinstall_migrates_only_an_owned_legacy_launcher() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let home = tmp.path().join("home");
+        let entries = tmp.path().join("applications");
+        let installation = Installation::new(home)?.with_desktop_dir(Some(entries.clone()));
+        let payload = tmp.path().join("payload");
+        fs::create_dir_all(payload.join("bin"))?;
+        fs::write(payload.join("bin/hello"), b"hello")?;
+        fs::write(payload.join("icon.svg"), b"<svg/>")?;
+        let spec = PackageSpec {
+            name: "hello".into(),
+            version: "1.0.0".parse()?,
+            target: target().into(),
+            description: "Launcher migration fixture".into(),
+            commands: BTreeMap::from([("hello".into(), "bin/hello".into())]),
+            app: None,
+            source: None,
+            desktop: Some(DesktopEntry {
+                name: "Hello".into(),
+                command: "hello".into(),
+                icon: "icon.svg".into(),
+            }),
+        };
+        let repository = Repository::local(tmp.path().join("repo"))?;
+        let release = repository
+            .publish(&nostr::Keys::generate(), spec, &payload)
+            .await?;
+        installation.install(&repository, &release).await?;
+        let path = entries.join(crate::desktop::filename(&installation.home, &release));
+        let new = fs::read_to_string(&path)?;
+        let legacy =
+            crate::desktop::render_legacy(&release, &installation.path("hello")?)?.unwrap();
+        assert_ne!(new, legacy);
+        fs::write(&path, &legacy)?;
+        installation.install(&repository, &release).await?;
+        assert_eq!(fs::read_to_string(&path)?, new);
+        let modified = format!("{legacy}# user's edit\n");
+        fs::write(&path, &modified)?;
+        assert!(installation.install(&repository, &release).await.is_err());
+        assert_eq!(fs::read_to_string(&path)?, modified);
+        Ok(())
+    }
 }

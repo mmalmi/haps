@@ -406,7 +406,10 @@ async fn desktop_launcher_tracks_install_update_rollback_and_removal() -> anyhow
         let mut spec = package(&payload, version);
         fs::write(
             payload.join("bin/hello"),
-            format!("#!/bin/sh\nprintf launched > '{}'\n", marker.display()),
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$XDG_DATA_DIRS\" > '{}'\n",
+                marker.display()
+            ),
         )
         .unwrap();
         fs::write(
@@ -429,6 +432,7 @@ async fn desktop_launcher_tracks_install_update_rollback_and_removal() -> anyhow
     assert!(initial.contains("Name=Hello\\sDesktop"));
     if std::env::var_os("HAPS_TEST_DESKTOP").is_some() {
         let output = std::process::Command::new("gio")
+            .env("XDG_DATA_DIRS", "/custom resources:/usr/share")
             .arg("launch")
             .arg(&entry)
             .output()?;
@@ -443,7 +447,14 @@ async fn desktop_launcher_tracks_install_update_rollback_and_removal() -> anyhow
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        assert_eq!(fs::read_to_string(&marker)?, "launched");
+        assert_eq!(
+            fs::read_to_string(&marker)?,
+            format!(
+                "{}/usr/share:{}/share:/custom resources:/usr/share",
+                installed.path("hello")?.display(),
+                installed.path("hello")?.display(),
+            )
+        );
     }
     // Reinstallation repairs a missing desktop entry without downloading again.
     fs::remove_file(&entry)?;

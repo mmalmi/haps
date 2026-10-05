@@ -113,6 +113,10 @@ then discover them. Updates and rollbacks switch the launcher; removal removes
 it. Publisher-qualified, installation-specific filenames prevent name collisions.
 Reinstalling repairs a missing entry. Haps refuses to overwrite externally edited
 entries. Icons and executables stay inside the verified package directory.
+Both desktop launchers and `haps run` add the package's `usr/share` and `share`
+directories to the app's resource search path, preserving your existing data
+directories. This lets relocated apps find their bundled icons and other data.
+After upgrading Haps, reinstall an existing package to refresh its launcher.
 
 For the Iris apps on current Arch/Omarchy, install system libraries first:
 

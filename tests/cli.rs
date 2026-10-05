@@ -83,7 +83,7 @@ fn real_cli_http_install_execute_update_comments_and_rollback() {
     let fixture = root.join("hello.rs");
     fs::write(
         &fixture,
-        "fn main() { println!(\"hello {}\", std::env::args().nth(1).unwrap_or_default()); }",
+        "fn main() { let arg = std::env::args().nth(1).unwrap_or_default(); if arg == \"resources\" { println!(\"{}\", std::env::var(\"XDG_DATA_DIRS\").unwrap()); } else { println!(\"hello {}\", arg); } }",
     )
     .unwrap();
     let executable = format!("hello{}", std::env::consts::EXE_SUFFIX);
@@ -159,6 +159,24 @@ fn real_cli_http_install_execute_update_comments_and_rollback() {
     ok(&reader_home, &["follow", &publisher]);
     assert!(ok(&reader_home, &["search", "greeting"]).contains("\"follow_distance\": 1"));
     ok(&reader_home, &["install", "hello"]);
+    #[cfg(target_os = "linux")]
+    {
+        let output = Command::new(env!("CARGO_BIN_EXE_haps"))
+            .env("HAPS_NO_DEFAULTS", "true")
+            .env("HTREE_CONFIG_DIR", reader_home.join("hashtree"))
+            .env("XDG_DATA_DIRS", "/custom resources:/usr/share")
+            .arg("--home")
+            .arg(&reader_home)
+            .args(["run", "hello", "--", "resources"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let directory = ok(&reader_home, &["path", "hello"]);
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap().trim(),
+            format!("{directory}/usr/share:{directory}/share:/custom resources:/usr/share")
+        );
+    }
     assert_eq!(
         ok(&reader_home, &["run", "hello", "--", "world with spaces"]),
         "hello world with spaces"

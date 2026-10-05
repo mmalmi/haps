@@ -1169,8 +1169,17 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 }
             }
             let executable = installation.command(&package, command.as_deref())?;
+            let mut process = std::process::Command::new(executable);
+            #[cfg(target_os = "linux")]
+            process.env(
+                "XDG_DATA_DIRS",
+                haps::launch::linux_data_dirs(
+                    &installation.path(&package)?,
+                    std::env::var_os("XDG_DATA_DIRS").as_deref(),
+                )?,
+            );
             drop(guard);
-            let status = std::process::Command::new(executable).args(args).status()?;
+            let status = process.args(args).status()?;
             return Ok(status
                 .code()
                 .and_then(|c| u8::try_from(c).ok())

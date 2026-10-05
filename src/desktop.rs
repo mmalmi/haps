@@ -4,6 +4,10 @@ use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
 use std::{fs, path::Path};
 
+// Only this fixed script is evaluated. All package paths remain positional
+// arguments, including quotes, dollar signs, and shell metacharacters.
+const LINUX_LAUNCH_SCRIPT: &str = "XDG_DATA_DIRS=\"$1/usr/share:$1/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}\"; export XDG_DATA_DIRS; shift; exec \"$@\"";
+
 fn value(text: &str) -> String {
     text.replace('\\', "\\\\")
         .replace('\n', "\\n")
@@ -20,6 +24,10 @@ fn executable(path: &Path) -> Result<String> {
         !text.contains('=') && !text.chars().any(char::is_control),
         "unsupported desktop executable path"
     );
+    Ok(argument(text))
+}
+
+fn argument(text: &str) -> String {
     let mut quoted = String::from("\"");
     for ch in text.chars() {
         if "\\\"`$".contains(ch) {
@@ -32,7 +40,7 @@ fn executable(path: &Path) -> Result<String> {
     }
     quoted.push('"');
     // Desktop string escaping precedes Exec argument unquoting.
-    Ok(quoted.replace('\\', "\\\\"))
+    quoted.replace('\\', "\\\\")
 }
 
 pub fn filename(home: &Path, release: &Release) -> String {
@@ -46,6 +54,15 @@ pub fn filename(home: &Path, release: &Release) -> String {
 }
 
 pub fn render(release: &Release, directory: &Path) -> Result<Option<String>> {
+    render_entry(release, directory, false)
+}
+
+/// Previous Haps versions launched without the package's resource directories.
+pub(crate) fn render_legacy(release: &Release, directory: &Path) -> Result<Option<String>> {
+    render_entry(release, directory, true)
+}
+
+fn render_entry(release: &Release, directory: &Path, legacy: bool) -> Result<Option<String>> {
     let spec = &release.data.package;
     let Some(desktop) = &spec.desktop else {
         return Ok(None);
@@ -53,13 +70,21 @@ pub fn render(release: &Release, directory: &Path) -> Result<Option<String>> {
     let command = directory.join(&spec.commands[&desktop.command]);
     let icon = directory.join(&desktop.icon);
     let icon = icon.to_str().context("desktop icon path must be UTF-8")?;
-    // GIO checks the first Exec token before expanding %% in paths. A fixed
-    // env launcher avoids losing entries whose installation path contains %.
-    // The package executable remains a single escaped argument; no shell runs.
+    let exec = if legacy {
+        format!("/usr/bin/env -- {}", executable(&command)?)
+    } else {
+        crate::launch::linux_data_dirs(directory, None)?;
+        format!(
+            "/bin/sh -c {} haps {} {}",
+            argument(LINUX_LAUNCH_SCRIPT),
+            executable(directory)?,
+            executable(&command)?
+        )
+    };
     Ok(Some(format!(
-        "[Desktop Entry]\nType=Application\nName={}\nExec=/usr/bin/env -- {}\nIcon={}\nTerminal=false\nCategories=Network;\nX-Haps-Publisher={}\nX-Haps-Release={}\n",
+        "[Desktop Entry]\nType=Application\nName={}\nExec={}\nIcon={}\nTerminal=false\nCategories=Network;\nX-Haps-Publisher={}\nX-Haps-Release={}\n",
         value(&desktop.name),
-        executable(&command)?,
+        exec,
         value(icon),
         release.author(),
         release.event.id
@@ -129,6 +154,43 @@ mod tests {
         assert_eq!(fs::read_to_string(&file)?, "old");
         assert!(transaction(&file, Some("other"), Some("new"), || Ok(())).is_err());
         assert_eq!(fs::read_to_string(&file)?, "old");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resource_launcher_preserves_arguments_and_data_dirs() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let root = tmp.path().join("app with $ and %f and \" quote");
+        let program = tmp.path().join("program");
+        fs::write(
+            &program,
+            "#!/bin/sh\nprintf '%s\\n' \"$XDG_DATA_DIRS\" \"$@\"\n",
+        )?;
+        for inherited in [None, Some(""), Some("/custom resources:/usr/share")] {
+            let mut process = std::process::Command::new("/bin/sh");
+            process
+                .args(["-c", LINUX_LAUNCH_SCRIPT, "haps"])
+                .arg(&root)
+                .arg("/bin/sh")
+                .arg(&program)
+                .arg("literal $() `not a command` %f \" ;")
+                .env_remove("XDG_DATA_DIRS");
+            if let Some(value) = inherited {
+                process.env("XDG_DATA_DIRS", value);
+            }
+            let output = process.output()?;
+            assert!(output.status.success());
+            let expected =
+                crate::launch::linux_data_dirs(&root, inherited.map(std::ffi::OsStr::new))?;
+            assert_eq!(
+                String::from_utf8(output.stdout)?,
+                format!(
+                    "{}\nliteral $() `not a command` %f \" ;\n",
+                    expected.to_string_lossy()
+                )
+            );
+        }
         Ok(())
     }
 }
