@@ -137,6 +137,19 @@ impl Trust {
             .iter()
             .any(|p| p == author)
     }
+    /// Unmuted direct connections that follow this publisher, as in Iris Contacts.
+    pub fn followed_by_friends(&self, author: &str) -> Vec<String> {
+        let mut friends: Vec<_> = self
+            .graph
+            .get_followed_by_user(&self.root)
+            .into_iter()
+            .filter(|key| {
+                key != &self.root && !self.muted(key) && self.graph.is_following(key, author)
+            })
+            .collect();
+        friends.sort();
+        friends
+    }
     pub fn attesters(&self, release: &Release) -> Vec<String> {
         self.attestations(release)
             .iter()

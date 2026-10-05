@@ -18,7 +18,7 @@ class Catalog:
     def __init__(self, root):
         self.root = Path(root)
         self.keys = {}
-        for name in ['reader', 'alice', 'buildbot', 'other', 'bob', 'carol']:
+        for name in ['reader', 'alice', 'buildbot', 'other', 'bob', 'carol', 'dave']:
             self.keys[name] = self.run(name, 'identity', 'init').stdout.strip()
         payload = self.root / 'payload'
         payload.mkdir()
@@ -35,10 +35,11 @@ class Catalog:
             self.releases[name] = json.loads(self.run(name, 'pack', str(spec), '--payload', str(payload), '--out', str(repo)).stdout)
             self.run('reader', 'source', 'add', name, str(repo), '--author', self.keys[name])
             self.run('reader', 'alias', 'add', name, self.keys[name])
-        for name in ['alice', 'bob', 'carol']:
+        for name in ['alice', 'bob', 'carol', 'dave']:
             self.run('reader', 'follow', self.keys[name])
+            if name != 'alice':
+                self.run('reader', 'alias', 'add', name, self.keys[name])
         for name in ['bob', 'carol']:
-            self.run('reader', 'alias', 'add', name, self.keys[name])
             self.run(name, 'source', 'add', 'alice', str(self.root / 'alice-repo'), '--author', self.keys['alice'])
             self.run(name, 'alias', 'add', 'alice', self.keys['alice'])
             note = 'Built from source; tests pass.' if name == 'bob' else 'Ran hello on this platform.'
@@ -47,8 +48,9 @@ class Catalog:
             assert json.loads(saved.read_text()) == event
             self.run('reader', 'import', str(saved))
         follows = self.root / 'follows.json'
-        self.run('alice', 'follow', self.keys['buildbot'], '--export', str(follows))
-        self.run('reader', 'import', str(follows))
+        for name in ['alice', 'bob', 'carol', 'dave']:
+            self.run(name, 'follow', self.keys['buildbot'], '--export', str(follows))
+            self.run('reader', 'import', str(follows))
 
     def home(self, name):
         return self.root / name
@@ -143,12 +145,19 @@ class ChooserTest(unittest.TestCase):
         self.assertLess(menu.index('alice/hello'), menu.index('buildbot/hello'))
         self.assertLess(menu.index('buildbot/hello'), menu.index('other/hello'))
         self.assertIn('Attested by bob, carol', menu)
+        self.assertIn('Followed by alice, bob, carol and 1 other you follow', menu)
+        self.assertNotIn('hops away', menu)
         term.send(b'\x1b[B\x1b[A\r')
         code, output = term.finish()
         self.assertEqual(code, 0, output)
         self.assertIn('Installed alice/hello 1.0.0', output)
         self.assertIn('bob: Built from source; tests pass.', output)
         self.assertEqual(self.catalog.run('reader', 'run', 'hello').stdout.strip(), 'Hello from Haps')
+
+    def test_mutual_followers_in_json(self):
+        info = json.loads(self.catalog.run('reader', 'info', 'buildbot/hello', '--json').stdout)
+        self.assertEqual({p['label'] for p in info['followed_by']}, {'alice', 'bob', 'carol', 'dave'})
+        self.assertEqual({p['pubkey'] for p in info['followed_by']}, {self.catalog.keys[n] for n in ['alice', 'bob', 'carol', 'dave']})
 
     def test_cancel_and_untrusted_choice_do_not_install(self):
         term = self.terminal('install', 'hello')

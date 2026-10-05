@@ -132,6 +132,10 @@ async fn signed_social_graph_and_release_specific_attestations() -> anyhow::Resu
             .sign_with_keys(&me)?,
     )?;
     assert_eq!(trust.distance(&author.public_key().to_hex()), Some(2));
+    assert_eq!(
+        trust.followed_by_friends(&author.public_key().to_hex()),
+        vec![friend.public_key().to_hex()]
+    );
     let mut forged = EventBuilder::new(Kind::ContactList, "").sign_with_keys(&author)?;
     forged.pubkey = me.public_key();
     assert!(trust.ingest(forged).is_err());
@@ -181,6 +185,19 @@ async fn signed_social_graph_and_release_specific_attestations() -> anyhow::Resu
             .sign_with_keys(&me)?,
     )?;
     assert!(trust.authorize(&second, true, 1).is_err());
+    trust.ingest(
+        EventBuilder::new(Kind::MuteList, "")
+            .tags([Tag::public_key(friend.public_key())])
+            .custom_created_at(nostr::Timestamp::from(
+                nostr::Timestamp::now().as_secs() + 1,
+            ))
+            .sign_with_keys(&me)?,
+    )?;
+    assert!(
+        trust
+            .followed_by_friends(&author.public_key().to_hex())
+            .is_empty()
+    );
     Ok(())
 }
 

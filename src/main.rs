@@ -51,6 +51,8 @@ enum Command {
     },
     /// Show this machine's package target.
     Target,
+    /// Create a package manifest for a staged binary or macOS app.
+    Init(haps::init::InitArgs),
     /// Sign a staged directory and build a shareable hashtree catalog locally.
     Pack {
         manifest: PathBuf,
@@ -194,6 +196,7 @@ enum Command {
 impl Command {
     fn json(&self) -> bool {
         match self {
+            Self::Init(args) => args.json,
             Self::Search { json, .. }
             | Self::Info { json, .. }
             | Self::Install { json, .. }
@@ -543,7 +546,7 @@ fn select(
                     "{} {} · {}{}\n    {}",
                     release_label(release, aliases),
                     release.data.package.version,
-                    relationship(trust, &author),
+                    relationship(trust, &author, aliases),
                     if trust.muted(&author) {
                         " · muted"
                     } else {
@@ -613,11 +616,29 @@ fn release_label(release: &Release, aliases: &BTreeMap<String, String>) -> Strin
     )
 }
 
-fn relationship(trust: &Trust, author: &str) -> String {
+fn relationship(trust: &Trust, author: &str, aliases: &BTreeMap<String, String>) -> String {
+    if trust.distance(author) == Some(0) {
+        return "You".into();
+    }
+    let mut names: Vec<_> = trust
+        .followed_by_friends(author)
+        .iter()
+        .map(|key| terminal_text(&publisher_label(aliases, key)))
+        .collect();
+    names.sort();
+    if !names.is_empty() {
+        let remaining = names.len().saturating_sub(3);
+        names.truncate(3);
+        let suffix = match remaining {
+            0 => String::new(),
+            1 => " and 1 other you follow".into(),
+            n => format!(" and {n} others you follow"),
+        };
+        return format!("Followed by {}{suffix}", names.join(", "));
+    }
     match trust.distance(author) {
-        Some(0) => "you".into(),
-        Some(1) => "you follow".into(),
-        Some(hops) => format!("{hops} hops away"),
+        Some(1) => "Followed by you".into(),
+        Some(_) => "In your extended graph".into(),
         None => "outside your graph".into(),
     }
 }
@@ -659,6 +680,7 @@ fn release_json(
         "package": release.data.package, "publisher": release.author(),
         "release_id": release.event.id.to_hex(), "manifest": release.data.manifest,
         "follow_distance": trust.distance(&release.author()), "muted": trust.muted(&release.author()),
+        "followed_by": trust.followed_by_friends(&release.author()).iter().map(|key| serde_json::json!({"pubkey": key, "label": publisher_label(aliases, key)})).collect::<Vec<_>>(),
         "attesters": trust.attesters(release), "attestations": attestations,
     })
 }
@@ -766,6 +788,23 @@ async fn main() -> ExitCode {
 
 async fn execute(mut cli: Cli) -> Result<u8> {
     let non_interactive = cli.non_interactive || cli.command.json();
+    if let Command::Init(args) = &cli.command {
+        let spec = haps::init::create(args)?;
+        if args.json {
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &serde_json::json!({"status": "created", "manifest": args.out, "package": spec})
+                )?
+            );
+        } else {
+            println!("Created {}", args.out.display());
+            println!(
+                "Check the metadata, then pack it with `haps pack <manifest> --payload <directory> --out <catalog>`."
+            );
+        }
+        return Ok(0);
+    }
     if matches!(cli.command, Command::Target) {
         println!("{}", target());
         return Ok(0);
@@ -814,7 +853,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
     }
     let installation = Installation::new(home.clone())?;
     match cli.command {
-        Command::Target => unreachable!(),
+        Command::Target | Command::Init(_) => unreachable!(),
         Command::StartingPoint { public_key, clear } => {
             if clear {
                 config.starting_point = None;

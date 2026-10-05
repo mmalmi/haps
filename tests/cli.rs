@@ -101,7 +101,27 @@ fn real_cli_http_install_execute_update_comments_and_rollback() {
     let write_manifest = |version: &str| {
         fs::write(&manifest, format!("name = \"hello\"\nversion = \"{version}\"\ntarget = \"{}\"\ndescription = \"Friendly greeting tool\"\n[commands]\nhello = \"bin/{executable}\"\n", haps::model::target())).unwrap();
     };
-    write_manifest("1.0.0");
+    let initialized: serde_json::Value = serde_json::from_str(&ok(
+        &author_home,
+        &[
+            "init",
+            "--name",
+            "hello",
+            "--version",
+            "1.0.0",
+            "--description",
+            "Friendly greeting tool",
+            "--command",
+            &format!("bin/{executable}"),
+            "--payload",
+            payload.to_str().unwrap(),
+            "--out",
+            manifest.to_str().unwrap(),
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(initialized["package"]["target"], haps::model::target());
     let packed = ok(
         &author_home,
         &[
@@ -277,6 +297,53 @@ fn real_cli_http_install_execute_update_comments_and_rollback() {
     );
     ok(&reader_home, &["remove", "hello"]);
     assert!(ok(&reader_home, &["list"]).is_empty());
+}
+
+#[test]
+fn init_is_offline_noninteractive_and_preserves_existing_files() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("unused-home");
+    let payload = temp.path().join("stage");
+    fs::create_dir(&payload).unwrap();
+    fs::write(payload.join("hello"), b"staged binary").unwrap();
+    let manifest = temp.path().join("haps.toml");
+    let run = |command: &str, output: &Path| {
+        cli(
+            &home,
+            &[
+                "--non-interactive",
+                "init",
+                "--name",
+                "hello",
+                "--command",
+                command,
+                "--payload",
+                payload.to_str().unwrap(),
+                "--out",
+                output.to_str().unwrap(),
+                "--json",
+            ],
+        )
+    };
+    for (entry, output) in [
+        ("../outside", manifest.clone()),
+        ("missing", manifest.clone()),
+        ("hello", payload.join("haps.toml")),
+    ] {
+        let result = run(entry, &output);
+        assert!(!result.status.success());
+        let error: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(error["error"]["code"], "operation_failed");
+        assert!(!output.exists());
+    }
+    assert!(run("hello", &manifest).status.success());
+    let original = fs::read(&manifest).unwrap();
+    assert!(!run("hello", &manifest).status.success());
+    assert_eq!(fs::read(&manifest).unwrap(), original);
+    assert!(
+        !home.exists(),
+        "init must not create identity or configuration"
+    );
 }
 
 #[test]

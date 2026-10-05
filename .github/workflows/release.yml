@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing stable tag to build and publish (v0.1.4)'
+        description: 'Existing stable tag to build and publish (v0.1.5)'
         required: true
 permissions:
   contents: read

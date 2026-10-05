@@ -59,11 +59,10 @@ To inspect first or pin a version:
 ```sh
 curl -fsSL https://haps.hashtree.cc/install.sh -o install-haps.sh
 less install-haps.sh
-sh install-haps.sh --version v0.1.4 --bin-dir "$HOME/.local/bin"
+sh install-haps.sh --version v0.1.5 --bin-dir "$HOME/.local/bin"
 ```
 
-[Windows x64 zip and all release downloads](https://github.com/mmalmi/haps/releases/latest)
-are also available. Extract `haps.exe` into a directory on your `PATH`.
+[Windows x64 zip and all release downloads](#downloads) are also available. Extract `haps.exe` into a directory on your `PATH`.
 The prebuilt Linux CLI requires glibc 2.35 or newer; application packages have
 separate runtime requirements below.
 
@@ -75,9 +74,9 @@ haps install iris-drive
 haps run iris-drive
 ```
 
-Website: [haps.hashtree.cc](https://haps.hashtree.cc). Source is mirrored on
-[GitHub](https://github.com/mmalmi/haps) and
-[hashtree](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps).
+Website: [haps.hashtree.cc](https://haps.hashtree.cc).
+[Source and documentation](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps)
+live on Hashtree, with an additional [GitHub mirror](https://github.com/mmalmi/haps).
 
 Fresh configurations include the Iris catalog and **Sirius Business Ltd**, the
 project-maintenance identity, as a local social-graph starting point. The first
@@ -143,80 +142,38 @@ existing menu entries/comments and saves the original menu file as
 checks as the CLI. It adds no automatic trust overrides or background updates.
 Use Haps 0.1.2 or newer for the Linux catalog and menu integration.
 
-### Package a program
+### Downloads
 
-Stage only the files intended for distribution in a separate directory, for
-example `stage/bin/hello`. Put `haps.toml` outside that payload:
+Prebuilt Haps 0.1.5 archives, hosted on Hashtree:
 
-Packing respects `.gitignore` and `.ignore` files inside the payload, including
-nested rules and negation. It skips Git metadata, OS junk, root build/dependency
-caches, and local `.env` files. Ignore rules outside the chosen payload and global
-Git ignores do not affect the package. Runtime dependencies nested inside an app
-are retained unless that payload's own ignore rules exclude them. Source recipes
-explicitly map their declared build outputs into a fresh payload before packing.
+| Platform | Archive |
+| --- | --- |
+| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-x86_64-apple-darwin.tar.gz) |
+| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-x86_64-pc-windows-msvc.zip) |
 
-```toml
-name = "hello"
-version = "1.0.0"
-target = "aarch64-apple-darwin" # replace with `haps target`
-description = "A friendly greeting tool"
+The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/release.json) records archive sizes and SHA-256 checksums.
 
-[commands]
-hello = "bin/hello"
-```
+### Publish your package
 
-Linux GUI manifests can add signed launcher metadata:
-
-```toml
-[desktop]
-name = "Example"
-command = "hello" # key from [commands]; no shell command or extra arguments
-icon = "share/icons/example.png" # packaged PNG or SVG
-```
-
-On Windows the command path would normally end in `.exe`. Names, paths, size
-limits, and command references are validated before installation. Use SemVer;
-pre-releases require an explicit `--version` selection. Unknown manifest fields
-are rejected, including install hooks and dependencies that Haps cannot yet honor.
+Start with a built program and stage its runtime files in `stage/`:
 
 ```sh
-haps identity init                         # prints only the public key
-haps pack haps.toml --payload stage --out repository > release.json
-haps identity show
-haps source add mine ./repository --author PUBLIC_KEY
-haps search hello
-haps info PUBLIC_KEY/hello
-haps install PUBLIC_KEY/hello
-haps run hello -- "world with spaces"
-haps path hello
-haps list
+haps init --name my-app --command bin/my-app --payload stage
+haps identity init # once; keep the same key for future releases
+haps pack haps.toml --payload stage --out catalog
 ```
 
-`pack` signs and writes a shareable directory; it does not upload or publish to
-relays. The directory contains `catalog.json` and sharded `blobs/`. It can be served
-unchanged by a static web server, and a reader can add its base URL as a source.
-Keep the identity key outside the served directory. Local keys are created with
-owner-only file permissions on Unix; Windows relies on the enclosing user profile's
-ACL. An external `--key-file` can be supplied to `pack`.
+`init` writes an editable manifest for your platform without prompting or replacing
+an existing file. `pack` signs a local catalog. Test it locally, then publish it
+with `htree add catalog --publish my-packages` or serve the directory over HTTPS.
 
-Rebuild the staged payload, increment the manifest version, and run `pack` again
-to extend the catalog. Reusing the same publisher/name/version/target is rejected.
-
-```sh
-haps update hello
-haps rollback hello
-haps remove hello
-```
-
-Installed versions live in separate directories. The installed-state file switches
-atomically after verification. Removal deactivates a package; files remain cached
-for recovery. Haps does not alter system PATH, `/usr`, applications folders, services,
-or file associations. `haps run` executes the selected command directly without a
-shell and passes through its arguments and exit status.
-
-Packages may declare a relative macOS `app = "Example.app"` bundle. `haps run`
-opens those bundles through Launch Services; `--command` selects a declared
-executable directly. Bundle contents remain inside Haps's versioned install slot.
+The **[publishing guide](PUBLISHING.md)** covers staging, testing, Hashtree setup,
+sharing install commands, multiple platforms, ignore rules, and updates. No
+registry account or submission is required. Readers add your catalog explicitly;
+Haps does not yet discover every published catalog automatically.
 
 ### Names and shared aliases
 
@@ -237,6 +194,10 @@ ordered by social distance, then trusted attestations of each publisher's newest
 matching release. Enter selects; Escape cancels. Each choice shows a local alias
 (or full public key), the version, social distance, and attesters. Selection does
 not bypass trust policy. Existing installations retain their publisher on update.
+The chooser shows up to three connections who follow each publisher and how many
+more there are, using the same rule as Iris Contacts. Local aliases label the keys;
+JSON output includes every matching public key in `followed_by`. Muted connections
+are excluded. Numeric distances remain available in JSON for ranking.
 
 For agents and scripts, `--non-interactive` (or `HAPS_NON_INTERACTIVE=true`) disables
 prompts even in a terminal. Redirected stdin, stdout, or stderr also disables the chooser.
@@ -417,6 +378,26 @@ social-graph discovery, and signed release attestations. Content hashes verify b
 signatures identify who published them; social context informs the user's choice.
 Availability still requires retained copies and replication.
 
+## Catalogs and mirrors
+
+You can create a catalog without registering anywhere and configure several
+sources with `haps source add`. Search queries all configured catalogs and ranks
+publishers using your social graph. Catalog signatures and package signatures
+are checked separately: hosting or indexing a package does not make its host the
+package author.
+
+Catalogs, search indexes, and files are content addressed. Copies keep the same
+content hashes, so the data can move between servers or be mirrored unchanged.
+Keep `catalog.json` and its referenced `blobs/` together. A mirror keeps the
+original catalog signer; changing a catalog requires signing a new catalog under
+your own key. There is not yet a CLI command for forking or curating a catalog of
+other publishers' releases.
+
+The current reader supports local directories and HTTP(S); `htree://` catalog
+addresses resolve through a Hashtree HTTP gateway. Haps does not yet share a
+running htree daemon's peer connections. Content is independent of its location,
+but reading still needs an available copy and supported transport.
+
 ## Protocol and current limits
 
 The prototype uses experimental kind-30078 app-data events with distinct `d` tags:
@@ -425,6 +406,16 @@ The prototype uses experimental kind-30078 app-data events with distinct `d` tag
 their referenced content and search indexes are hashtree CIDs. This is **not yet
 Zapstore software-event compatibility**. Package comments use NIP-22 kind 1111 with
 an `A` root; release comments use an `E` root.
+
+The shared [fact-event draft](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-social-graph/nips/fact-events.md)
+is a candidate envelope for release attestations: a release subject, signed claims,
+and explicit replacement/dispute links. Haps does not emit or import that format
+yet. The shared Rust and TypeScript helpers currently require UUID subjects, so
+adoption needs an explicit release-ID mapping or a generic subject API. Any
+migration must preserve exact release/platform binding, count each trusted signer
+once, and prevent another signer from replacing someone else's claim. A dispute
+or an identity-link claim must never silently become installation approval.
+
 
 Catalog authors are pinned on source addition. Saved sequence/event checkpoints
 reject older catalogs and changes at an already-seen sequence. This cannot prove

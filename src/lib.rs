@@ -2,6 +2,7 @@ pub mod aliases;
 pub mod build;
 pub mod comments;
 pub mod desktop;
+pub mod init;
 pub mod install;
 pub mod model;
 pub mod repository;
