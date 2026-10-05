@@ -37,10 +37,31 @@ rolls back, and exchanges signed comments between separate identities over a loc
 HTTP source. CI is configured to run that suite on all three operating systems;
 configuration alone does not mean those remote jobs have run.
 
-The initial nine integration tests pass on macOS ARM64 and Linux ARM64 (Debian
-Bookworm in Docker). Windows is configured in CI but has not yet been exercised.
+CI runs native installation and execution on macOS, Linux, and Windows.
 
 ## Build and use
+
+Install the CLI from crates.io:
+
+```sh
+cargo install haps --locked
+haps install iris-drive
+haps run iris-drive
+```
+
+Website: [haps.iris.to](https://haps.iris.to). Source is mirrored on
+[GitHub](https://github.com/mmalmi/haps) and
+[hashtree](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps).
+
+Fresh configurations include the Iris catalog and **Sirius Business Ltd**, the
+project-maintenance identity, as a local social-graph starting point. The first
+Iris Chat, Iris Drive, and Nostr VPN GUI packages target Apple silicon Macs.
+Inspect the starting point with `haps starting-point`, replace it with
+`haps starting-point PUBLIC_KEY`, or disable it with `haps starting-point --clear`.
+It is a local trust preference, not a published follow event. Explicit local mutes
+still block a publisher. Use `--no-defaults` on the first invocation to start with
+no catalog or starting point. Removing a catalog and removing the starting point
+are independent actions.
 
 ```sh
 cargo build --locked
@@ -112,6 +133,57 @@ atomically after verification. Removal deactivates a package; files remain cache
 for recovery. Haps does not alter system PATH, `/usr`, applications folders, services,
 or file associations. `haps run` executes the selected command directly without a
 shell and passes through its arguments and exit status.
+
+Packages may declare a relative macOS `app = "Example.app"` bundle. `haps run`
+opens those bundles through Launch Services; `--command` selects a declared
+executable directly. Bundle contents remain inside Haps's versioned install slot.
+
+### Names and shared aliases
+
+```sh
+haps alias add alice npub1...
+haps install alice/editor
+haps install npub1.../editor
+haps install editor
+```
+
+Aliases use the existing public `~/.hashtree/aliases` file and parser from
+`hashtree-config`, shared with `git-remote-htree`. `HTREE_CONFIG_DIR` selects another
+shared configuration directory. Haps does not copy aliases into its own settings
+or read signing keys to resolve public aliases. Aliases do not imply trust.
+
+When a bare name matches multiple publishers, a terminal offers a numbered chooser
+ordered by social distance, then approvals of each publisher's newest matching
+release. The choices show the underlying public keys. Scripts receive the same
+ranked list and must specify a publisher explicitly. Existing installations retain
+their publisher on update.
+
+### Build from a Git repository
+
+```sh
+cargo install git-remote-htree --locked
+haps identity init
+haps build htree://npub1.../project --rev FULL_COMMIT_HASH
+haps build htree://npub1.../project --rev FULL_COMMIT_HASH --execute --install
+```
+
+The first command previews the committed `haps-build.toml` recipe. Building requires
+`--execute`; recipes run with your user permissions and are **not sandboxed**.
+Haps delegates `htree://` Git transport to `git-remote-htree` and also accepts HTTPS
+and local `file://` Git URLs. Full commit hashes are required; moving branches and
+tags are not sufficient build pins. Toolchains must already be available. Submodule
+and language dependency resolution are not managed by this initial recipe runner.
+
+See [haps-build.toml](haps-build.toml) for a working recipe. Build commands are
+argument arrays, followed by an explicit mapping of output files into the package.
+`{exe}` expands to the platform executable suffix, and `target = "host"` selects
+the current build target. Haps signs local build results with the builder's identity
+and records the original Git URL and commit in the signed package metadata.
+
+`haps source add` also accepts `htree://npub/CATALOG_TREE` for a signed **catalog
+directory**, accessed through the public hashtree HTTP gateway. This is separate
+from Git source builds. Catalog signatures, publisher pins, content hashes, and
+rollback checks remain enforced.
 
 ### Social discovery and reviews
 
@@ -251,7 +323,7 @@ Remaining work, in order:
 1. Live Nostr discovery/comment subscriptions and Blossom replication using the
    existing Hashtree transport/resolver libraries; stable software-event interoperability.
 2. Native integration: safe preservation of symlinks and executable metadata,
-   platform signing/quarantine, app bundles/installers, user command launchers,
+   broader platform signing/quarantine coverage, installer formats, user command launchers,
    runtime dependencies, removal/garbage collection, and transactional environment locks.
 3. Hapstore discovery UI, app metadata/screenshots, reviewer context, reports,
    and package/release discussion over this core.
@@ -259,8 +331,9 @@ Remaining work, in order:
 
 Current payloads support regular files only: symbolic links, special files, extended
 attributes, installer packages, and OS integrations are rejected or unsupported.
-Do not assume a signed/notarized app bundle survives until those platform paths are
-implemented and verified. Native code is not sandboxed. No build or install hooks
+Only bundles whose required files and metadata fit this format can be published;
+verify each installed macOS bundle with `codesign --verify --deep --strict`.
+Native code is not sandboxed. No build or install hooks
 run during installation. `rollback` explicitly restores a retained local version;
 it does not re-evaluate current social approval of that older version.
 
@@ -274,3 +347,8 @@ cargo test --locked
 
 Tests use temporary identities, repositories, and homes. They do not touch real
 Nostr identities or publish to public relays. HTTP tests use loopback only.
+
+The static website lives in `website/public` and deploys with the adjacent Wrangler
+configuration. Publish that directory separately as `haps-site` on hashtree; the
+`haps` source tree and `haps-packages` catalog are separate publications.
+Package input manifests and upstream archive checksums live in `packages/`.

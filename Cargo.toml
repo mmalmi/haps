@@ -4,7 +4,12 @@ version = "0.1.0"
 edition = "2024"
 description = "Hashtree Package System: signed packages, content-addressed distribution, social discovery"
 license = "MIT"
-publish = false
+homepage = "https://haps.iris.to"
+repository = "https://github.com/mmalmi/haps"
+readme = "README.md"
+keywords = ["hashtree", "nostr", "packages", "cli"]
+categories = ["command-line-utilities", "development-tools"]
+include = ["src/**", "tests/**", "build.rs", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "haps-build.toml"]
 
 [dependencies]
 anyhow = "1"
@@ -14,6 +19,7 @@ dirs = "6"
 fs2 = "0.4"
 futures = "0.3"
 hashtree-core = "=0.2.90"
+hashtree-config = "=0.2.83"
 hashtree-fs = "=0.2.82"
 hashtree-index = "=0.2.84"
 hex = "0.4"

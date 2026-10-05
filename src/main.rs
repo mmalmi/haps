@@ -21,16 +21,30 @@ use std::{
 struct Cli {
     #[arg(long, global = true, env = "HAPS_HOME")]
     home: Option<PathBuf>,
+    /// Start a fresh configuration without the maintainer catalog or trust seed.
+    #[arg(long, global = true, env = "HAPS_NO_DEFAULTS")]
+    no_defaults: bool,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
+    /// Show, replace, or disable the local social-graph starting point.
+    StartingPoint {
+        public_key: Option<String>,
+        #[arg(long, conflicts_with = "public_key")]
+        clear: bool,
+    },
     /// Create or use a Nostr publishing identity. No account registration.
     Identity {
         #[command(subcommand)]
         action: IdentityAction,
+    },
+    /// Give a publisher a local name, such as alice/package.
+    Alias {
+        #[command(subcommand)]
+        action: AliasAction,
     },
     /// Show this machine's package target.
     Target,
@@ -43,6 +57,20 @@ enum Command {
         out: PathBuf,
         #[arg(long)]
         key_file: Option<PathBuf>,
+    },
+    /// Inspect or explicitly execute a build recipe from a pinned Git checkout.
+    Build {
+        repository: String,
+        #[arg(long)]
+        rev: String,
+        #[arg(long, default_value = "haps-build.toml")]
+        recipe: String,
+        /// Run the recipe with your user permissions. Builds are not sandboxed.
+        #[arg(long)]
+        execute: bool,
+        /// Install the locally signed build after it succeeds.
+        #[arg(long, requires = "execute")]
+        install: bool,
     },
     /// Configure catalogs and pin their publishers' public keys.
     Source {
@@ -161,10 +189,65 @@ enum SourceAction {
     },
 }
 
+#[derive(Subcommand)]
+enum AliasAction {
+    Add { name: String, public_key: String },
+    List,
+    Remove { name: String },
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Config {
     identity: Option<String>,
     sources: BTreeMap<String, Source>,
+    #[serde(skip)]
+    aliases: BTreeMap<String, String>,
+    #[serde(default)]
+    starting_point: Option<String>,
+}
+
+fn fresh_config(no_defaults: bool) -> Result<Config> {
+    let mut config = Config::default();
+    if !no_defaults {
+        let npub = hashtree_config::DEFAULT_SOCIALGRAPH_ENTRYPOINT_NPUB;
+        let key = ensure_public_key(npub)?;
+        config.starting_point = Some(key.clone());
+        config.sources.insert(
+            "iris".into(),
+            Source {
+                location: format!("htree://{npub}/haps-packages"),
+                author: key,
+                sequence: 0,
+                event_id: String::new(),
+            },
+        );
+    }
+    Ok(config)
+}
+
+fn resolve_key(config: &Config, key: &str) -> Result<String> {
+    ensure_public_key(config.aliases.get(key).map(String::as_str).unwrap_or(key))
+}
+
+fn resolve_package(config: &Config, package: &str) -> Result<String> {
+    if let Some((key, name)) = package.split_once('/') {
+        safe_name(name)?;
+        return Ok(format!("{}/{}", resolve_key(config, key)?, name));
+    }
+    Ok(package.into())
+}
+
+fn publisher_label(aliases: &BTreeMap<String, String>, author: &str) -> String {
+    use nostr::nips::nip19::ToBech32;
+    aliases
+        .iter()
+        .find(|(_, key)| key.as_str() == author)
+        .map(|(alias, _)| alias.clone())
+        .unwrap_or_else(|| {
+            nostr::PublicKey::parse(author)
+                .map(|p| p.to_bech32().unwrap())
+                .unwrap_or_else(|_| author.into())
+        })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -204,6 +287,7 @@ fn load_trust(home: &Path, config: &Config) -> Result<Trust> {
             trust.ingest(event)?;
         }
     }
+    trust.set_starting_point(config.starting_point.clone())?;
     Ok(trust)
 }
 
@@ -298,7 +382,9 @@ fn check_checkpoint(source: &mut Source, snapshot: &Snapshot) -> Result<()> {
         "catalog rollback detected"
     );
     ensure!(
-        snapshot.head.sequence != source.sequence || snapshot.event.id.to_hex() == source.event_id,
+        source.event_id.is_empty()
+            || snapshot.head.sequence != source.sequence
+            || snapshot.event.id.to_hex() == source.event_id,
         "catalog changed at the same sequence"
     );
     source.sequence = snapshot.head.sequence;
@@ -352,6 +438,8 @@ fn select(
     mut candidates: Vec<Candidate>,
     package: &str,
     version: Option<&semver::Version>,
+    aliases: &BTreeMap<String, String>,
+    trust: &Trust,
 ) -> Result<Candidate> {
     let package = if let Some((key, name)) = package.split_once('/') {
         format!("{}/{}", ensure_public_key(key)?, name)
@@ -370,10 +458,67 @@ fn select(
         "no matching release for {}",
         target()
     );
-    ensure!(
-        authors.len() == 1,
-        "multiple publishers use this name; select publisher/name after inspecting `haps search`"
-    );
+    if authors.len() > 1 {
+        use std::io::{IsTerminal, Write};
+        let mut choices: Vec<_> = authors.into_iter().collect();
+        let approvals = |author: &str| {
+            candidates
+                .iter()
+                .filter(|c| c.release.author() == author)
+                .max_by(|a, b| {
+                    a.release
+                        .data
+                        .package
+                        .version
+                        .cmp(&b.release.data.package.version)
+                })
+                .map_or(0, |c| trust.attesters(&c.release).len())
+        };
+        choices.sort_by_key(|author| {
+            (
+                trust.muted(author),
+                trust.distance(author).unwrap_or(u32::MAX),
+                std::cmp::Reverse(approvals(author)),
+                publisher_label(aliases, author),
+            )
+        });
+        let options: Vec<_> = choices
+            .iter()
+            .map(|author| {
+                format!(
+                    "{}/{} ({author}; {}; {} approvals{})",
+                    publisher_label(aliases, author),
+                    package,
+                    match trust.distance(author) {
+                        Some(0) => "you".into(),
+                        Some(1) => "you follow".into(),
+                        Some(hops) => format!("{hops} hops away"),
+                        None => "outside your graph".into(),
+                    },
+                    approvals(author),
+                    if trust.muted(author) { "; muted" } else { "" }
+                )
+            })
+            .collect();
+        ensure!(
+            std::io::stdin().is_terminal(),
+            "multiple publishers use this name; choose an explicit publisher/name:\n{}",
+            options.join("\n")
+        );
+        for (index, option) in options.iter().enumerate() {
+            eprintln!("  {}. {option}", index + 1);
+        }
+        eprint!("Choose a publisher [1-{}]: ", choices.len());
+        std::io::stderr().flush()?;
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let index: usize = input.trim().parse().context("enter a listed number")?;
+        ensure!(
+            index > 0 && index <= choices.len(),
+            "invalid publisher selection"
+        );
+        candidates.retain(|c| c.release.author() == choices[index - 1]);
+    }
     candidates.sort_by(|a, b| {
         b.release
             .data
@@ -408,7 +553,7 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn execute(cli: Cli) -> Result<u8> {
+async fn execute(mut cli: Cli) -> Result<u8> {
     if matches!(cli.command, Command::Target) {
         println!("{}", target());
         return Ok(0);
@@ -424,12 +569,62 @@ async fn execute(cli: Cli) -> Result<u8> {
     let mut config: Config = if config_file.exists() {
         read_json(&config_file)?
     } else {
-        Config::default()
+        fresh_config(cli.no_defaults)?
     };
+    config.aliases = haps::aliases::read()?;
+    if !config_file.exists() {
+        if config.starting_point.is_some() {
+            let name = hashtree_config::DEFAULT_SOCIALGRAPH_ENTRYPOINT_ALIAS;
+            if !config.aliases.contains_key(name) {
+                haps::aliases::add(name, hashtree_config::DEFAULT_SOCIALGRAPH_ENTRYPOINT_NPUB)?;
+                config.aliases = haps::aliases::read()?;
+            }
+            eprintln!(
+                "Starting point: Sirius Business Ltd (maintainer). Use `haps starting-point` to inspect or change it; `haps starting-point --clear` disables it."
+            );
+        }
+        save_config(&home, &config)?;
+    }
     let mut trust = load_trust(&home, &config)?;
+    match &mut cli.command {
+        Command::Install { package, .. }
+        | Command::Info { package, .. }
+        | Command::Update { package, .. }
+        | Command::Run { package, .. }
+        | Command::Path { package }
+        | Command::Rollback { package }
+        | Command::Remove { package }
+        | Command::Comment { package, .. }
+        | Command::Comments { package, .. } => {
+            *package = resolve_package(&config, package)?;
+        }
+        _ => {}
+    }
     let installation = Installation::new(home.clone())?;
     match cli.command {
         Command::Target => unreachable!(),
+        Command::StartingPoint { public_key, clear } => {
+            if clear {
+                config.starting_point = None;
+                save_config(&home, &config)?;
+                println!("Starting point disabled");
+            } else if let Some(key) = public_key {
+                config.starting_point = Some(resolve_key(&config, &key)?);
+                save_config(&home, &config)?;
+            }
+            println!("{}", config.starting_point.as_deref().unwrap_or("none"));
+        }
+        Command::Alias { action } => match action {
+            AliasAction::Add { name, public_key } => {
+                let key = ensure_public_key(&public_key)?;
+                haps::aliases::add(&name, &key)?;
+                println!("{name}: {key}");
+            }
+            AliasAction::List => println!("{}", serde_json::to_string_pretty(&config.aliases)?),
+            AliasAction::Remove { name } => {
+                haps::aliases::remove(&name)?;
+            }
+        },
         Command::Identity { action } => match action {
             IdentityAction::Init => {
                 let path = home.join("identity.key");
@@ -474,6 +669,39 @@ async fn execute(cli: Cli) -> Result<u8> {
             let release = repo.publish(&keys, spec, &payload).await?;
             println!("{}", serde_json::to_string_pretty(&release.event)?);
         }
+        Command::Build {
+            repository,
+            rev,
+            recipe,
+            execute,
+            install,
+        } => {
+            let checkout = haps::build::Checkout::fetch(
+                SourceInfo {
+                    git: repository,
+                    rev,
+                },
+                &recipe,
+                &home.join("builds"),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&checkout.recipe)?);
+            if execute {
+                let keys = own_keys(&home, &config)?;
+                let payload = checkout.execute()?;
+                let repo = Repository::local(home.join("built-packages"))?;
+                let release = repo
+                    .publish(&keys, checkout.recipe.package.clone(), &payload)
+                    .await?;
+                if install {
+                    installation.install(&repo, &release).await?;
+                }
+                println!("Built {} {}", release.identity(), release.event.id);
+            } else {
+                println!(
+                    "Preview only. Add --execute to run these commands with your user permissions; add --install to activate the result. Build recipes are not sandboxed."
+                );
+            }
+        }
         Command::Source { action } => match action {
             SourceAction::Add {
                 name,
@@ -485,17 +713,19 @@ async fn execute(cli: Cli) -> Result<u8> {
                     !config.sources.contains_key(&name),
                     "source already exists; remove it explicitly before replacing its publisher pin"
                 );
-                let author = ensure_public_key(&author)?;
-                let location =
-                    if location.starts_with("https://") || location.starts_with("http://") {
-                        location
-                    } else {
-                        Path::new(&location)
-                            .canonicalize()?
-                            .to_str()
-                            .context("non-UTF8 source path")?
-                            .to_string()
-                    };
+                let author = resolve_key(&config, &author)?;
+                let location = if location.starts_with("https://")
+                    || location.starts_with("http://")
+                    || location.starts_with("htree://")
+                {
+                    location
+                } else {
+                    Path::new(&location)
+                        .canonicalize()?
+                        .to_str()
+                        .context("non-UTF8 source path")?
+                        .to_string()
+                };
                 let repo = Repository::open(&location, &home.join("cache"))?;
                 let snapshot = repo.catalog(&author).await?;
                 config.sources.insert(
@@ -535,6 +765,8 @@ async fn execute(cli: Cli) -> Result<u8> {
                 candidates(&home, &mut config, None).await?,
                 &package,
                 version.as_ref(),
+                &config.aliases,
+                &trust,
             )?;
             print_release(&candidate.release, &trust)?;
         }
@@ -548,6 +780,8 @@ async fn execute(cli: Cli) -> Result<u8> {
                 candidates(&home, &mut config, None).await?,
                 &package,
                 version.as_ref(),
+                &config.aliases,
+                &trust,
             )?;
             let require_attestations = require_attestations.max(
                 installation
@@ -579,6 +813,8 @@ async fn execute(cli: Cli) -> Result<u8> {
                 candidates(&home, &mut config, None).await?,
                 &current.identity(),
                 None,
+                &config.aliases,
+                &trust,
             )?;
             trust.authorize(
                 &candidate.release,
@@ -606,6 +842,21 @@ async fn execute(cli: Cli) -> Result<u8> {
             command,
             args,
         } => {
+            #[cfg(target_os = "macos")]
+            if command.is_none() {
+                let release = Release::verify(installation.receipt(&package)?.current)?;
+                if let Some(app) = release.data.package.app {
+                    let path = installation.path(&package)?.join(safe_path(&app)?);
+                    drop(guard);
+                    let status = std::process::Command::new("open")
+                        .arg("-a")
+                        .arg(path)
+                        .arg("--args")
+                        .args(args)
+                        .status()?;
+                    return Ok(if status.success() { 0 } else { 1 });
+                }
+            }
             let executable = installation.command(&package, command.as_deref())?;
             drop(guard);
             let status = std::process::Command::new(executable).args(args).status()?;
@@ -634,7 +885,7 @@ async fn execute(cli: Cli) -> Result<u8> {
         }
         Command::Follow { public_key, export } => {
             let keys = own_keys(&home, &config)?;
-            let public_key = nostr::PublicKey::parse(&public_key)?;
+            let public_key = nostr::PublicKey::parse(&resolve_key(&config, &public_key)?)?;
             let old = trust
                 .events()
                 .into_iter()

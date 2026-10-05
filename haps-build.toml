@@ -1,0 +1,14 @@
+[package]
+name = "haps"
+version = "0.1.0"
+target = "host"
+description = "Hashtree Package System"
+
+[package.commands]
+haps = "bin/haps{exe}"
+
+[build]
+commands = [["cargo", "build", "--release", "--locked"]]
+
+[build.artifacts]
+"bin/haps{exe}" = "target/release/haps{exe}"

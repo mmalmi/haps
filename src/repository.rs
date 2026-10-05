@@ -57,6 +57,29 @@ impl Repository {
         })
     }
     pub fn open(location: &str, cache: &Path) -> Result<Self> {
+        if location.starts_with("htree://") {
+            // Catalog transport is a public hashtree directory. Git source builds
+            // use git-remote-htree instead; neither path bypasses signature checks.
+            let parsed = reqwest::Url::parse(location)?;
+            ensure!(
+                parsed.username().is_empty()
+                    && parsed.password().is_none()
+                    && parsed.query().is_none()
+                    && parsed.fragment().is_none(),
+                "catalog URL must be a public hashtree directory"
+            );
+            let owner = parsed.host_str().context("hashtree publisher is missing")?;
+            nostr::PublicKey::parse(owner)
+                .context("hashtree catalog URLs require an explicit public key")?;
+            ensure!(
+                parsed.path() != "/" && !parsed.path().is_empty(),
+                "hashtree catalog name is missing"
+            );
+            return Self::open(
+                &format!("https://upload.iris.to/{owner}{}", parsed.path()),
+                cache,
+            );
+        }
         if location.starts_with("http://") || location.starts_with("https://") {
             let mut url = reqwest::Url::parse(location)?;
             ensure!(

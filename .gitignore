@@ -2,3 +2,5 @@
 /work/
 *.key
 .DS_Store
+/.wrangler/
+/website/.wrangler/

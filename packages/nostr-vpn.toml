@@ -1,0 +1,12 @@
+name = "nostr-vpn"
+version = "4.1.17"
+target = "aarch64-apple-darwin"
+description = "Private mesh networking and a marketplace for buying and selling VPN bandwidth."
+app = "Nostr VPN.app"
+
+[commands]
+nostr-vpn = "Nostr VPN.app/Contents/MacOS/Nostr VPN"
+
+[source]
+git = "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-vpn"
+rev = "c790e3bb6ac0df2ccb03cf573b9fd3b5384b154d"

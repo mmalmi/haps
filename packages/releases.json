@@ -1,0 +1,32 @@
+[
+  {
+    "package": "iris-chat",
+    "version": "2026.10.502",
+    "target": "aarch64-apple-darwin",
+    "upstream_tag": "v2026.10.5.2",
+    "upstream_asset": "iris-chat-v2026.10.5.2-macos-arm64.app.tar.gz",
+    "sha256": "edb4c855c36ac2f7893f4039edd1c16679553de22e06d15f2bb1657128114a26",
+    "release_id": "7a9e4a1a8471bdd235d6804047cc3b44674acb584f6db243193a2ecde7b0abb2",
+    "publisher": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
+  },
+  {
+    "package": "iris-drive",
+    "version": "0.1.37",
+    "target": "aarch64-apple-darwin",
+    "upstream_tag": "v0.1.37",
+    "upstream_asset": "iris-drive-v0.1.37-macos-arm64.app.tar.gz",
+    "sha256": "33cd9b400c11ac6b69157364d10664e69a2ae9920a3cddaa3010371a064469b3",
+    "release_id": "b35c11cf6b28e270c425b23d5eb75d9c64aa7559922f013710d93cd559e295dc",
+    "publisher": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
+  },
+  {
+    "package": "nostr-vpn",
+    "version": "4.1.17",
+    "target": "aarch64-apple-darwin",
+    "upstream_tag": "v4.1.17",
+    "upstream_asset": "nostr-vpn-v4.1.17-macos-arm64.app.tar.gz",
+    "sha256": "f838beb472006f54270aab4844b296a934a9aac2466bea7414dc819dc21e1061",
+    "release_id": "cc5af48094b74cea8aa6a330fdc52f9e8176641f7186984d8784b30304b1e3b4",
+    "publisher": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
+  }
+]

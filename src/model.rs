@@ -25,6 +25,42 @@ pub struct PackageSpec {
     pub description: String,
     #[serde(default)]
     pub commands: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceInfo>,
+    /// Relative macOS application bundle path, launched with Launch Services.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SourceInfo {
+    pub git: String,
+    pub rev: String,
+}
+
+impl SourceInfo {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.git.starts_with("https://")
+                || self.git.starts_with("htree://")
+                || self.git.starts_with("file://"),
+            "source must use an https://, htree://, or file:// Git URL"
+        );
+        let url = reqwest::Url::parse(&self.git)?;
+        ensure!(
+            url.username().is_empty()
+                && url.password().is_none()
+                && url.query().is_none()
+                && url.fragment().is_none(),
+            "source URL cannot contain credentials, query, or fragment"
+        );
+        ensure!(
+            [40, 64].contains(&self.rev.len()) && self.rev.bytes().all(|b| b.is_ascii_hexdigit()),
+            "source revision must be a full Git commit hash"
+        );
+        Ok(())
+    }
 }
 
 impl PackageSpec {
@@ -34,6 +70,16 @@ impl PackageSpec {
         ensure!(self.version.to_string().len() <= 100, "version is too long");
         ensure!(self.description.len() <= 4096, "description is too long");
         ensure!(self.commands.len() <= 100, "too many commands");
+        if let Some(source) = &self.source {
+            source.validate()?;
+        }
+        if let Some(app) = &self.app {
+            safe_path(app)?;
+            ensure!(
+                app.ends_with(".app") && self.target.ends_with("apple-darwin"),
+                "app must identify a macOS .app bundle"
+            );
+        }
         for (name, path) in &self.commands {
             safe_name(name)?;
             safe_path(path)?;
@@ -181,6 +227,14 @@ impl Manifest {
                 .find(|f| &f.path == path)
                 .context("command is missing from package")?;
             ensure!(file.executable, "command is not executable: {path}");
+        }
+        if let Some(app) = &spec.app {
+            ensure!(
+                self.files
+                    .iter()
+                    .any(|f| f.path == format!("{app}/Contents/Info.plist")),
+                "application bundle Info.plist is missing"
+            );
         }
         Ok(())
     }

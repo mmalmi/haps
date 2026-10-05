@@ -1,0 +1,12 @@
+name = "iris-chat"
+version = "2026.10.502"
+target = "aarch64-apple-darwin"
+description = "Private messaging without a phone number."
+app = "Iris Chat.app"
+
+[commands]
+iris-chat = "Iris Chat.app/Contents/MacOS/Iris Chat"
+
+[source]
+git = "htree://npub1399g0q2gtwjcglyjcg3jw3rcllqhm375pwases5hkvqa56aqe5wsz2eaap/iris-chat-rs"
+rev = "e0670cb83d55c70843d559bf3567ba3c586f2a48"

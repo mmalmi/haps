@@ -1,0 +1,12 @@
+name = "iris-drive"
+version = "0.1.37"
+target = "aarch64-apple-darwin"
+description = "Private file sync across your devices."
+app = "Iris Drive.app"
+
+[commands]
+iris-drive = "Iris Drive.app/Contents/MacOS/Iris Drive"
+
+[source]
+git = "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-drive"
+rev = "5f8c147ebd1b354c61a1be25f3481bdccb2989e1"

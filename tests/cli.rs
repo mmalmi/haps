@@ -13,6 +13,8 @@ use tempfile::tempdir;
 
 fn cli(home: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_haps"))
+        .env("HTREE_CONFIG_DIR", home.join("hashtree"))
+        .env("HAPS_NO_DEFAULTS", "true")
         .arg("--home")
         .arg(home)
         .args(args)
@@ -315,14 +317,81 @@ fn duplicate_names_require_a_publisher_and_updates_keep_that_publisher() {
             ],
         );
         ok(&reader, &["follow", &key]);
+        ok(&reader, &["alias", "add", name, &key]);
         authors.push(key);
     }
+    let shared_aliases = reader.join("hashtree/aliases");
+    assert!(
+        fs::read_to_string(shared_aliases)
+            .unwrap()
+            .contains(" alice")
+    );
+    assert!(
+        !cli(&reader, &["alias", "add", "alice", &authors[1]])
+            .status
+            .success()
+    );
+    // A direct follow must sort before an unknown author regardless of alias order.
+    let keys =
+        nostr::Keys::parse(&fs::read_to_string(reader.join("identity.key")).unwrap()).unwrap();
+    let follows = nostr::EventBuilder::new(nostr::Kind::ContactList, "")
+        .tags([nostr::Tag::public_key(
+            nostr::PublicKey::parse(&authors[1]).unwrap(),
+        )])
+        .custom_created_at(nostr::Timestamp::from(
+            nostr::Timestamp::now().as_secs() + 10,
+        ))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let follow_file = tmp.path().join("follows.json");
+    fs::write(&follow_file, serde_json::to_vec(&follows).unwrap()).unwrap();
+    ok(&reader, &["import", follow_file.to_str().unwrap()]);
     let result = cli(&reader, &["install", "same"]);
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("multiple publishers"));
-    ok(&reader, &["install", &format!("{}/same", authors[0])]);
-    ok(&reader, &["update", "same"]);
+    let choices = String::from_utf8_lossy(&result.stderr);
+    assert!(choices.contains("multiple publishers"));
+    assert!(choices.find("bob/same").unwrap() < choices.find("alice/same").unwrap());
+    ok(&reader, &["install", "alice/same", "--allow-untrusted"]);
+    ok(&reader, &["update", "alice/same", "--allow-untrusted"]);
+    use nostr::nips::nip19::ToBech32;
+    let npub = nostr::PublicKey::parse(&authors[0])
+        .unwrap()
+        .to_bech32()
+        .unwrap();
+    assert!(ok(&reader, &["info", &format!("{npub}/same")]).contains(&authors[0]));
     let list = ok(&reader, &["list"]);
     assert!(list.contains(&authors[0]));
     assert!(!list.contains(&authors[1]));
+}
+
+#[test]
+fn fresh_install_has_a_visible_replaceable_maintainer_starting_point() {
+    let tmp = tempdir().unwrap();
+    let home = tmp.path().join("home");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_haps"))
+            .env("HTREE_CONFIG_DIR", tmp.path().join("hashtree"))
+            .env_remove("HAPS_NO_DEFAULTS")
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let first = run(&["starting-point"]);
+    assert!(first.status.success());
+    assert!(String::from_utf8_lossy(&first.stderr).contains("Sirius Business Ltd"));
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.join("config.json")).unwrap()).unwrap();
+    assert!(
+        config["sources"]["iris"]["location"]
+            .as_str()
+            .unwrap()
+            .starts_with("htree://")
+    );
+    assert!(run(&["starting-point", "--clear"]).status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&run(&["starting-point"]).stdout).trim(),
+        "none"
+    );
 }

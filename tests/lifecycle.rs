@@ -17,6 +17,8 @@ fn package(root: &std::path::Path, version: &str) -> PackageSpec {
         target: target().into(),
         description: "Friendly hello tool".into(),
         commands: BTreeMap::from([("hello".into(), "bin/hello".into())]),
+        source: None,
+        app: None,
     }
 }
 
@@ -294,4 +296,21 @@ fn paths_cannot_escape_on_any_supported_os() {
         assert!(haps::model::safe_path(path).is_err(), "accepted {path}");
     }
     assert!(haps::model::safe_path("Hello.app/Contents/MacOS/hello").is_ok());
+}
+
+#[test]
+fn starting_point_can_be_replaced_or_disabled_without_fabricated_events() -> anyhow::Result<()> {
+    let me = Keys::generate();
+    let first = Keys::generate().public_key().to_hex();
+    let next = Keys::generate().public_key().to_hex();
+    let mut trust = Trust::new(me.public_key().to_hex());
+    trust.set_starting_point(Some(first.clone()))?;
+    assert_eq!(trust.distance(&first), Some(1));
+    assert!(trust.events().is_empty());
+    trust.set_starting_point(Some(next.clone()))?;
+    assert_eq!(trust.distance(&first), None);
+    assert_eq!(trust.distance(&next), Some(1));
+    trust.set_starting_point(None)?;
+    assert_eq!(trust.distance(&next), None);
+    Ok(())
 }

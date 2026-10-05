@@ -33,6 +33,7 @@ pub struct Trust {
     graph: SocialGraph,
     events: BTreeMap<String, Event>,
     reachable: BTreeSet<String>,
+    starting_point: Option<String>,
 }
 
 impl Trust {
@@ -42,6 +43,7 @@ impl Trust {
             reachable: BTreeSet::from([root.clone()]),
             root,
             events: BTreeMap::new(),
+            starting_point: None,
         }
     }
     pub fn ingest(&mut self, event: Event) -> Result<()> {
@@ -78,6 +80,9 @@ impl Trust {
             return Ok(());
         }
         self.events.insert(key, event);
+        self.rebuild()
+    }
+    fn rebuild(&mut self) -> Result<()> {
         // Rebuild from the latest signed records, independent of import order.
         self.graph = SocialGraph::new(&self.root);
         for event in self
@@ -98,6 +103,17 @@ impl Trust {
                 true,
                 1.0,
             );
+        }
+        self.apply_starting_point()
+    }
+    /// An explicit local trust preference, not a fabricated signed follow event.
+    pub fn set_starting_point(&mut self, key: Option<String>) -> Result<()> {
+        self.starting_point = key;
+        self.rebuild()
+    }
+    fn apply_starting_point(&mut self) -> Result<()> {
+        if let Some(key) = &self.starting_point {
+            self.graph.add_positive_relation(&self.root, key, 0)?;
         }
         self.graph.recalculate_follow_distances();
         self.reachable = self
