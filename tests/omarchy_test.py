@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shlex
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -40,6 +41,11 @@ class MenuTests(unittest.TestCase):
             with patch.dict(os.environ, {'HOME': str(root)}):
                 omarchy.install(str(executable), str(home))
                 first = menu.read_text()
+                for action in ['search', 'install', 'list', 'update', 'remove']:
+                    row = omarchy.parse(first)[1]['haps.' + action]
+                    command = shlex.split(row['action'])
+                    self.assertEqual(command[:2], ['omarchy-launch-or-focus-tui', '--app-id=to.hashtree.haps.' + action])
+                    self.assertEqual(shlex.split(command[2]), [str(home / 'integrations/omarchy-menu'), action])
                 omarchy.install(str(executable), str(home))
                 self.assertEqual(first, menu.read_text())
                 helper = home / 'integrations/omarchy-menu'

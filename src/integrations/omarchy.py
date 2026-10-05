@@ -78,7 +78,7 @@ def install(executable, home, remove=False):
     rows = {'haps': {'label': 'Haps', 'icon': '󰏗', 'description': 'Packages from your social graph'}}
     for action, label in [('search', 'Find packages'), ('install', 'Install a package'), ('list', 'Installed packages'), ('update', 'Update a package'), ('remove', 'Remove a package')]:
         command = shlex.join([str(helper), action])
-        rows['haps.' + action] = {'label': label, 'action': shlex.join(['omarchy-launch-or-focus-tui', command])}
+        rows['haps.' + action] = {'label': label, 'action': shlex.join(['omarchy-launch-or-focus-tui', '--app-id=to.hashtree.haps.' + action, command])}
     changed = merge(raw, {} if remove else rows)
     backup = menu.with_suffix('.jsonc.haps-backup')
     if menu.exists() and not backup.exists():

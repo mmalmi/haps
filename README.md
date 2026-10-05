@@ -116,7 +116,7 @@ This uses Python 3, Bash, and Omarchy's terminal launcher and `fzf`. It preserve
 existing menu entries/comments and saves the original menu file as
 `omarchy-menu.jsonc.haps-backup`. All actions use the same Haps home and trust
 checks as the CLI. It adds no automatic trust overrides or background updates.
-Use Haps 0.1.1 or newer for the Linux catalog and menu integration.
+Use Haps 0.1.2 or newer for the Linux catalog and menu integration.
 
 ### Package a program
 
