@@ -59,7 +59,7 @@ To inspect first or pin a version:
 ```sh
 curl -fsSL https://haps.hashtree.cc/install.sh -o install-haps.sh
 less install-haps.sh
-sh install-haps.sh --version v0.1.5 --bin-dir "$HOME/.local/bin"
+sh install-haps.sh --version v0.1.4 --bin-dir "$HOME/.local/bin"
 ```
 
 [Windows x64 zip and all release downloads](#downloads) are also available. Extract `haps.exe` into a directory on your `PATH`.
@@ -144,36 +144,39 @@ Use Haps 0.1.2 or newer for the Linux catalog and menu integration.
 
 ### Downloads
 
-Prebuilt Haps 0.1.5 archives, hosted on Hashtree:
+Prebuilt Haps 0.1.4 archives, hosted on Hashtree:
 
 | Platform | Archive |
 | --- | --- |
-| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-aarch64-apple-darwin.tar.gz) |
-| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-x86_64-apple-darwin.tar.gz) |
-| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-aarch64-unknown-linux-gnu.tar.gz) |
-| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-x86_64-pc-windows-msvc.zip) |
+| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/assets/haps-v0.1.4-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/assets/haps-v0.1.4-x86_64-apple-darwin.tar.gz) |
+| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/assets/haps-v0.1.4-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/assets/haps-v0.1.4-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/assets/haps-v0.1.4-x86_64-pc-windows-msvc.zip) |
 
-The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/release.json) records archive sizes and SHA-256 checksums.
+The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/release.json) records archive sizes and SHA-256 checksums.
 
 ### Publish your package
 
-Start with a built program and stage its runtime files in `stage/`:
+Start with a built program, stage its runtime files in `stage/`, and create
+`haps.toml` using the [publishing guide](PUBLISHING.md):
 
 ```sh
-haps init --name my-app --command bin/my-app --payload stage
 haps identity init # once; keep the same key for future releases
 haps pack haps.toml --payload stage --out catalog
 ```
 
-`init` writes an editable manifest for your platform without prompting or replacing
-an existing file. `pack` signs a local catalog. Test it locally, then publish it
+`pack` signs a local catalog. Test it locally, then publish it
 with `htree add catalog --publish my-packages` or serve the directory over HTTPS.
 
 The **[publishing guide](PUBLISHING.md)** covers staging, testing, Hashtree setup,
 sharing install commands, multiple platforms, ignore rules, and updates. No
 registry account or submission is required. Readers add your catalog explicitly;
 Haps does not yet discover every published catalog automatically.
+
+The current source checkout adds `haps init` (version 0.1.5) to generate a manifest
+without prompts. Its prebuilt release is pending platform CI; the guide also
+covers the manual manifest flow supported by the current release.
 
 ### Names and shared aliases
 

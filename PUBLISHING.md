@@ -1,8 +1,8 @@
 # Publish your package
 
 Haps publishes software under your Nostr public key. There is no registry account,
-submission queue, or globally reserved package name. This guide uses Haps 0.1.5
-or newer and an already-built program called `my-app`.
+submission queue, or globally reserved package name. This guide uses an already-built program called `my-app`. The manual manifest
+flow works with Haps 0.1.4; the optional `init` shortcut requires 0.1.5.
 
 ## 1. Stage the files
 
@@ -15,27 +15,18 @@ cp path/to/my-app stage/bin/my-app
 ```
 
 On Windows, use `New-Item -ItemType Directory -Force stage/bin` and
-`Copy-Item path/to/my-app.exe stage/bin/my-app.exe`, then pass
-`--command bin/my-app.exe` below. Include required DLLs and resources in the
+`Copy-Item path/to/my-app.exe stage/bin/my-app.exe`, and set the command path in the manifest to
+`bin/my-app.exe`. Include required DLLs and resources in the
 locations your app expects. Haps does not resolve system dependencies yet.
 
 For a macOS app, stage the whole bundle as `stage/MyApp.app` and use
-`--app MyApp.app` instead of `--command`. The current package format supports
+`app = "MyApp.app"` in the manifest instead of `[commands]`. The current package format supports
 regular files and directories; bundles requiring symlinks are not supported.
 Preserve the app's platform signing when preparing it.
 
 ## 2. Create and check the manifest
 
-```sh
-haps init --name my-app --command bin/my-app --payload stage
-```
-
-This creates `haps.toml` outside the payload. It never overwrites an existing
-manifest, creates a signing identity, uploads files, or prompts for input.
-It checks that the declared executable (or bundle metadata) exists. Add `--json`
-for machine-readable output. Use `--out` for another manifest filename.
-
-Edit the generated metadata before packing:
+Create `haps.toml` outside the payload and fill in your app’s metadata:
 
 ```toml
 name = "my-app"
@@ -47,10 +38,23 @@ description = "What your app does"
 my-app = "bin/my-app"
 ```
 
-The target defaults to `haps target`. Use `--target` when packaging an executable
-built for another platform, and `--version` or `--description` to set metadata
-without editing the file. Package names use lowercase letters, numbers, hyphens,
-or underscores. Versions use SemVer. Unknown manifest fields are rejected.
+Use the target printed by `haps target`, or the platform you built for when
+cross-compiling. Package names use lowercase letters, numbers, hyphens, or
+underscores. Versions use SemVer. Unknown manifest fields are rejected.
+
+Haps 0.1.5 adds a shortcut that writes this editable manifest:
+
+```sh
+haps init --name my-app --command bin/my-app --payload stage
+```
+
+Until that version's prebuilt release is available, you can use the manual manifest
+above or install this source checkout with `cargo install --path . --locked`.
+`init` never overwrites an existing manifest, creates a signing identity, uploads
+files, or prompts for input. It checks that the executable (or bundle metadata)
+exists. The target defaults to this machine; override it with `--target`.
+Use `--version`, `--description`, and `--out` to set metadata and the output path,
+and add `--json` for machine-readable output. Review the description before packing.
 
 Linux GUI packages can also add launcher metadata:
 
