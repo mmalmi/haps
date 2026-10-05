@@ -10,6 +10,7 @@
   },
   "routes": [
     { "pattern": "haps.hashtree.cc", "custom_domain": true },
+    { "pattern": "haps.hashtree.cc/*", "zone_name": "hashtree.cc" },
     { "pattern": "haps.iris.to", "custom_domain": true }
   ]
 }
