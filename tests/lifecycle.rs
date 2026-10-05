@@ -19,6 +19,7 @@ fn package(root: &std::path::Path, version: &str) -> PackageSpec {
         commands: BTreeMap::from([("hello".into(), "bin/hello".into())]),
         source: None,
         app: None,
+        desktop: None,
     }
 }
 
@@ -368,4 +369,83 @@ async fn packing_honors_nested_gitignores_and_common_junk_without_parent_rules()
         "malformed ignore rules must fail packaging"
     );
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn desktop_launcher_tracks_install_update_rollback_and_removal() -> anyhow::Result<()> {
+    use haps::model::DesktopEntry;
+    let tmp = tempdir()?;
+    let home = tmp.path().join("home with spaces $ and %");
+    let entries = tmp.path().join("applications");
+    let installed = Installation::new(home.clone())?.with_desktop_dir(Some(entries.clone()));
+    let author = Keys::generate();
+    let repo = Repository::local(tmp.path().join("repo"))?;
+    let payload = tmp.path().join("payload");
+    let make = |version: &str| {
+        let mut spec = package(&payload, version);
+        fs::write(
+            payload.join("icon.svg"),
+            "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+        )
+        .unwrap();
+        spec.desktop = Some(DesktopEntry {
+            name: "Hello Desktop".into(),
+            command: "hello".into(),
+            icon: "icon.svg".into(),
+        });
+        spec
+    };
+    let first = repo.publish(&author, make("1.0.0"), &payload).await?;
+    installed.install(&repo, &first).await?;
+    let entry = entries.join(haps::desktop::filename(&home.canonicalize()?, &first));
+    let initial = fs::read_to_string(&entry)?;
+    assert!(initial.contains(&first.event.id.to_hex()));
+    assert!(initial.contains("Name=Hello\\sDesktop"));
+    // Reinstallation repairs a missing desktop entry without downloading again.
+    fs::remove_file(&entry)?;
+    installed.install(&repo, &first).await?;
+    assert_eq!(fs::read_to_string(&entry)?, initial);
+    let second = repo.publish(&author, make("1.1.0"), &payload).await?;
+    fs::write(&entry, "user edit")?;
+    assert!(installed.install(&repo, &second).await.is_err());
+    assert_eq!(installed.receipt("hello")?.current.id, first.event.id);
+    assert_eq!(fs::read_to_string(&entry)?, "user edit");
+    fs::write(&entry, &initial)?;
+    installed.install(&repo, &second).await?;
+    assert!(fs::read_to_string(&entry)?.contains(&second.event.id.to_hex()));
+    installed.rollback("hello")?;
+    assert_eq!(fs::read_to_string(&entry)?, initial);
+    installed.remove("hello")?;
+    assert!(!entry.exists());
+    // A publisher removing desktop metadata also removes the old launcher.
+    installed.install(&repo, &first).await?;
+    let third = repo
+        .publish(&author, package(&payload, "1.2.0"), &payload)
+        .await?;
+    installed.install(&repo, &third).await?;
+    assert!(!entry.exists());
+    Ok(())
+}
+
+#[test]
+fn desktop_metadata_rejects_injection_and_undeclared_commands() {
+    use haps::model::DesktopEntry;
+    let tmp = tempdir().unwrap();
+    let mut spec = package(tmp.path(), "1.0.0");
+    spec.target = "x86_64-unknown-linux-gnu".into();
+    spec.desktop = Some(DesktopEntry {
+        name: "Hello".into(),
+        command: "hello".into(),
+        icon: "icon.png".into(),
+    });
+    assert!(spec.validate().is_ok());
+    spec.desktop.as_mut().unwrap().name = "Hello\nExec=evil".into();
+    assert!(spec.validate().is_err());
+    spec.desktop.as_mut().unwrap().name = "Hello".into();
+    spec.desktop.as_mut().unwrap().command = "sh -c evil".into();
+    assert!(spec.validate().is_err());
+    spec.desktop.as_mut().unwrap().command = "hello".into();
+    spec.desktop.as_mut().unwrap().icon = "../icon.png".into();
+    assert!(spec.validate().is_err());
 }

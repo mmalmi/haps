@@ -4,3 +4,5 @@
 .DS_Store
 /.wrangler/
 /website/.wrangler/
+
+__pycache__/

@@ -30,6 +30,17 @@ pub struct PackageSpec {
     /// Relative macOS application bundle path, launched with Launch Services.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
+    /// Linux launcher metadata; commands are declared separately, never shell snippets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<DesktopEntry>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopEntry {
+    pub name: String,
+    pub command: String,
+    pub icon: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -78,6 +89,27 @@ impl PackageSpec {
             ensure!(
                 app.ends_with(".app") && self.target.ends_with("apple-darwin"),
                 "app must identify a macOS .app bundle"
+            );
+        }
+        if let Some(desktop) = &self.desktop {
+            ensure!(
+                self.target.contains("-linux-"),
+                "desktop entries require a Linux target"
+            );
+            ensure!(
+                !desktop.name.trim().is_empty()
+                    && desktop.name.len() <= 200
+                    && !desktop.name.chars().any(char::is_control),
+                "invalid desktop name"
+            );
+            ensure!(
+                self.commands.contains_key(&desktop.command),
+                "desktop command is not declared"
+            );
+            safe_path(&desktop.icon)?;
+            ensure!(
+                desktop.icon.ends_with(".png") || desktop.icon.ends_with(".svg"),
+                "desktop icon must be PNG or SVG"
             );
         }
         for (name, path) in &self.commands {
@@ -227,6 +259,12 @@ impl Manifest {
                 .find(|f| &f.path == path)
                 .context("command is missing from package")?;
             ensure!(file.executable, "command is not executable: {path}");
+        }
+        if let Some(desktop) = &spec.desktop {
+            ensure!(
+                self.files.iter().any(|f| f.path == desktop.icon),
+                "desktop icon is missing from package"
+            );
         }
         if let Some(app) = &spec.app {
             ensure!(

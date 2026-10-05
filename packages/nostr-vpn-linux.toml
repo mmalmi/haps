@@ -1,0 +1,17 @@
+name = "nostr-vpn"
+version = "4.1.17"
+target = "x86_64-unknown-linux-gnu"
+description = "Private mesh networking and a marketplace for buying and selling VPN bandwidth."
+
+[commands]
+nostr-vpn = "usr/bin/nostr-vpn"
+nvpn = "usr/bin/nvpn"
+
+[desktop]
+name = "Nostr VPN"
+command = "nostr-vpn"
+icon = "usr/share/icons/hicolor/512x512/apps/nostr-vpn.png"
+
+[source]
+git = "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-vpn"
+rev = "c790e3bb6ac0df2ccb03cf573b9fd3b5384b154d"

@@ -1,0 +1,16 @@
+name = "iris-chat"
+version = "2026.10.502"
+target = "x86_64-unknown-linux-gnu"
+description = "Private messaging without a phone number."
+
+[commands]
+iris-chat = "usr/bin/iris-chat"
+
+[desktop]
+name = "Iris Chat"
+command = "iris-chat"
+icon = "usr/share/icons/hicolor/512x512/apps/iris-chat.png"
+
+[source]
+git = "htree://npub1399g0q2gtwjcglyjcg3jw3rcllqhm375pwases5hkvqa56aqe5wsz2eaap/iris-chat-rs"
+rev = "e0670cb83d55c70843d559bf3567ba3c586f2a48"

@@ -115,6 +115,12 @@ enum Command {
     Path {
         package: String,
     },
+    /// Add a small Haps submenu to Omarchy v4 (requires Python 3 and fzf).
+    Omarchy {
+        /// Remove only the menu entries installed by Haps.
+        #[arg(long)]
+        remove: bool,
+    },
     List,
     /// Activate the previous installed version.
     Rollback {
@@ -866,6 +872,25 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 .unwrap_or(1));
         }
         Command::Path { package } => println!("{}", installation.path(&package)?.display()),
+        Command::Omarchy { remove } => {
+            ensure!(
+                cfg!(target_os = "linux"),
+                "Omarchy integration requires Linux"
+            );
+            let mut process = std::process::Command::new("python3");
+            process
+                .arg("-c")
+                .arg(include_str!("integrations/omarchy.py"))
+                .arg(std::env::current_exe()?)
+                .arg(&home);
+            if remove {
+                process.arg("--remove");
+            }
+            ensure!(
+                process.status()?.success(),
+                "Omarchy menu integration failed"
+            );
+        }
         Command::List => {
             for (id, receipt) in installation.receipts()? {
                 let release = Release::verify(receipt.current)?;

@@ -56,7 +56,8 @@ Website: [haps.hashtree.cc](https://haps.hashtree.cc). Source is mirrored on
 
 Fresh configurations include the Iris catalog and **Sirius Business Ltd**, the
 project-maintenance identity, as a local social-graph starting point. The first
-Iris Chat, Iris Drive, and Nostr VPN GUI packages target Apple silicon Macs.
+Iris Chat, Iris Drive, and Nostr VPN GUI packages target Apple silicon Macs and
+x86-64 Linux (current Arch/Omarchy).
 Inspect the starting point with `haps starting-point`, replace it with
 `haps starting-point PUBLIC_KEY`, or disable it with `haps starting-point --clear`.
 It is a local trust preference, not a published follow event. Explicit local mutes
@@ -80,6 +81,43 @@ State defaults to the operating system's local application-data directory under
 `haps`. Set `HAPS_HOME` or pass `--home` to isolate a publisher, reader, or test.
 `haps target` prints the exact build target accepted on this machine.
 
+### Linux desktop and Omarchy
+
+Linux GUI packages register a launcher in `$XDG_DATA_HOME/applications` (normally
+`~/.local/share/applications`). Omarchy, GNOME, and other desktop launchers can
+then discover them. Updates and rollbacks switch the launcher; removal removes
+it. Publisher-qualified, installation-specific filenames prevent name collisions.
+Reinstalling repairs a missing entry. Haps refuses to overwrite externally edited
+entries. Icons and executables stay inside the verified package directory.
+
+For the Iris apps on current Arch/Omarchy, install system libraries first:
+
+```sh
+sudo pacman -S --needed libadwaita fuse3 gst-libav gst-plugin-pipewire gst-plugins-base gst-plugins-good xdg-utils zbar curl
+haps install iris-chat
+haps install iris-drive
+haps install nostr-vpn
+```
+
+These Linux binaries require a recent distribution (Iris Chat requires glibc
+2.43 or newer). Haps does not yet resolve system dependencies or run installer
+hooks. Drive and VPN include their companion CLI binaries; system service setup
+and privileged VPN operations remain the apps' responsibility.
+
+To add Find, Install, Installed, Update, and Remove to the **Omarchy v4** menu:
+
+```sh
+haps omarchy
+# Undo the menu integration:
+haps omarchy --remove
+```
+
+This uses Python 3, Bash, and Omarchy's terminal launcher and `fzf`. It preserves
+existing menu entries/comments and saves the original menu file as
+`omarchy-menu.jsonc.haps-backup`. All actions use the same Haps home and trust
+checks as the CLI. It adds no automatic trust overrides or background updates.
+Use Haps 0.1.1 or newer for the Linux catalog and menu integration.
+
 ### Package a program
 
 Stage only the files intended for distribution in a separate directory, for
@@ -100,6 +138,15 @@ description = "A friendly greeting tool"
 
 [commands]
 hello = "bin/hello"
+```
+
+Linux GUI manifests can add signed launcher metadata:
+
+```toml
+[desktop]
+name = "Example"
+command = "hello" # key from [commands]; no shell command or extra arguments
+icon = "share/icons/example.png" # packaged PNG or SVG
 ```
 
 On Windows the command path would normally end in `.exe`. Names, paths, size
@@ -338,7 +385,8 @@ Remaining work, in order:
 4. Python, Node, and Rust adapters with their own compatibility and resolution tests.
 
 Current payloads support regular files only: symbolic links, special files, extended
-attributes, installer packages, and OS integrations are rejected or unsupported.
+attributes, and installer packages are rejected or unsupported. OS integration
+is currently limited to Linux desktop launchers and the optional Omarchy menu.
 Only bundles whose required files and metadata fit this format can be published;
 verify each installed macOS bundle with `codesign --verify --deep --strict`.
 Native code is not sandboxed. No build or install hooks

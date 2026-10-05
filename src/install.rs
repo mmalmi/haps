@@ -21,12 +21,58 @@ pub struct Receipt {
 
 pub struct Installation {
     home: PathBuf,
+    desktop_dir: Option<PathBuf>,
 }
 
 impl Installation {
     pub fn new(home: PathBuf) -> Result<Self> {
         fs::create_dir_all(&home)?;
-        Ok(Self { home })
+        let desktop_dir = if cfg!(target_os = "linux") {
+            dirs::data_dir().map(|p| p.join("applications"))
+        } else {
+            None
+        };
+        Ok(Self {
+            home: home.canonicalize()?,
+            desktop_dir,
+        })
+    }
+    /// Override desktop registration for isolated installations and tests.
+    pub fn with_desktop_dir(mut self, directory: Option<PathBuf>) -> Self {
+        self.desktop_dir = directory;
+        self
+    }
+    fn save_change(
+        &self,
+        before: Option<&Event>,
+        after: Option<&Event>,
+        receipts: &BTreeMap<String, Receipt>,
+    ) -> Result<()> {
+        let Some(directory) = &self.desktop_dir else {
+            return self.save(receipts);
+        };
+        let old = before.cloned().map(Release::verify).transpose()?;
+        let new = after.cloned().map(Release::verify).transpose()?;
+        let release = new
+            .as_ref()
+            .or(old.as_ref())
+            .context("missing desktop release")?;
+        let old_text = old
+            .as_ref()
+            .map(|r| crate::desktop::render(r, &self.version_dir(r)))
+            .transpose()?
+            .flatten();
+        let new_text = new
+            .as_ref()
+            .map(|r| crate::desktop::render(r, &self.version_dir(r)))
+            .transpose()?
+            .flatten();
+        crate::desktop::transaction(
+            &directory.join(crate::desktop::filename(&self.home, release)),
+            old_text.as_deref(),
+            new_text.as_deref(),
+            || self.save(receipts),
+        )
     }
     pub fn receipts(&self) -> Result<BTreeMap<String, Receipt>> {
         let file = self.home.join("installed.json");
@@ -76,6 +122,8 @@ impl Installation {
             commands
                 .get(command)
                 .context("command not provided by this package")?
+        } else if let Some(desktop) = &release.data.package.desktop {
+            &commands[&desktop.command]
         } else if commands.len() == 1 {
             commands.values().next().unwrap()
         } else {
@@ -109,7 +157,7 @@ impl Installation {
             let old = Release::verify(previous.clone())?;
             if old.event.id == release.event.id {
                 receipts.get_mut(&id).unwrap().minimum_attestations = minimum_attestations;
-                self.save(&receipts)?;
+                self.save_change(Some(previous), Some(&release.event), &receipts)?;
                 return Ok(());
             }
             ensure!(
@@ -167,12 +215,12 @@ impl Installation {
         receipts.insert(
             id,
             Receipt {
-                current: release.event,
-                previous,
+                current: release.event.clone(),
+                previous: previous.clone(),
                 minimum_attestations,
             },
         );
-        self.save(&receipts)?;
+        self.save_change(previous.as_ref(), Some(&release.event), &receipts)?;
         Ok(())
     }
     pub fn rollback(&self, name: &str) -> Result<()> {
@@ -194,19 +242,19 @@ impl Installation {
         receipts.insert(
             id,
             Receipt {
-                current: previous,
-                previous: Some(current),
+                current: previous.clone(),
+                previous: Some(current.clone()),
                 minimum_attestations,
             },
         );
-        self.save(&receipts)
+        self.save_change(Some(&current), Some(&previous), &receipts)
     }
     pub fn remove(&self, name: &str) -> Result<()> {
         let _guard = lock(&self.home.join(".install.lock"))?;
         let mut receipts = self.receipts()?;
         let id = Self::find(&receipts, name)?.0.clone();
-        receipts.remove(&id);
-        self.save(&receipts)
+        let removed = receipts.remove(&id).unwrap();
+        self.save_change(Some(&removed.current), None, &receipts)
     }
 }
 

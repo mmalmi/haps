@@ -1,6 +1,6 @@
 [package]
 name = "haps"
-version = "0.1.0"
+version = "0.1.1"
 target = "host"
 description = "Hashtree Package System"
 

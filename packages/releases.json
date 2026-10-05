@@ -28,5 +28,35 @@
     "sha256": "f838beb472006f54270aab4844b296a934a9aac2466bea7414dc819dc21e1061",
     "release_id": "cc5af48094b74cea8aa6a330fdc52f9e8176641f7186984d8784b30304b1e3b4",
     "publisher": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
+  },
+  {
+    "package": "iris-chat",
+    "version": "2026.10.502",
+    "target": "x86_64-unknown-linux-gnu",
+    "upstream_tag": "v2026.10.5.2",
+    "upstream_asset": "iris-chat-v2026.10.5.2-linux-x64.deb",
+    "sha256": "7bb7c5b2d6d8ce1f5ca02d43166a59b277b3ba3d237934c9a5e14973b4965e44",
+    "release_id": "e6dfa52330ee735a05a17a7ed8dd5d75c5b367637b50d155c677ff48733b302c",
+    "publisher": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
+  },
+  {
+    "package": "iris-drive",
+    "version": "0.1.37",
+    "target": "x86_64-unknown-linux-gnu",
+    "upstream_tag": "v0.1.37",
+    "upstream_asset": "iris-drive-v0.1.37-linux-x64.deb",
+    "sha256": "d473d48130b8217d242d122e440ce719481fdcbf04bcb289baacd82c9c6fe856",
+    "release_id": "4e1fd39f16c7ecabaee34e6d75fb6542bc16e55adfdb121167cee3f8b4df315d",
+    "publisher": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
+  },
+  {
+    "package": "nostr-vpn",
+    "version": "4.1.17",
+    "target": "x86_64-unknown-linux-gnu",
+    "upstream_tag": "v4.1.17",
+    "upstream_asset": "nostr-vpn-v4.1.17-linux-x64.deb",
+    "sha256": "27fc19c18e83bc15b99f0cfe34e31f447cf8990b66fde97fb066a7ac644eae75",
+    "release_id": "2fca380f47e4618300393773bd43522335693e9d5d97d6af7ad60ea853e0ae64",
+    "publisher": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
   }
 ]
