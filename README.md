@@ -84,6 +84,13 @@ State defaults to the operating system's local application-data directory under
 Stage only the files intended for distribution in a separate directory, for
 example `stage/bin/hello`. Put `haps.toml` outside that payload:
 
+Packing respects `.gitignore` and `.ignore` files inside the payload, including
+nested rules and negation. It skips Git metadata, OS junk, root build/dependency
+caches, and local `.env` files. Ignore rules outside the chosen payload and global
+Git ignores do not affect the package. Runtime dependencies nested inside an app
+are retained unless that payload's own ignore rules exclude them. Source recipes
+explicitly map their declared build outputs into a fresh payload before packing.
+
 ```toml
 name = "hello"
 version = "1.0.0"

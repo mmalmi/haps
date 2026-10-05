@@ -247,16 +247,49 @@ impl Repository {
         let mut files = Vec::new();
         let mut total = 0u64;
         let tree = self.store.tree();
-        for entry in walkdir::WalkDir::new(&payload)
+        let mut overrides = ignore::overrides::OverrideBuilder::new(&payload);
+        for pattern in [
+            "!**/.git",
+            "!**/.DS_Store",
+            "!**/._*",
+            "!**/Thumbs.db",
+            "!**/desktop.ini",
+            "!**/__MACOSX",
+            "!/node_modules",
+            "!/target",
+            "!/.venv",
+            "!/venv",
+            "!/__pycache__",
+            "!/.pytest_cache",
+            "!/.mypy_cache",
+            "!/.ruff_cache",
+            "!/.cache",
+            "!/.env",
+            "!/.env.local",
+            "!/.env.*.local",
+        ] {
+            overrides.add(pattern)?;
+        }
+        let entries = ignore::WalkBuilder::new(&payload)
+            .hidden(false)
+            .parents(false)
+            .git_global(false)
+            .git_exclude(false)
+            .require_git(false)
             .follow_links(false)
-            .sort_by_file_name()
-        {
+            .overrides(overrides.build()?)
+            .sort_by_file_name(|a, b| a.cmp(b))
+            .build();
+        for entry in entries {
             let entry = entry?;
-            if entry.file_type().is_dir() {
+            if let Some(error) = entry.error() {
+                bail!("cannot apply payload ignore rules: {error}");
+            }
+            if entry.file_type().is_some_and(|t| t.is_dir()) {
                 continue;
             }
             // Never silently rewrite a signed application's filesystem layout.
-            let source = if entry.file_type().is_file() {
+            let source = if entry.file_type().is_some_and(|t| t.is_file()) {
                 entry.path().to_path_buf()
             } else {
                 bail!(

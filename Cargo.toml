@@ -23,6 +23,7 @@ hashtree-config = "=0.2.83"
 hashtree-fs = "=0.2.82"
 hashtree-index = "=0.2.84"
 hex = "0.4"
+ignore = "0.4"
 nostr = "=0.44.8"
 nostr-social-graph = "=0.1.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
@@ -33,7 +34,6 @@ sha2 = "0.10"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 toml = "0.8"
-walkdir = "2"
 
 [dev-dependencies]
 tiny_http = "0.12"

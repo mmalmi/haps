@@ -81,10 +81,11 @@ impl Checkout {
         let root = directory.path().join("repo");
         git_ok(
             git()
+                .current_dir(directory.path())
                 .args(["clone", "--no-checkout", "--", &source.git])
-                .arg(&root),
+                .arg("repo"),
         )?;
-        let commit = git_ok(git().arg("-C").arg(&root).args([
+        let commit = git_ok(git().current_dir(&root).args([
             "rev-parse",
             "--verify",
             &format!("{}^{{commit}}", source.rev),
@@ -95,8 +96,7 @@ impl Checkout {
         );
         git_ok(
             git()
-                .arg("-C")
-                .arg(&root)
+                .current_dir(&root)
                 .args(["checkout", "--detach", &commit]),
         )?;
         let path = root

@@ -314,3 +314,58 @@ fn starting_point_can_be_replaced_or_disabled_without_fabricated_events() -> any
     assert_eq!(trust.distance(&next), None);
     Ok(())
 }
+
+#[tokio::test]
+async fn packing_honors_nested_gitignores_and_common_junk_without_parent_rules()
+-> anyhow::Result<()> {
+    use haps::model::Manifest;
+    let tmp = tempdir()?;
+    fs::write(tmp.path().join(".gitignore"), "payload/\n")?;
+    let payload = tmp.path().join("payload");
+    let spec = package(&payload, "1.0.0");
+    fs::write(payload.join(".gitignore"), "*.secret\n!public.secret\n")?;
+    fs::write(payload.join("hidden.secret"), "ignored")?;
+    fs::write(payload.join("public.secret"), "explicitly included")?;
+    fs::write(payload.join(".DS_Store"), "junk")?;
+    fs::write(payload.join(".env"), "private")?;
+    fs::create_dir(payload.join("target"))?;
+    fs::write(payload.join("target/cache"), "cache")?;
+    fs::create_dir(payload.join("nested"))?;
+    fs::write(payload.join("nested/.gitignore"), "ignore-me\n")?;
+    fs::write(payload.join("nested/ignore-me"), "ignored")?;
+    // Runtime dependencies inside an application must not be mistaken for a root build cache.
+    fs::create_dir_all(payload.join("Example.app/node_modules"))?;
+    fs::write(
+        payload.join("Example.app/node_modules/runtime.js"),
+        "runtime",
+    )?;
+    let repo = Repository::local(tmp.path().join("repo"))?;
+    let release = repo.publish(&Keys::generate(), spec, &payload).await?;
+    let files: Manifest = repo.json(&release.data.manifest).await?;
+    let paths: Vec<_> = files.files.iter().map(|f| f.path.as_str()).collect();
+    for ignored in [
+        "hidden.secret",
+        ".DS_Store",
+        ".env",
+        "target/cache",
+        "nested/ignore-me",
+    ] {
+        assert!(!paths.contains(&ignored), "included {ignored}");
+    }
+    for included in [
+        "bin/hello",
+        "public.secret",
+        "Example.app/node_modules/runtime.js",
+    ] {
+        assert!(paths.contains(&included), "excluded {included}");
+    }
+    fs::write(payload.join(".gitignore"), "[z-a]\n")?;
+    let invalid = repo
+        .publish(&Keys::generate(), package(&payload, "1.0.1"), &payload)
+        .await;
+    assert!(
+        invalid.is_err(),
+        "malformed ignore rules must fail packaging"
+    );
+    Ok(())
+}
