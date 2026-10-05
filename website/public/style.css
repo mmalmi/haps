@@ -4,3 +4,6 @@
 @media(prefers-reduced-motion:reduce){:root{scroll-behavior:auto}}
 
 .principles p a{text-decoration:underline;text-underline-offset:3px}
+
+.install-options{min-width:0}.install-options .install-command{gap:12px}.install-options .install-command code{white-space:normal;overflow-wrap:anywhere;line-height:1.7}.cargo-install{margin-top:16px;color:var(--muted);font-size:12px}.cargo-install summary{cursor:pointer}.cargo-install .install-command{margin-top:12px}
+@media(max-width:650px){.install-options .install-command{flex-wrap:wrap}.install-options .install-command code{flex-basis:100%;overflow-wrap:normal}.install-options .install-command .copy{margin-left:auto}}

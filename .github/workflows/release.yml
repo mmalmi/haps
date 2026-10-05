@@ -1,0 +1,140 @@
+name: Binary release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing stable tag to build and publish (v0.1.3)'
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: binary-release-${{ inputs.tag }}
+  cancel-in-progress: false
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Validate tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: '[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]'
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+      - name: Resolve source and check version
+        id: commit
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          python3 - <<'PY'
+          import os, tomllib
+          with open('Cargo.toml', 'rb') as file:
+              assert 'v' + tomllib.load(file)['package']['version'] == os.environ['TAG']
+          PY
+      - name: Require successful CI for this exact source
+        uses: actions/github-script@v7
+        env:
+          SOURCE_SHA: ${{ steps.commit.outputs.sha }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const sha = process.env.SOURCE_SHA;
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner, repo, workflow_id: 'ci.yml', head_sha: sha, event: 'push', per_page: 100
+            });
+            for (const run of runs) {
+              if (run.head_sha !== sha || run.head_branch !== 'master' || run.conclusion !== 'success' ||
+                  run.repository.full_name !== `${owner}/${repo}` || run.head_repository.full_name !== `${owner}/${repo}`) continue;
+              const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+                owner, repo, run_id: run.id, filter: 'latest', per_page: 100
+              });
+              const required = ['Test (ubuntu-latest)', 'Test (macos-latest)', 'Test (windows-latest)'];
+              if (required.every(name => jobs.filter(j => j.name === name && j.conclusion === 'success').length === 1)
+                  && jobs.every(j => j.conclusion === 'success')) {
+                core.notice(`Verified source CI: ${run.html_url}`);
+                return;
+              }
+            }
+            core.setFailed('Wait for successful Check CI on the tagged source commit, then run this workflow again.');
+  build:
+    needs: source
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Build tagged release binary
+        env:
+          TARGET: ${{ matrix.target }}
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+        shell: bash
+        run: cargo build --release --locked --target "$TARGET"
+      - name: Package and install the archive on its target platform
+        env:
+          TARGET: ${{ matrix.target }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: python scripts/release.py package --tag "$TAG" --target "$TARGET"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: haps-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+  publish:
+    needs: [source, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: haps-*
+          path: dist
+          merge-multiple: true
+      - name: Write release manifest and checksums
+        env:
+          TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        run: python scripts/release.py index --tag "$TAG" --commit "$SOURCE_SHA"
+      - name: Publish complete release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          SOURCE_SHA: ${{ needs.source.outputs.sha }}
+        run: |
+          printf 'Prebuilt Haps binaries for macOS, Linux, and Windows.\n\nBuilt from commit %s and tested on each target platform. SHA256SUMS covers all binary archives.\n\nInstallation: https://haps.hashtree.cc/#install\n' "$SOURCE_SHA" > release-notes.txt
+          gh release create "$TAG" dist/* --verify-tag --title "Haps $TAG" --notes-file release-notes.txt

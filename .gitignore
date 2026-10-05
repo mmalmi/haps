@@ -6,3 +6,4 @@
 /website/.wrangler/
 
 __pycache__/
+/dist/

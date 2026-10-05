@@ -42,7 +42,32 @@ HTTP source. CI runs that suite on all three operating systems.
 
 ## Build and use
 
-Install the CLI from crates.io:
+Install a prebuilt CLI on macOS (Intel/Apple silicon) or Linux (x86-64/ARM64):
+
+```sh
+curl -fsSL https://haps.hashtree.cc/install.sh | sh
+```
+
+The installer downloads the published archive from Hashtree, checks SHA-256 and
+runs `haps --version` before replacing the executable in `~/.local/bin`. Add that
+directory to your `PATH` if needed. It does not use sudo or edit shell startup
+files. The checksum verifies the download against the release manifest; it is
+served by the same publisher, not a separate trust authority.
+
+To inspect first or pin a version:
+
+```sh
+curl -fsSL https://haps.hashtree.cc/install.sh -o install-haps.sh
+less install-haps.sh
+sh install-haps.sh --version v0.1.3 --bin-dir "$HOME/.local/bin"
+```
+
+[Windows x64 zip and all release downloads](https://github.com/mmalmi/haps/releases/latest)
+are also available. Extract `haps.exe` into a directory on your `PATH`.
+The prebuilt Linux CLI requires glibc 2.35 or newer; application packages have
+separate runtime requirements below.
+
+Cargo remains supported on all three operating systems:
 
 ```sh
 cargo install haps --locked
@@ -408,3 +433,34 @@ The static website lives in `website/public` and deploys with the adjacent Wrang
 configuration. Publish that directory separately as `haps-site` on hashtree; the
 `haps` source tree and `haps-packages` catalog are separate publications.
 Package input manifests and upstream archive checksums live in `packages/`.
+
+### Binary releases
+
+`.github/workflows/release.yml` builds native archives on five platforms from an
+existing stable version tag. It requires green Linux/macOS/Windows CI for that
+exact commit, checks the crate version against the tag, then extracts each archive
+and tests publishing, installing, and running its binary before creating a GitHub
+release. Binaries are built once and promoted unchanged to every download channel.
+
+After committing a version bump, pushing `master`, and waiting for CI:
+
+```sh
+git tag vX.Y.Z
+git push github vX.Y.Z
+gh workflow run release.yml --repo mmalmi/haps -f tag=vX.Y.Z
+# Once the workflow succeeds, mirror its exact assets using the maintainer's htree identity:
+python3 scripts/publish-hashtree-release.py --tag vX.Y.Z
+```
+
+The mirror command verifies asset sizes/checksums and the tag's source commit,
+then uses `htree release publish` to retain previous versions and move `latest`.
+The publisher requires `gh`, `htree`, Python 3.11+, and the release identity already
+configured locally. Crates.io publication and website deployment remain separate
+steps after their checks. Never replace the files behind an existing release tag.
+
+Installer checks can be run without downloading or executing public binaries:
+
+```sh
+python3 -m unittest discover -s tests -p '*_test.py'
+actionlint .github/workflows/release.yml .github/workflows/ci.yml
+```

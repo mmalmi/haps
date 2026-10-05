@@ -28,7 +28,7 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test native installation and package lifecycle
         run: cargo test --locked
-      - name: Test Omarchy integration
+      - name: Test installers and Omarchy integration
         if: runner.os == 'Linux'
         run: python3 -m unittest discover -s tests -p '*_test.py'
       - name: Launch a desktop entry through GIO
