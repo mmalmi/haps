@@ -100,7 +100,7 @@ Only add the source once. After repacking, Haps reads its updated catalog.
 
 ## 4. Share the catalog
 
-Install the [Hashtree CLI](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/rust/crates/git-remote-htree/README.md)
+Install the [Hashtree CLI](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/rust/crates/git-remote-htree/README.md?g=)
 if you do not already have it; for example, `cargo install hashtree-cli --locked`.
 Haps does not bundle `htree` or `git-remote-htree`.
 

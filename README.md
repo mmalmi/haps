@@ -407,7 +407,7 @@ their referenced content and search indexes are hashtree CIDs. This is **not yet
 Zapstore software-event compatibility**. Package comments use NIP-22 kind 1111 with
 an `A` root; release comments use an `E` root.
 
-The shared [fact-event draft](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-social-graph/nips/fact-events.md)
+The shared [fact-event draft](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-social-graph/nips/fact-events.md?g=)
 is a candidate envelope for release attestations: a release subject, signed claims,
 and explicit replacement/dispute links. Haps does not emit or import that format
 yet. The shared Rust and TypeScript helpers currently require UUID subjects, so
