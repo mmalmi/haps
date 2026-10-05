@@ -1,7 +1,7 @@
 use haps::{
     model::{PackageSpec, sign},
     repository::Repository,
-    trust::{Attestation, Trust, attest_at, parse_attestation},
+    trust::{Attestation, Trust, attest_at, parse_attestation, warn_at},
 };
 use nostr::{EventBuilder, Keys, Kind, Tag, Timestamp};
 use nostr_identity::{
@@ -46,6 +46,7 @@ async fn fact_snapshots_migrate_legacy_claims_without_double_counting_or_replay(
             schema: "haps.attestation.v1".into(),
             release: release.event.id.to_hex(),
             approved: true,
+            warning: false,
             note: "Legacy check".into(),
         },
     )?;
@@ -98,7 +99,106 @@ async fn fact_snapshots_migrate_legacy_claims_without_double_counting_or_replay(
             at + 3,
         )?)?;
         trust.authorize(&release, false, 1)?;
+        // A trusted warning supersedes approval, survives replay, and blocks even
+        // when the caller accepts an otherwise untrusted publisher.
+        let warning = warn_at(
+            &friend,
+            release.event.id,
+            true,
+            "Unexpected network access".into(),
+            at + 4,
+        )?;
+        trust.ingest(warning.clone())?;
+        trust.ingest(approved.clone())?;
+        assert_eq!(trust.warnings(&release).len(), 1);
+        assert!(trust.attesters(&release).is_empty());
+        assert!(trust.authorize(&release, true, 0).is_err());
+        trust.authorize_with_policy(&release, true, 0, true)?;
+        // Withdrawing a warning is neutral, never a new endorsement.
+        trust.ingest(warn_at(
+            &friend,
+            release.event.id,
+            false,
+            "Withdrawn after checking".into(),
+            at + 5,
+        )?)?;
+        trust.ingest(warning.clone())?;
+        assert!(trust.warnings(&release).is_empty());
+        assert!(trust.attesters(&release).is_empty());
+        trust.authorize(&release, true, 0)?;
+        // Strangers and second-degree connections have no warning authority.
+        let stranger = Keys::generate();
+        trust.ingest(warn_at(
+            &stranger,
+            release.event.id,
+            true,
+            "Stranger claim".into(),
+            at + 6,
+        )?)?;
+        trust.ingest(
+            EventBuilder::new(Kind::ContactList, "")
+                .tags([Tag::public_key(stranger.public_key())])
+                .sign_with_keys(&friend)?,
+        )?;
+        assert_eq!(trust.distance(&stranger.public_key().to_hex()), Some(2));
+        assert!(trust.warnings(&release).is_empty());
+        trust.authorize(&release, true, 0)?;
+        // Muting a direct connection excludes both its approval and its warning.
+        trust.ingest(warn_at(
+            &friend,
+            release.event.id,
+            true,
+            "Another finding".into(),
+            at + 7,
+        )?)?;
+        trust.ingest(
+            EventBuilder::new(Kind::MuteList, "")
+                .tags([Tag::public_key(friend.public_key())])
+                .sign_with_keys(&me)?,
+        )?;
+        assert!(trust.warnings(&release).is_empty());
+        trust.authorize(&release, true, 0)?;
     }
+    // A followed publisher can recall its own release; self-endorsements still
+    // never satisfy the reader's attestation threshold.
+    let mut recall = Trust::new(me.public_key().to_hex());
+    recall.ingest(
+        EventBuilder::new(Kind::ContactList, "")
+            .tags([Tag::public_key(author.public_key())])
+            .sign_with_keys(&me)?,
+    )?;
+    recall.ingest(attest_at(
+        &author,
+        release.event.id,
+        true,
+        "Publisher approval".into(),
+        at,
+    )?)?;
+    assert!(recall.attesters(&release).is_empty());
+    recall.ingest(warn_at(
+        &author,
+        release.event.id,
+        true,
+        "Build recalled".into(),
+        at + 1,
+    )?)?;
+    assert_eq!(recall.warnings(&release).len(), 1);
+    assert!(recall.authorize(&release, false, 0).is_err());
+    let contradictory = build_fact_snapshot_event_with_created_at_ms(
+        &friend,
+        release.event.id.to_hex(),
+        [
+            fact("type", &["haps_release_attestation"]),
+            fact("schema", &["1"]),
+            fact("approved", &["true"]),
+            fact("warning", &["true"]),
+            fact("note", &["Contradictory"]),
+        ],
+        [],
+        at / 1000,
+        at,
+    )?;
+    assert!(parse_attestation(&contradictory).is_err());
     // A forged claim is rejected even if its profile tags are otherwise valid.
     let mut forged = approved;
     forged.pubkey = author.public_key();
@@ -140,6 +240,7 @@ async fn fact_snapshots_migrate_legacy_claims_without_double_counting_or_replay(
             schema: "haps.attestation.v1".into(),
             release: release.event.id.to_hex(),
             approved: false,
+            warning: false,
             note: "Revoke".into(),
         },
     )?;

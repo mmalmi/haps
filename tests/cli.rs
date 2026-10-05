@@ -578,6 +578,159 @@ fn attestation_shortcut_pins_version_platform_and_exports_signed_claims() {
     .unwrap();
     assert_eq!(info["attestations"][0]["label"], "me");
     assert_eq!(info["attestations"][0]["event"]["id"], signed.id.to_hex());
+    // Agents can issue a release warning without prompts. It removes this
+    // signer's endorsement and is visible in machine-readable discovery.
+    let warning: nostr::Event = serde_json::from_str(&ok(
+        &reader,
+        &[
+            "warn",
+            "alice/hello",
+            "--version",
+            "1.0.0",
+            "--note",
+            "Unexpected outbound connection",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    let warning_claim = haps::trust::parse_attestation(&warning).unwrap();
+    assert!(warning_claim.warning);
+    assert!(!warning_claim.approved);
+    assert_eq!(warning_claim.release, releases[0].id.to_hex());
+    let warned_info: serde_json::Value = serde_json::from_str(&ok(
+        &reader,
+        &["info", "alice/hello", "--version", "1.0.0", "--json"],
+    ))
+    .unwrap();
+    assert_eq!(warned_info["warnings"][0]["label"], "me");
+    assert_eq!(
+        warned_info["warnings"][0]["event"]["id"],
+        warning.id.to_hex()
+    );
+    assert_eq!(warned_info["attestations"], serde_json::json!([]));
+    let blocked = cli(
+        &reader,
+        &[
+            "install",
+            "alice/hello",
+            "--version",
+            "1.0.0",
+            "--allow-untrusted",
+            "--json",
+        ],
+    );
+    assert!(!blocked.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&blocked.stdout).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("trusted release warnings")
+    );
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unexpected outbound connection")
+    );
+    assert!(!reader.join("installed.json").exists());
+    // Explicit warning overrides are per operation, not a saved preference.
+    ok(
+        &reader,
+        &[
+            "install",
+            "alice/hello",
+            "--version",
+            "1.0.0",
+            "--allow-untrusted",
+            "--allow-warnings",
+            "--json",
+        ],
+    );
+    assert!(
+        !cli(
+            &reader,
+            &[
+                "install",
+                "alice/hello",
+                "--version",
+                "1.0.0",
+                "--allow-untrusted",
+                "--json"
+            ]
+        )
+        .status
+        .success()
+    );
+    ok(
+        &reader,
+        &[
+            "warn",
+            &releases[0].id.to_hex(),
+            "--revoke",
+            "--note",
+            "Finding withdrawn",
+            "--json",
+        ],
+    );
+    let withdrawn: serde_json::Value = serde_json::from_str(&ok(
+        &reader,
+        &["info", "alice/hello", "--version", "1.0.0", "--json"],
+    ))
+    .unwrap();
+    assert_eq!(withdrawn["warnings"], serde_json::json!([]));
+    assert_eq!(withdrawn["attestations"], serde_json::json!([]));
+    // Updates enforce warnings before changing the active installation.
+    ok(
+        &reader,
+        &[
+            "warn",
+            &releases[2].id.to_hex(),
+            "--note",
+            "New release regression",
+            "--json",
+        ],
+    );
+    let blocked_update = cli(
+        &reader,
+        &["update", "alice/hello", "--allow-untrusted", "--json"],
+    );
+    assert!(!blocked_update.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&blocked_update.stdout).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("trusted release warnings")
+    );
+    let installed: serde_json::Value =
+        serde_json::from_str(&ok(&reader, &["list", "--json"])).unwrap();
+    assert_eq!(installed[0]["release_id"], releases[0].id.to_hex());
+    ok(
+        &reader,
+        &[
+            "warn",
+            &releases[2].id.to_hex(),
+            "--revoke",
+            "--note",
+            "Withdrawing update warning",
+            "--json",
+        ],
+    );
+    // Replayed warnings cannot restore a withdrawn claim.
+    let stale_warning = tmp.path().join("stale-warning.json");
+    fs::write(&stale_warning, serde_json::to_vec(&warning).unwrap()).unwrap();
+    ok(&reader, &["import", stale_warning.to_str().unwrap()]);
+    let withdrawn: serde_json::Value = serde_json::from_str(&ok(
+        &reader,
+        &["info", "alice/hello", "--version", "1.0.0", "--json"],
+    ))
+    .unwrap();
+    assert_eq!(withdrawn["warnings"], serde_json::json!([]));
+    ok(
+        &reader,
+        &["attest", &releases[0].id.to_hex(), "--note", note, "--json"],
+    );
     // A package/version shortcut still binds one platform, never every build.
     let foreign: nostr::Event = serde_json::from_str(&ok(
         &reader,

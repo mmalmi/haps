@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, ensure};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use haps::comments::{self, Comments, Scope};
 use haps::{
     install::{Installation, ensure_public_key, load_keys},
     model::*,
     repository::{Repository, Snapshot},
-    trust::{Trust, attest, attest_at, attestation_time_ms, parse_attestation},
+    trust::{Trust, attest, attest_at, attestation_time_ms, parse_attestation, warn, warn_at},
 };
 use nostr::{Event, EventBuilder, EventId, Keys, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,28 @@ struct Cli {
     non_interactive: bool,
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Args)]
+struct ClaimArgs {
+    /// Release event ID, or publisher/package with --version.
+    release: String,
+    /// Required with a package name. Uses this machine's platform by default.
+    #[arg(long)]
+    version: Option<semver::Version>,
+    /// Select another platform when using a package name and --version.
+    #[arg(long, requires = "version")]
+    target: Option<String>,
+    #[arg(long)]
+    note: String,
+    /// Withdraw your previous claim without endorsing or warning.
+    #[arg(long)]
+    revoke: bool,
+    #[arg(long)]
+    out: Option<PathBuf>,
+    /// Emit the signed event as JSON and never prompt.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Subcommand)]
@@ -105,6 +127,9 @@ enum Command {
         version: Option<semver::Version>,
         #[arg(long)]
         allow_untrusted: bool,
+        /// Override trusted release warnings for this operation only.
+        #[arg(long)]
+        allow_warnings: bool,
         #[arg(long, default_value_t = 0)]
         require_attestations: usize,
         /// Emit JSON and never prompt.
@@ -116,6 +141,9 @@ enum Command {
         package: String,
         #[arg(long)]
         allow_untrusted: bool,
+        /// Override trusted release warnings for this operation only.
+        #[arg(long)]
+        allow_warnings: bool,
         /// Emit JSON and never prompt.
         #[arg(long)]
         json: bool,
@@ -152,26 +180,10 @@ enum Command {
     },
     /// Import verified Nostr follows, mutes, and release attestations.
     Import { events: PathBuf },
-    /// Sign a claim about an exact release; no relay publishing is performed.
-    Attest {
-        /// Release event ID, or publisher/package with --version.
-        release: String,
-        /// Required with a package name. Uses this machine's platform by default.
-        #[arg(long)]
-        version: Option<semver::Version>,
-        /// Select another platform when using a package name and --version.
-        #[arg(long, requires = "version")]
-        target: Option<String>,
-        #[arg(long)]
-        note: String,
-        #[arg(long)]
-        revoke: bool,
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Emit the signed event as JSON and never prompt.
-        #[arg(long)]
-        json: bool,
-    },
+    /// Sign an endorsement of an exact release; no relay publishing is performed.
+    Attest(ClaimArgs),
+    /// Sign a warning about an exact release; no relay publishing is performed.
+    Warn(ClaimArgs),
     /// Write a signed package comment, release comment, or reply.
     Comment {
         package: String,
@@ -201,8 +213,8 @@ impl Command {
             | Self::Info { json, .. }
             | Self::Install { json, .. }
             | Self::Update { json, .. }
-            | Self::List { json }
-            | Self::Attest { json, .. } => *json,
+            | Self::List { json } => *json,
+            Self::Attest(args) | Self::Warn(args) => args.json,
             _ => false,
         }
     }
@@ -654,11 +666,21 @@ fn attestation_summary(
         .map(|key| terminal_text(&publisher_label(aliases, key)))
         .collect();
     names.sort();
-    if names.is_empty() {
+    let mut summary = if names.is_empty() {
         "No trusted attestations".into()
     } else {
         format!("Attested by {}", names.join(", "))
+    };
+    let mut warning_names: Vec<_> = trust
+        .warnings(release)
+        .iter()
+        .map(|event| terminal_text(&publisher_label(aliases, &event.pubkey.to_hex())))
+        .collect();
+    warning_names.sort();
+    if !warning_names.is_empty() {
+        summary.push_str(&format!("; Warning from {}", warning_names.join(", ")));
     }
+    summary
 }
 
 fn release_json(
@@ -674,6 +696,14 @@ fn release_json(
             "label": publisher_label(aliases, &event.pubkey.to_hex()), "event": event})
         })
         .collect();
+    let warnings: Vec<_> = trust
+        .warnings(release)
+        .iter()
+        .map(|event| {
+            serde_json::json!({"signer": event.pubkey.to_hex(),
+            "label": publisher_label(aliases, &event.pubkey.to_hex()), "event": event})
+        })
+        .collect();
     serde_json::json!({
         "identity": release.identity(),
         "label": release_label(release, aliases),
@@ -682,6 +712,7 @@ fn release_json(
         "follow_distance": trust.distance(&release.author()), "muted": trust.muted(&release.author()),
         "followed_by": trust.followed_by_friends(&release.author()).iter().map(|key| serde_json::json!({"pubkey": key, "label": publisher_label(aliases, key)})).collect::<Vec<_>>(),
         "attesters": trust.attesters(release), "attestations": attestations,
+        "warnings": warnings,
     })
 }
 
@@ -729,7 +760,11 @@ fn print_install_start(release: &Release, trust: &Trust, aliases: &BTreeMap<Stri
     );
     eprintln!("  Signature verified");
     eprintln!("  {}", attestation_summary(release, trust, aliases));
-    for event in trust.attestations(release) {
+    for event in trust
+        .attestations(release)
+        .into_iter()
+        .chain(trust.warnings(release))
+    {
         if let Ok(claim) = parse_attestation(event) {
             eprintln!(
                 "    {}: {}",
@@ -852,6 +887,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         _ => {}
     }
     let installation = Installation::new(home.clone())?;
+    let is_warning = matches!(&cli.command, Command::Warn(_));
     match cli.command {
         Command::Target | Command::Init(_) => unreachable!(),
         Command::StartingPoint { public_key, clear } => {
@@ -1037,6 +1073,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             package,
             version,
             allow_untrusted,
+            allow_warnings,
             require_attestations,
             json,
         } => {
@@ -1055,7 +1092,12 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     .get(&candidate.release.identity())
                     .map_or(0, |r| r.minimum_attestations),
             );
-            trust.authorize(&candidate.release, allow_untrusted, require_attestations)?;
+            trust.authorize_with_policy(
+                &candidate.release,
+                allow_untrusted,
+                require_attestations,
+                allow_warnings,
+            )?;
             if !json {
                 print_install_start(&candidate.release, &trust, &config.aliases);
             }
@@ -1071,6 +1113,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         Command::Update {
             package,
             allow_untrusted,
+            allow_warnings,
             json,
         } => {
             let receipt = installation.receipt(&package)?;
@@ -1084,10 +1127,11 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 target(),
                 non_interactive,
             )?;
-            trust.authorize(
+            trust.authorize_with_policy(
                 &candidate.release,
                 allow_untrusted,
                 receipt.minimum_attestations,
+                allow_warnings,
             )?;
             if !json {
                 print_install_start(&candidate.release, &trust, &config.aliases);
@@ -1236,19 +1280,20 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             save_comments(&home, &comments)?;
             println!("Imported {count} signed events");
         }
-        Command::Attest {
-            release,
-            version,
-            target: requested_target,
-            note,
-            revoke,
-            out,
-            json,
-        } => {
+        Command::Attest(args) | Command::Warn(args) => {
+            let ClaimArgs {
+                release,
+                version,
+                target: requested_target,
+                note,
+                revoke,
+                out,
+                json,
+            } = args;
             let keys = own_keys(&home, &config)?;
             ensure!(
                 !note.trim().is_empty(),
-                "describe what you checked with --note"
+                "describe your finding or checked work with --note"
             );
             let release_id = if let Ok(id) = EventId::from_hex(&release) {
                 ensure!(
@@ -1274,7 +1319,9 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     eprintln!(
                         "{} {} {} ({})",
                         if revoke {
-                            "Revoking attestation for"
+                            "Withdrawing claim for"
+                        } else if is_warning {
+                            "Warning about"
                         } else {
                             "Attesting to"
                         },
@@ -1287,7 +1334,11 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 }
                 candidate.release.event.id
             };
-            let mut event = attest(&keys, release_id, !revoke, note)?;
+            let mut event = if is_warning {
+                warn(&keys, release_id, !revoke, note)?
+            } else {
+                attest(&keys, release_id, !revoke, note)?
+            };
 
             let previous = trust
                 .events()
@@ -1304,10 +1355,15 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 && previous >= attestation_time_ms(&event)?
             {
                 let claim = parse_attestation(&event)?;
-                event = attest_at(
+                let build = if is_warning { warn_at } else { attest_at };
+                event = build(
                     &keys,
                     release_id,
-                    claim.approved,
+                    if is_warning {
+                        claim.warning
+                    } else {
+                        claim.approved
+                    },
                     claim.note,
                     previous
                         .checked_add(1)
@@ -1323,7 +1379,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 println!("{}", serde_json::to_string(&event)?);
             } else {
                 println!("{}", event.id);
-                eprintln!("Saved signed attestation: {}", out.display());
+                eprintln!("Saved signed claim: {}", out.display());
             }
         }
         Command::Comment {

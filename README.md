@@ -27,7 +27,7 @@ Implemented:
 - Directory and static HTTP(S) sources. Any mirror can serve the signed data.
 - Author ranking using the actual `nostr-social-graph` library, imported signed
   follow/mute events, and explicit handling of ambiguous package names.
-- Release-specific signed attestations, revocation, and an optional minimum
+- Release-specific signed attestations, trusted warnings, revocation, and an optional minimum
   number of attesters from your direct follows. The requirement persists on updates.
 - Staged installation, target checks, publisher-preserving updates, previous-version
   rollback, and local removal. Downloads must finish before activation changes.
@@ -59,7 +59,7 @@ To inspect first or pin a version:
 ```sh
 curl -fsSL https://haps.hashtree.cc/install.sh -o install-haps.sh
 less install-haps.sh
-sh install-haps.sh --version v0.1.4 --bin-dir "$HOME/.local/bin"
+sh install-haps.sh --version v0.1.5 --bin-dir "$HOME/.local/bin"
 ```
 
 [Windows x64 zip and all release downloads](#downloads) are also available. Extract `haps.exe` into a directory on your `PATH`.
@@ -170,24 +170,25 @@ Cargo-managed installs back to Cargo.
 
 ### Downloads
 
-Prebuilt Haps 0.1.4 archives, hosted on Hashtree:
+Prebuilt Haps 0.1.5 archives, hosted on Hashtree:
 
 | Platform | Archive |
 | --- | --- |
-| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/assets/haps-v0.1.4-aarch64-apple-darwin.tar.gz) |
-| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/assets/haps-v0.1.4-x86_64-apple-darwin.tar.gz) |
-| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/assets/haps-v0.1.4-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/assets/haps-v0.1.4-aarch64-unknown-linux-gnu.tar.gz) |
-| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/assets/haps-v0.1.4-x86_64-pc-windows-msvc.zip) |
+| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-x86_64-apple-darwin.tar.gz) |
+| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/assets/haps-v0.1.5-x86_64-pc-windows-msvc.zip) |
 
-The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.4/release.json) records archive sizes and SHA-256 checksums.
+The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.5/release.json) records archive sizes and SHA-256 checksums.
 
 ### Publish your package
 
-Start with a built program, stage its runtime files in `stage/`, and create
-`haps.toml` using the [publishing guide](PUBLISHING.md):
+Start with a built program and stage its runtime files in `stage/`. Generate
+`haps.toml`, review its metadata, then sign your catalog:
 
 ```sh
+haps init --name my-app --command bin/my-app --payload stage
 haps identity init # once; keep the same key for future releases
 haps pack haps.toml --payload stage --out catalog
 ```
@@ -200,9 +201,8 @@ sharing install commands, multiple platforms, ignore rules, and updates. No
 registry account or submission is required. Readers add your catalog explicitly;
 Haps does not yet discover every published catalog automatically.
 
-The current source checkout adds `haps init` (version 0.1.5) to generate a manifest
-without prompts. Its prebuilt release is pending platform CI; the guide also
-covers the manual manifest flow supported by the current release.
+`haps init` generates a manifest without prompts and never overwrites an existing
+one. The guide also covers writing the manifest by hand.
 
 ### Names and shared aliases
 
@@ -230,13 +230,13 @@ are excluded. Numeric distances remain available in JSON for ranking.
 
 For agents and scripts, `--non-interactive` (or `HAPS_NON_INTERACTIVE=true`) disables
 prompts even in a terminal. Redirected stdin, stdout, or stderr also disables the chooser.
-`search`, `info`, `install`, `update`, `list`, and `attest` accept `--json`, which
+`search`, `info`, `install`, `update`, `list`, `attest`, and `warn` accept `--json`, which
 implies non-interactive mode. Search and list return one JSON array; info returns
 one release object; install/update return `{ "status": "installed", "release": ... }`.
-Attest returns the signed event. Runtime failures return a JSON `error` object and
+`attest` and `warn` return the signed event. Runtime failures return a JSON `error` object and
 a nonzero exit status. Ambiguous names return `code: "ambiguous_package"` and a
 socially ranked `candidates` array, including full publisher keys, release IDs,
-and signed attestations. Diagnostics stay on stderr. CLI argument errors use
+and signed attestations and warnings. Diagnostics stay on stderr. CLI argument errors use
 the normal usage message on stderr.
 
 ```sh
@@ -297,7 +297,8 @@ you/your direct follows. A publisher's self-attestation does not count.
 haps attest alice/hello --version 1.0.0 --note "Built from source; tests pass" --out attestation.json
 haps import attestation.json
 haps install PUBLIC_KEY/hello --require-attestations 1
-haps attest RELEASE_EVENT_ID --revoke --note "Found a regression" --out revoked.json
+haps warn alice/hello --version 1.0.0 --note "Unexpected outbound connection; report: https://example.org/report" --out warning.json
+haps attest RELEASE_EVENT_ID --revoke --note "Withdrawing my earlier endorsement" --out revoked.json
 ```
 
 The shortcut requires an explicit version and resolves the exact signed release
@@ -311,6 +312,100 @@ the full signed events and signer keys. Only current positive attestations from
 you or your direct follows count; publisher self-attestations, muted signers,
 revocations, and attestations of a different release do not count. A future version
 or another platform needs its own attestations.
+
+#### Warn about a release
+
+`haps warn` is a negative finding, distinct from withdrawing an endorsement. It
+accepts the same exact-release selector, `--target`, `--out`, and `--json` options
+as `attest`. It requires Haps 0.1.6 or later.
+
+Only **your key and unmuted keys you directly follow** contribute endorsements or
+warnings. Distant connections and strangers do not appear as trusted findings or
+affect installation. The configured starting point counts as a direct connection.
+A publisher cannot endorse its own release for your approval threshold, but a
+followed publisher can warn about its own release, for example to recall a build.
+
+An active trusted warning blocks `install` and `update`, even with
+`--allow-untrusted` or enough other endorsements. Inspect the signer, note, and
+signed event with `haps info PACKAGE --version VERSION --json`; its `warnings`
+array uses the same social filter. A deliberate `--allow-warnings` override applies
+only to that operation and never lowers the endorsement requirement.
+
+```sh
+haps warn RELEASE_EVENT_ID --revoke --note "Finding withdrawn after investigation"
+```
+
+Withdrawing leaves a neutral claim: it does not endorse the release. For each
+signer and release, the latest signed claim wins across `attest`, `warn`, and
+withdrawals. A new endorsement replaces that signer's earlier warning; an old
+replayed event cannot restore it. Other signers' findings are unaffected. Warnings
+never silently remove or stop an installed app. `rollback` retains its existing
+explicit recovery behavior and does not re-evaluate social policy.
+
+For discussion applying to a package across versions, use `haps comment`.
+Endorsements and install-blocking warnings remain tied to exact release hashes.
+Haps 0.1.5 reads a warning as a withdrawn endorsement but does not enforce its
+warning policy; readers need 0.1.6 for that.
+
+#### Set up an agent to scan releases
+
+Give the agent its own signing identity, add the catalogs it should scan, and run
+it using your scheduler or agent service. Other users can follow its public key
+and import its exported claims. It gains no special authority: the same social
+filter applies to people and agents.
+
+For example, create a persistent agent profile once (POSIX shell):
+
+```sh
+export HAPS_HOME="$HOME/.local/share/haps-scan-agent"
+haps identity init
+haps identity show
+haps source add publisher CATALOG_URL --author CATALOG_PUBLIC_KEY
+```
+
+Use that same `HAPS_HOME` in the scheduled job. Back up its signing key and share
+only its public key and exported events.
+
+A job should select an exact release with `haps info --json`, inspect that release's
+files and source in an isolated test environment, and record the checks performed
+and evidence. Pin the result to `release_id`, never a moving package name. Sign an
+endorsement only after the declared checks complete; sign a warning for a concrete
+finding. A timeout, unavailable scanner, or incomplete analysis is not a pass.
+
+The following shell example uses `jq` and **your own** `scan-release` program.
+That program takes the release JSON, verifies it is scanning the referenced
+payload, writes a JSON `summary` and matching `release_id`, and exits 0 for a pass,
+1 for a finding, or another status for an incomplete scan. Haps does not include a
+scanner or scheduler.
+
+```sh
+set -eu
+haps --non-interactive info PUBLISHER/my-app --version 1.0.0 --json > release.json
+release=$(jq -er '.release_id' release.json)
+result=0
+./scan-release release.json > scan.json || result=$?
+# Reject results for a different release or without an evidence summary.
+jq -e --arg release "$release" '.release_id == $release and (.summary | type == "string" and length > 0)' scan.json >/dev/null
+note=$(jq -er '.summary' scan.json)
+case "$result" in
+  0) haps attest "$release" --note "$note" --out claim.json --json ;;
+  1) haps warn "$release" --note "$note" --out claim.json --json ;;
+  *) echo "Scan incomplete; no new claim signed" >&2; exit 1 ;;
+esac
+```
+
+Share `claim.json` through your chosen transport. Recipients import it explicitly:
+
+```sh
+haps follow AGENT_PUBLIC_KEY
+haps import claim.json
+haps install PUBLISHER/my-app --version 1.0.0 --require-attestations 1
+```
+
+Haps does not currently poll agents or automatically publish/subscribe to their
+claims. Keep prior findings unless new evidence changes them; use `--revoke` when
+you intend to withdraw a previous claim. Include the scanner version, checks run,
+and a report link or hash in the note so readers can assess its scope.
 
 An attestation is a signed claim by a person or agent about an exact release, such
 as tests run or code audited. It is not a product rating or automatic proof of a
@@ -439,8 +534,11 @@ Release attestations use the shared [fact-event format](https://git.iris.to/#/np
 kind `37368`, empty content, and the exact release event hash in both
 `["i", "<hash>", "subject"]` and `["d", "<hash>"]`. Required facts are
 `type=haps_release_attestation`, `schema=1`, `approved=true|false`, and a `note`.
+An optional `warning=true|false` defaults to false for older events; approval and
+a warning cannot both be true.
 New snapshots include millisecond metadata; Haps compares timestamp, milliseconds,
-then event ID as defined by the shared helpers. `--revoke` writes `approved=false`.
+then event ID as defined by the shared helpers. `warn` writes `approved=false` and
+`warning=true`; `--revoke` writes both false.
 Each signer counts at most once per release, regardless of how many copies are
 imported. One signer cannot replace another's decision.
 

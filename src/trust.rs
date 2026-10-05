@@ -15,7 +15,13 @@ pub struct Attestation {
     pub schema: String,
     pub release: String,
     pub approved: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub warning: bool,
     pub note: String,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 /// Write a fact snapshot about the exact signed release, using its event hash as subject.
@@ -33,6 +39,34 @@ pub fn attest_at(
     note: String,
     at_ms: u64,
 ) -> Result<Event> {
+    claim_at(keys, release, approved, false, note, at_ms)
+}
+
+pub fn warn(keys: &Keys, release: EventId, active: bool, note: String) -> Result<Event> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    warn_at(keys, release, active, note, u64::try_from(now)?)
+}
+
+pub fn warn_at(
+    keys: &Keys,
+    release: EventId,
+    active: bool,
+    note: String,
+    at_ms: u64,
+) -> Result<Event> {
+    claim_at(keys, release, false, active, note, at_ms)
+}
+
+fn claim_at(
+    keys: &Keys,
+    release: EventId,
+    approved: bool,
+    warning: bool,
+    note: String,
+    at_ms: u64,
+) -> Result<Event> {
     ensure!(note.len() <= 4096, "attestation note is too long");
     build_fact_snapshot_event_with_created_at_ms(
         keys,
@@ -41,6 +75,7 @@ pub fn attest_at(
             fact("type", &["haps_release_attestation"]),
             fact("schema", &["1"]),
             fact("approved", &[if approved { "true" } else { "false" }]),
+            fact("warning", &[if warning { "true" } else { "false" }]),
             fact("note", &[&note]),
         ],
         [],
@@ -75,10 +110,24 @@ pub fn parse_attestation(event: &Event) -> Result<Attestation> {
             "false" => false,
             _ => anyhow::bail!("attestation approved must be true or false"),
         };
+        let warning = if snapshot.facts.iter().any(|f| f.predicate == "warning") {
+            match scalar("warning")? {
+                "true" => true,
+                "false" => false,
+                _ => anyhow::bail!("attestation warning must be true or false"),
+            }
+        } else {
+            false
+        };
+        ensure!(
+            !(approved && warning),
+            "a claim cannot approve and warn simultaneously"
+        );
         Attestation {
             schema: "haps.attestation.v1".into(),
             release: snapshot.subject.clone(),
             approved,
+            warning,
             note: scalar("note")?.into(),
         }
     } else {
@@ -87,6 +136,7 @@ pub fn parse_attestation(event: &Event) -> Result<Attestation> {
             "expected a Haps release attestation"
         );
         let claim: Attestation = serde_json::from_str(&event.content)?;
+        ensure!(!claim.warning, "warnings require a fact snapshot");
         ensure!(
             tag_value(event, "d")? == format!("haps/attestation/{}", claim.release),
             "attestation target mismatch"
@@ -269,10 +319,7 @@ impl Trust {
             .filter(|e| e.kind == APP_KIND || e.kind == Kind::from(FACT_SNAPSHOT_KIND))
         {
             let author = event.pubkey.to_hex();
-            if author == release.author()
-                || self.muted(&author)
-                || self.distance(&author).is_none_or(|d| d > 1)
-            {
+            if author == release.author() || !self.relevant_signer(&author) {
                 continue;
             }
             if let Ok(a) = parse_attestation(event)
@@ -284,13 +331,53 @@ impl Trust {
         }
         attestations
     }
+    fn relevant_signer(&self, author: &str) -> bool {
+        !self.muted(author) && self.distance(author).is_some_and(|d| d <= 1)
+    }
+    /// Current warnings from the reader and unmuted direct connections only.
+    /// A followed publisher may warn about its own release (a recall).
+    pub fn warnings(&self, release: &Release) -> Vec<&Event> {
+        self.events
+            .values()
+            .filter(|event| {
+                let author = event.pubkey.to_hex();
+                self.relevant_signer(&author)
+                    && parse_attestation(event).is_ok_and(|claim| {
+                        claim.warning && claim.release == release.event.id.to_hex()
+                    })
+            })
+            .collect()
+    }
     pub fn authorize(
         &self,
         release: &Release,
         allow_untrusted: bool,
         minimum_attestations: usize,
     ) -> Result<()> {
+        self.authorize_with_policy(release, allow_untrusted, minimum_attestations, false)
+    }
+    pub fn authorize_with_policy(
+        &self,
+        release: &Release,
+        allow_untrusted: bool,
+        minimum_attestations: usize,
+        allow_warnings: bool,
+    ) -> Result<()> {
         ensure!(!self.muted(&release.author()), "publisher is muted");
+        let warnings = self.warnings(release);
+        if !allow_warnings && !warnings.is_empty() {
+            let findings: Vec<_> = warnings
+                .iter()
+                .map(|event| {
+                    let claim = parse_attestation(event).expect("validated warning");
+                    format!("{}: {}", event.pubkey.to_hex(), claim.note.escape_debug())
+                })
+                .collect();
+            anyhow::bail!(
+                "trusted release warnings: {}. Inspect with haps info; use --allow-warnings only to explicitly override for this operation",
+                findings.join("; ")
+            );
+        }
         let attestations = self.attesters(release).len();
         ensure!(
             attestations >= minimum_attestations,

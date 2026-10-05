@@ -1,8 +1,8 @@
 # Publish your package
 
 Haps publishes software under your Nostr public key. There is no registry account,
-submission queue, or globally reserved package name. This guide uses an already-built program called `my-app`. The manual manifest
-flow works with Haps 0.1.4; the optional `init` shortcut requires 0.1.5.
+submission queue, or globally reserved package name. This guide uses an
+already-built program called `my-app` and Haps 0.1.5 or later.
 
 ## 1. Stage the files
 
@@ -26,7 +26,13 @@ Preserve the app's platform signing when preparing it.
 
 ## 2. Create and check the manifest
 
-Create `haps.toml` outside the payload and fill in your app’s metadata:
+Generate `haps.toml` outside the payload, then review its metadata:
+
+```sh
+haps init --name my-app --command bin/my-app --payload stage
+```
+
+You can also write the manifest by hand:
 
 ```toml
 name = "my-app"
@@ -42,14 +48,6 @@ Use the target printed by `haps target`, or the platform you built for when
 cross-compiling. Package names use lowercase letters, numbers, hyphens, or
 underscores. Versions use SemVer. Unknown manifest fields are rejected.
 
-Haps 0.1.5 adds a shortcut that writes this editable manifest:
-
-```sh
-haps init --name my-app --command bin/my-app --payload stage
-```
-
-Until that version's prebuilt release is available, you can use the manual manifest
-above or install this source checkout with `cargo install --path . --locked`.
 `init` never overwrites an existing manifest, creates a signing identity, uploads
 files, or prompts for input. It checks that the executable (or bundle metadata)
 exists. The target defaults to this machine; override it with `--target`.
