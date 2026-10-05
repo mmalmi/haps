@@ -5,7 +5,7 @@ use haps::{
     install::{Installation, ensure_public_key, load_keys},
     model::*,
     repository::{Repository, Snapshot},
-    trust::{Trust, attest},
+    trust::{Trust, attest, attest_at, attestation_time_ms, parse_attestation},
 };
 use nostr::{Event, EventBuilder, EventId, Keys, Kind, Tag, Timestamp};
 use serde::{Deserialize, Serialize};
@@ -730,7 +730,7 @@ fn print_install_start(release: &Release, trust: &Trust, aliases: &BTreeMap<Stri
     eprintln!("  Signature verified");
     eprintln!("  {}", attestation_summary(release, trust, aliases));
     for event in trust.attestations(release) {
-        if let Ok(claim) = serde_json::from_str::<haps::trust::Attestation>(&event.content) {
+        if let Ok(claim) = parse_attestation(event) {
             eprintln!(
                 "    {}: {}",
                 terminal_text(&publisher_label(aliases, &event.pubkey.to_hex())),
@@ -1288,24 +1288,31 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 candidate.release.event.id
             };
             let mut event = attest(&keys, release_id, !revoke, note)?;
-            let identifier = tag_value(&event, "d")?;
+
             let previous = trust
                 .events()
                 .into_iter()
                 .filter(|e| {
                     e.pubkey == keys.public_key()
-                        && e.kind == APP_KIND
-                        && tag_value(e, "d").ok() == Some(identifier)
+                        && parse_attestation(e).is_ok_and(|a| a.release == release_id.to_hex())
                 })
-                .map(|e| e.created_at.as_secs())
+                .map(|e| attestation_time_ms(&e))
+                .collect::<Result<Vec<_>>>()?
+                .into_iter()
                 .max();
             if let Some(previous) = previous
-                && previous >= event.created_at.as_secs()
+                && previous >= attestation_time_ms(&event)?
             {
-                event = EventBuilder::new(APP_KIND, event.content.clone())
-                    .tags(event.tags.clone())
-                    .custom_created_at(Timestamp::from(previous + 1))
-                    .sign_with_keys(&keys)?;
+                let claim = parse_attestation(&event)?;
+                event = attest_at(
+                    &keys,
+                    release_id,
+                    claim.approved,
+                    claim.note,
+                    previous
+                        .checked_add(1)
+                        .context("attestation timestamp overflow")?,
+                )?;
             }
             trust.ingest(event.clone())?;
             save_trust(&home, &trust)?;

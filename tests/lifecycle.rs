@@ -164,11 +164,13 @@ async fn signed_social_graph_and_release_specific_attestations() -> anyhow::Resu
         "Self review".into(),
     )?)?;
     assert_eq!(trust.attesters(&first).len(), 1);
-    let revocation = haps::trust::attest(&friend, first.event.id, false, "Regression".into())?;
-    let revocation = EventBuilder::new(revocation.kind, revocation.content)
-        .tags(revocation.tags)
-        .custom_created_at(nostr::Timestamp::from(approval.created_at.as_secs() + 1))
-        .sign_with_keys(&friend)?;
+    let revocation = haps::trust::attest_at(
+        &friend,
+        first.event.id,
+        false,
+        "Regression".into(),
+        haps::trust::attestation_time_ms(&approval)? + 1,
+    )?;
     trust.ingest(revocation)?;
     trust.ingest(approval)?; // An old approval cannot undo a revocation.
     assert!(trust.authorize(&first, false, 1).is_err());

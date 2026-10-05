@@ -553,7 +553,15 @@ fn attestation_shortcut_pins_version_platform_and_exports_signed_claims() {
     ))
     .unwrap();
     signed.verify().unwrap();
-    let claim: haps::trust::Attestation = serde_json::from_str(&signed.content).unwrap();
+    let claim = haps::trust::parse_attestation(&signed).unwrap();
+    assert_eq!(signed.kind.as_u16(), 37368);
+    assert!(signed.content.is_empty());
+    assert_eq!(
+        nostr_identity::parse_fact_snapshot_event(&signed)
+            .unwrap()
+            .subject,
+        releases[0].id.to_hex()
+    );
     assert_eq!(claim.release, releases[0].id.to_hex());
     assert_eq!(claim.note, note);
     assert!(claim.approved);
@@ -587,9 +595,7 @@ fn attestation_shortcut_pins_version_platform_and_exports_signed_claims() {
     ))
     .unwrap();
     assert_eq!(
-        serde_json::from_str::<haps::trust::Attestation>(&foreign.content)
-            .unwrap()
-            .release,
+        haps::trust::parse_attestation(&foreign).unwrap().release,
         releases[1].id.to_hex()
     );
     let install = cli(

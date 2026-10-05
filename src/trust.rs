@@ -1,6 +1,10 @@
-use crate::model::{APP_KIND, Release, sign, tag_value};
-use anyhow::{Result, ensure};
+use crate::model::{APP_KIND, Release, tag_value};
+use anyhow::{Context, Result, ensure};
 use nostr::{Event, EventId, Keys, Kind};
+use nostr_identity::{
+    FACT_SNAPSHOT_KIND, build_fact_snapshot_event_with_created_at_ms, compare_fact_snapshots, fact,
+    parse_fact_snapshot_event,
+};
 use nostr_social_graph::{NostrEvent, SocialGraph};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,18 +18,127 @@ pub struct Attestation {
     pub note: String,
 }
 
+/// Write a fact snapshot about the exact signed release, using its event hash as subject.
 pub fn attest(keys: &Keys, release: EventId, approved: bool, note: String) -> Result<Event> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    attest_at(keys, release, approved, note, u64::try_from(now)?)
+}
+
+pub fn attest_at(
+    keys: &Keys,
+    release: EventId,
+    approved: bool,
+    note: String,
+    at_ms: u64,
+) -> Result<Event> {
     ensure!(note.len() <= 4096, "attestation note is too long");
-    sign(
+    build_fact_snapshot_event_with_created_at_ms(
         keys,
-        &format!("haps/attestation/{release}"),
-        &Attestation {
-            schema: "haps.attestation.v1".into(),
-            release: release.to_hex(),
-            approved,
-            note,
-        },
+        release.to_hex(),
+        [
+            fact("type", &["haps_release_attestation"]),
+            fact("schema", &["1"]),
+            fact("approved", &[if approved { "true" } else { "false" }]),
+            fact("note", &[&note]),
+        ],
+        [],
+        at_ms / 1000,
+        at_ms,
     )
+}
+
+/// Decode the Haps profile; other kinds of facts never authorize installation.
+pub fn parse_attestation(event: &Event) -> Result<Attestation> {
+    event.verify()?;
+    let claim = if event.kind == Kind::from(FACT_SNAPSHOT_KIND) {
+        let snapshot = parse_fact_snapshot_event(event)?;
+        let scalar = |predicate: &str| -> Result<&str> {
+            let matches: Vec<_> = snapshot
+                .facts
+                .iter()
+                .filter(|f| f.predicate == predicate)
+                .collect();
+            ensure!(
+                matches.len() == 1 && matches[0].values.len() == 1,
+                "attestation needs one {predicate}"
+            );
+            Ok(matches[0].values[0].as_str())
+        };
+        ensure!(
+            scalar("type")? == "haps_release_attestation" && scalar("schema")? == "1",
+            "unsupported attestation profile"
+        );
+        let approved = match scalar("approved")? {
+            "true" => true,
+            "false" => false,
+            _ => anyhow::bail!("attestation approved must be true or false"),
+        };
+        Attestation {
+            schema: "haps.attestation.v1".into(),
+            release: snapshot.subject.clone(),
+            approved,
+            note: scalar("note")?.into(),
+        }
+    } else {
+        ensure!(
+            event.kind == APP_KIND,
+            "expected a Haps release attestation"
+        );
+        let claim: Attestation = serde_json::from_str(&event.content)?;
+        ensure!(
+            tag_value(event, "d")? == format!("haps/attestation/{}", claim.release),
+            "attestation target mismatch"
+        );
+        claim
+    };
+    ensure!(
+        claim.schema == "haps.attestation.v1" && claim.note.len() <= 4096,
+        "invalid attestation"
+    );
+    ensure!(
+        EventId::from_hex(&claim.release)?.to_hex() == claim.release,
+        "attestation release must be a canonical event hash"
+    );
+    Ok(claim)
+}
+
+pub fn attestation_time_ms(event: &Event) -> Result<u64> {
+    let seconds_ms = event
+        .created_at
+        .as_secs()
+        .checked_mul(1000)
+        .context("attestation timestamp overflow")?;
+    if event.kind == Kind::from(FACT_SNAPSHOT_KIND) {
+        Ok(parse_fact_snapshot_event(event)?
+            .created_at_ms
+            .unwrap_or(seconds_ms))
+    } else {
+        Ok(seconds_ms)
+    }
+}
+
+fn newer_attestation(event: &Event, old: &Event) -> Result<bool> {
+    if event.kind == Kind::from(FACT_SNAPSHOT_KIND) && old.kind == event.kind {
+        return Ok(compare_fact_snapshots(
+            &parse_fact_snapshot_event(event)?,
+            &parse_fact_snapshot_event(old)?,
+        )
+        .is_gt());
+    }
+    if event.kind == APP_KIND && old.kind == APP_KIND {
+        // Preserve the legacy replaceable-event tie break when reading old stores.
+        return Ok(event.created_at > old.created_at
+            || (event.created_at == old.created_at && event.id < old.id));
+    }
+    Ok((
+        attestation_time_ms(event)?,
+        event.kind == Kind::from(FACT_SNAPSHOT_KIND),
+    ) > (
+        attestation_time_ms(old)?,
+        old.kind == Kind::from(FACT_SNAPSHOT_KIND),
+    ))
 }
 
 pub struct Trust {
@@ -55,29 +168,20 @@ impl Trust {
         let identifier = if event.kind == Kind::ContactList || event.kind == Kind::MuteList {
             event.kind.as_u16().to_string()
         } else {
-            ensure!(
-                event.kind == APP_KIND,
-                "expected signed follows, mutes, or a Haps attestation"
-            );
-            let attestation: Attestation = serde_json::from_str(&event.content)?;
-            ensure!(
-                attestation.schema == "haps.attestation.v1" && attestation.note.len() <= 4096,
-                "invalid attestation"
-            );
-            EventId::from_hex(&attestation.release)?;
-            let identifier = tag_value(&event, "d")?.to_string();
-            ensure!(
-                identifier == format!("haps/attestation/{}", attestation.release),
-                "attestation target mismatch"
-            );
-            identifier
+            let attestation = parse_attestation(&event)?;
+            format!("haps/attestation/{}", attestation.release)
         };
         let key = format!("{}/{}", event.pubkey.to_hex(), identifier);
-        if let Some(old) = self.events.get(&key)
-            && (event.created_at < old.created_at
-                || (event.created_at == old.created_at && event.id >= old.id))
-        {
-            return Ok(());
+        if let Some(old) = self.events.get(&key) {
+            let newer = if event.kind == Kind::ContactList || event.kind == Kind::MuteList {
+                event.created_at > old.created_at
+                    || (event.created_at == old.created_at && event.id < old.id)
+            } else {
+                newer_attestation(&event, old)?
+            };
+            if !newer {
+                return Ok(());
+            }
         }
         self.events.insert(key, event);
         self.rebuild()
@@ -159,7 +263,11 @@ impl Trust {
     /// Current positive attestations counted by the installation policy.
     pub fn attestations(&self, release: &Release) -> Vec<&Event> {
         let mut attestations = Vec::new();
-        for event in self.events.values().filter(|e| e.kind == APP_KIND) {
+        for event in self
+            .events
+            .values()
+            .filter(|e| e.kind == APP_KIND || e.kind == Kind::from(FACT_SNAPSHOT_KIND))
+        {
             let author = event.pubkey.to_hex();
             if author == release.author()
                 || self.muted(&author)
@@ -167,7 +275,7 @@ impl Trust {
             {
                 continue;
             }
-            if let Ok(a) = serde_json::from_str::<Attestation>(&event.content)
+            if let Ok(a) = parse_attestation(event)
                 && a.release == release.event.id.to_hex()
                 && a.approved
             {

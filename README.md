@@ -142,6 +142,32 @@ existing menu entries/comments and saves the original menu file as
 checks as the CLI. It adds no automatic trust overrides or background updates.
 Use Haps 0.1.2 or newer for the Linux catalog and menu integration.
 
+### Updating Haps itself
+
+Use the same installation route you started with:
+
+- **Cargo:** run `cargo install haps --locked` again. Cargo checks the registry
+  version and rebuilds when needed.
+- **Prebuilt on macOS or Linux:** rerun the installer. It verifies the downloaded
+  archive and executable before replacing Haps. If you originally used a custom
+  directory, pass the same `--bin-dir` or `HAPS_INSTALL_DIR` again.
+- **Windows zip:** close running Haps processes, extract the new release, and
+  replace `haps.exe` in the directory where you installed it.
+- **Source checkout:** update the source and repeat `cargo install --path . --locked`.
+
+```sh
+curl -fsSL https://haps.hashtree.cc/install.sh | sh
+haps --version
+```
+
+`haps update PACKAGE` updates a package managed by Haps, not the running manager.
+Installing or updating a package named `haps` in its internal store would not
+replace a separately installed executable on your PATH. There is no `self-update`
+command yet, and Haps does not currently depend on `hashtree-updater`.
+A future `haps self-update` should use that shared library's signed Hashtree
+release resolution and install helpers for prebuilt installs, while directing
+Cargo-managed installs back to Cargo.
+
 ### Downloads
 
 Prebuilt Haps 0.1.4 archives, hosted on Hashtree:
@@ -403,22 +429,28 @@ but reading still needs an available copy and supported transport.
 
 ## Protocol and current limits
 
-The prototype uses experimental kind-30078 app-data events with distinct `d` tags:
-`haps/catalog/v1`, `haps/package/NAME`, `haps/release/NAME/VERSION/TARGET`, and
-`haps/attestation/RELEASE_ID`. Catalogs and releases include versioned JSON schemas;
-their referenced content and search indexes are hashtree CIDs. This is **not yet
-Zapstore software-event compatibility**. Package comments use NIP-22 kind 1111 with
-an `A` root; release comments use an `E` root.
+Catalogs, package cards, and releases use kind-30078 app-data events with
+`d` tags `haps/catalog/v1`, `haps/package/NAME`, and
+`haps/release/NAME/VERSION/TARGET`. Their content and search indexes are Hashtree
+CIDs. Package comments use NIP-22 kind 1111 with an `A` root; release comments use
+an `E` root. This is not yet Zapstore software-event compatibility.
 
-The shared [fact-event draft](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-social-graph/nips/fact-events.md?g=)
-is a candidate envelope for release attestations: a release subject, signed claims,
-and explicit replacement/dispute links. Haps does not emit or import that format
-yet. The shared Rust and TypeScript helpers currently require UUID subjects, so
-adoption needs an explicit release-ID mapping or a generic subject API. Any
-migration must preserve exact release/platform binding, count each trusted signer
-once, and prevent another signer from replacing someone else's claim. A dispute
-or an identity-link claim must never silently become installation approval.
+Release attestations use the shared [fact-event format](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-social-graph/nips/fact-events.md?g=):
+kind `37368`, empty content, and the exact release event hash in both
+`["i", "<hash>", "subject"]` and `["d", "<hash>"]`. Required facts are
+`type=haps_release_attestation`, `schema=1`, `approved=true|false`, and a `note`.
+New snapshots include millisecond metadata; Haps compares timestamp, milliseconds,
+then event ID as defined by the shared helpers. `--revoke` writes `approved=false`.
+Each signer counts at most once per release, regardless of how many copies are
+imported. One signer cannot replace another's decision.
 
+Existing kind-30078 `haps/attestation/RELEASE_ID` events remain readable and share
+the same signer/release slot with new snapshots. They use their second timestamp
+when compared with new snapshots; an exact time tie prefers the fact snapshot.
+Legacy-only ties retain the original ordering. Older Haps versions cannot read
+the new format. Other fact profiles, identity links, ratings, and disputes do not
+authorize installation. Signatures prove authorship, not the claimed testing or
+audit work.
 
 Catalog authors are pinned on source addition. Saved sequence/event checkpoints
 reject older catalogs and changes at an already-seen sequence. This cannot prove
