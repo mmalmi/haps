@@ -8,6 +8,10 @@ the proposed name for a future graphical app store using that same library.
 There is no central account registration or globally owned package-name registry:
 a package's identity is its publisher public key plus its name.
 
+Publishing is permissionless. People, organizations, and agents use the same
+key-based identity and signed package format. Agents can use qualified package
+names and explicit trust policies without an interactive chooser or account signup.
+
 ## Status
 
 This is an experimental, working prototype for native programs and regular-file
