@@ -34,10 +34,7 @@ Implemented:
 The CLI and file layout are designed for macOS, Linux, and Windows. The test suite
 compiles and installs a native executable, runs it with arguments, updates it,
 rolls back, and exchanges signed comments between separate identities over a local
-HTTP source. CI is configured to run that suite on all three operating systems;
-configuration alone does not mean those remote jobs have run.
-
-CI runs native installation and execution on macOS, Linux, and Windows.
+HTTP source. CI runs that suite on all three operating systems.
 
 ## Build and use
 
@@ -49,7 +46,7 @@ haps install iris-drive
 haps run iris-drive
 ```
 
-Website: [haps.iris.to](https://haps.iris.to). Source is mirrored on
+Website: [haps.hashtree.cc](https://haps.hashtree.cc). Source is mirrored on
 [GitHub](https://github.com/mmalmi/haps) and
 [hashtree](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps).
 
