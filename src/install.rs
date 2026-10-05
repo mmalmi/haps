@@ -1,0 +1,221 @@
+use crate::{model::*, repository::Repository};
+use anyhow::{Context, Result, bail, ensure};
+use futures::TryStreamExt;
+use hashtree_core::Cid;
+use nostr::Event;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Receipt {
+    pub current: Event,
+    pub previous: Option<Event>,
+    #[serde(default)]
+    pub minimum_attestations: usize,
+}
+
+pub struct Installation {
+    home: PathBuf,
+}
+
+impl Installation {
+    pub fn new(home: PathBuf) -> Result<Self> {
+        fs::create_dir_all(&home)?;
+        Ok(Self { home })
+    }
+    pub fn receipts(&self) -> Result<BTreeMap<String, Receipt>> {
+        let file = self.home.join("installed.json");
+        if file.exists() {
+            read_json(&file)
+        } else {
+            Ok(BTreeMap::new())
+        }
+    }
+    fn save(&self, receipts: &BTreeMap<String, Receipt>) -> Result<()> {
+        atomic_write(
+            &self.home.join("installed.json"),
+            &serde_json::to_vec_pretty(receipts)?,
+        )
+    }
+    fn version_dir(&self, release: &Release) -> PathBuf {
+        self.home
+            .join("packages")
+            .join(release.author())
+            .join(&release.data.package.name)
+            .join(release.event.id.to_hex())
+    }
+    fn find<'a>(
+        receipts: &'a BTreeMap<String, Receipt>,
+        name: &str,
+    ) -> Result<(&'a String, &'a Receipt)> {
+        let matches: Vec<_> = receipts
+            .iter()
+            .filter(|(id, _)| *id == name || id.rsplit('/').next() == Some(name))
+            .collect();
+        ensure!(
+            matches.len() == 1,
+            "package is missing or ambiguous; use its full publisher/name"
+        );
+        Ok(matches[0])
+    }
+    pub fn receipt(&self, name: &str) -> Result<Receipt> {
+        Ok(Self::find(&self.receipts()?, name)?.1.clone())
+    }
+    pub fn path(&self, name: &str) -> Result<PathBuf> {
+        Ok(self.version_dir(&Release::verify(self.receipt(name)?.current)?))
+    }
+    pub fn command(&self, name: &str, command: Option<&str>) -> Result<PathBuf> {
+        let release = Release::verify(self.receipt(name)?.current)?;
+        let commands = &release.data.package.commands;
+        let path = if let Some(command) = command {
+            commands
+                .get(command)
+                .context("command not provided by this package")?
+        } else if commands.len() == 1 {
+            commands.values().next().unwrap()
+        } else {
+            bail!("choose a command with --command; for GUI bundles use `haps path`");
+        };
+        Ok(self.version_dir(&release).join(safe_path(path)?))
+    }
+    pub async fn install(&self, repo: &Repository, release: &Release) -> Result<()> {
+        self.install_with_policy(repo, release, 0).await
+    }
+    pub async fn install_with_policy(
+        &self,
+        repo: &Repository,
+        release: &Release,
+        minimum_attestations: usize,
+    ) -> Result<()> {
+        // Verify again at the installation boundary; caller-owned structs are not trusted.
+        let release = Release::verify(release.event.clone())?;
+        ensure!(
+            release.data.package.target == target(),
+            "release target does not match this machine ({})",
+            target()
+        );
+        let _guard = lock(&self.home.join(".install.lock"))?;
+        let mut receipts = self.receipts()?;
+        let id = release.identity();
+        let previous = receipts.get(&id).map(|r| r.current.clone());
+        let minimum_attestations =
+            minimum_attestations.max(receipts.get(&id).map_or(0, |r| r.minimum_attestations));
+        if let Some(previous) = &previous {
+            let old = Release::verify(previous.clone())?;
+            if old.event.id == release.event.id {
+                receipts.get_mut(&id).unwrap().minimum_attestations = minimum_attestations;
+                self.save(&receipts)?;
+                return Ok(());
+            }
+            ensure!(
+                release.data.package.version > old.data.package.version,
+                "refusing downgrade or changed release at the same version; use rollback for the previous installed release"
+            );
+        }
+        let manifest: Manifest = repo.json(&release.data.manifest).await?;
+        manifest.validate(&release.data.package)?;
+        let final_dir = self.version_dir(&release);
+        let parent = final_dir.parent().context("invalid install directory")?;
+        fs::create_dir_all(parent)?;
+        let stage = tempfile::Builder::new()
+            .prefix(".staging-")
+            .tempdir_in(parent)?;
+        let tree = repo.store.tree();
+        for file in &manifest.files {
+            let output = stage.path().join(safe_path(&file.path)?);
+            fs::create_dir_all(output.parent().unwrap())?;
+            let mut destination = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output)?;
+            let cid = Cid::parse(&file.cid)?;
+            let mut stream = tree.get_stream(&cid);
+            let mut written = 0u64;
+            while let Some(chunk) = stream.try_next().await? {
+                written = written
+                    .checked_add(chunk.len() as u64)
+                    .context("file size overflow")?;
+                ensure!(written <= file.size, "download exceeds signed file size");
+                destination.write_all(&chunk)?;
+            }
+            ensure!(written == file.size, "incomplete file: {}", file.path);
+            // Check existence even for empty files: a missing root must not masquerade as empty content.
+            use hashtree_core::Store;
+            ensure!(repo.store.has(&cid.hash).await?, "file root is unavailable");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                destination.set_permissions(fs::Permissions::from_mode(if file.executable {
+                    0o755
+                } else {
+                    0o644
+                }))?;
+            }
+            destination.sync_all()?;
+        }
+        // A previous interrupted install may have left this immutable slot. Never
+        // trust those bytes: replace it only after the fresh verified stage exists.
+        if final_dir.exists() {
+            fs::remove_dir_all(&final_dir)?;
+        }
+        fs::rename(stage.path(), &final_dir)?;
+        receipts.insert(
+            id,
+            Receipt {
+                current: release.event,
+                previous,
+                minimum_attestations,
+            },
+        );
+        self.save(&receipts)?;
+        Ok(())
+    }
+    pub fn rollback(&self, name: &str) -> Result<()> {
+        let _guard = lock(&self.home.join(".install.lock"))?;
+        let mut receipts = self.receipts()?;
+        let (id, receipt) = Self::find(&receipts, name)?;
+        let id = id.clone();
+        let previous = receipt
+            .previous
+            .clone()
+            .context("no previous version retained")?;
+        let release = Release::verify(previous.clone())?;
+        ensure!(
+            self.version_dir(&release).is_dir(),
+            "previous version is unavailable"
+        );
+        let current = receipt.current.clone();
+        let minimum_attestations = receipt.minimum_attestations;
+        receipts.insert(
+            id,
+            Receipt {
+                current: previous,
+                previous: Some(current),
+                minimum_attestations,
+            },
+        );
+        self.save(&receipts)
+    }
+    pub fn remove(&self, name: &str) -> Result<()> {
+        let _guard = lock(&self.home.join(".install.lock"))?;
+        let mut receipts = self.receipts()?;
+        let id = Self::find(&receipts, name)?.0.clone();
+        receipts.remove(&id);
+        self.save(&receipts)
+    }
+}
+
+pub fn ensure_public_key(value: &str) -> Result<String> {
+    Ok(nostr::PublicKey::parse(value)?.to_hex())
+}
+
+pub fn load_keys(path: &Path) -> Result<nostr::Keys> {
+    let key = fs::read_to_string(path)
+        .context("signing key unavailable; run `haps identity init` or provide --key-file")?;
+    nostr::Keys::parse(key.trim()).context("invalid secret key file")
+}
