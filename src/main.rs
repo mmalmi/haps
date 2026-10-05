@@ -24,6 +24,9 @@ struct Cli {
     /// Start a fresh configuration without the maintainer catalog or trust seed.
     #[arg(long, global = true, env = "HAPS_NO_DEFAULTS")]
     no_defaults: bool,
+    /// Never prompt; require publisher/name when several publishers match.
+    #[arg(long, global = true, env = "HAPS_NON_INTERACTIVE")]
+    non_interactive: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -80,12 +83,18 @@ enum Command {
     /// Search signed hashtree indexes, ranked by your social graph.
     Search {
         query: String,
+        /// Emit one JSON array and never prompt.
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect the publisher, exact release ID, and social evidence.
     Info {
         package: String,
         #[arg(long)]
         version: Option<semver::Version>,
+        /// Emit JSON and never prompt.
+        #[arg(long)]
+        json: bool,
     },
     /// Install a package. Use publisher/name when a name is ambiguous.
     Install {
@@ -96,12 +105,18 @@ enum Command {
         allow_untrusted: bool,
         #[arg(long, default_value_t = 0)]
         require_attestations: usize,
+        /// Emit JSON and never prompt.
+        #[arg(long)]
+        json: bool,
     },
-    /// Update an installed package while retaining its publisher and review policy.
+    /// Update an installed package while retaining its publisher and attestation policy.
     Update {
         package: String,
         #[arg(long)]
         allow_untrusted: bool,
+        /// Emit JSON and never prompt.
+        #[arg(long)]
+        json: bool,
     },
     /// Run an installed command without changing your system PATH.
     Run {
@@ -112,24 +127,21 @@ enum Command {
         args: Vec<String>,
     },
     /// Show an installed directory (including native app bundles).
-    Path {
-        package: String,
-    },
+    Path { package: String },
     /// Add a small Haps submenu to Omarchy v4 (requires Python 3 and fzf).
     Omarchy {
         /// Remove only the menu entries installed by Haps.
         #[arg(long)]
         remove: bool,
     },
-    List,
+    List {
+        #[arg(long)]
+        json: bool,
+    },
     /// Activate the previous installed version.
-    Rollback {
-        package: String,
-    },
+    Rollback { package: String },
     /// Remove from the installed set. Retain cached files for recovery.
-    Remove {
-        package: String,
-    },
+    Remove { package: String },
     /// Follow a publisher locally; optionally export the signed Nostr follow event.
     Follow {
         public_key: String,
@@ -137,18 +149,26 @@ enum Command {
         export: Option<PathBuf>,
     },
     /// Import verified Nostr follows, mutes, and release attestations.
-    Import {
-        events: PathBuf,
-    },
-    /// Sign a review of an exact release; no relay publishing is performed.
+    Import { events: PathBuf },
+    /// Sign a claim about an exact release; no relay publishing is performed.
     Attest {
-        release_id: String,
+        /// Release event ID, or publisher/package with --version.
+        release: String,
+        /// Required with a package name. Uses this machine's platform by default.
+        #[arg(long)]
+        version: Option<semver::Version>,
+        /// Select another platform when using a package name and --version.
+        #[arg(long, requires = "version")]
+        target: Option<String>,
         #[arg(long)]
         note: String,
         #[arg(long)]
         revoke: bool,
         #[arg(long)]
-        out: PathBuf,
+        out: Option<PathBuf>,
+        /// Emit the signed event as JSON and never prompt.
+        #[arg(long)]
+        json: bool,
     },
     /// Write a signed package comment, release comment, or reply.
     Comment {
@@ -169,6 +189,20 @@ enum Command {
         #[arg(long)]
         release: Option<String>,
     },
+}
+
+impl Command {
+    fn json(&self) -> bool {
+        match self {
+            Self::Search { json, .. }
+            | Self::Info { json, .. }
+            | Self::Install { json, .. }
+            | Self::Update { json, .. }
+            | Self::List { json }
+            | Self::Attest { json, .. } => *json,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -446,6 +480,8 @@ fn select(
     version: Option<&semver::Version>,
     aliases: &BTreeMap<String, String>,
     trust: &Trust,
+    target_filter: &str,
+    non_interactive: bool,
 ) -> Result<Candidate> {
     let package = if let Some((key, name)) = package.split_once('/') {
         format!("{}/{}", ensure_public_key(key)?, name)
@@ -454,7 +490,7 @@ fn select(
     };
     candidates.retain(|c| {
         (c.release.identity() == package || c.release.data.package.name == package)
-            && c.release.data.package.target == target()
+            && c.release.data.package.target == target_filter
             && version.is_none_or(|v| &c.release.data.package.version == v)
             && (version.is_some() || c.release.data.package.version.pre.is_empty())
     });
@@ -462,10 +498,10 @@ fn select(
     ensure!(
         !candidates.is_empty(),
         "no matching release for {}",
-        target()
+        target_filter
     );
     if authors.len() > 1 {
-        use std::io::{IsTerminal, Write};
+        use std::io::IsTerminal;
         let mut choices: Vec<_> = authors.into_iter().collect();
         let approvals = |author: &str| {
             candidates
@@ -488,42 +524,62 @@ fn select(
                 publisher_label(aliases, author),
             )
         });
-        let options: Vec<_> = choices
+        let releases: Vec<_> = choices
             .iter()
             .map(|author| {
+                &candidates
+                    .iter()
+                    .filter(|c| c.release.author() == *author)
+                    .max_by_key(|c| &c.release.data.package.version)
+                    .unwrap()
+                    .release
+            })
+            .collect();
+        let options: Vec<_> = releases
+            .iter()
+            .map(|release| {
+                let author = release.author();
                 format!(
-                    "{}/{} ({author}; {}; {} approvals{})",
-                    publisher_label(aliases, author),
-                    package,
-                    match trust.distance(author) {
-                        Some(0) => "you".into(),
-                        Some(1) => "you follow".into(),
-                        Some(hops) => format!("{hops} hops away"),
-                        None => "outside your graph".into(),
+                    "{} {} · {}{}\n    {}",
+                    release_label(release, aliases),
+                    release.data.package.version,
+                    relationship(trust, &author),
+                    if trust.muted(&author) {
+                        " · muted"
+                    } else {
+                        ""
                     },
-                    approvals(author),
-                    if trust.muted(author) { "; muted" } else { "" }
+                    attestation_summary(release, trust, aliases),
                 )
             })
             .collect();
-        ensure!(
-            std::io::stdin().is_terminal(),
-            "multiple publishers use this name; choose an explicit publisher/name:\n{}",
-            options.join("\n")
-        );
-        for (index, option) in options.iter().enumerate() {
-            eprintln!("  {}. {option}", index + 1);
+        if non_interactive
+            || !std::io::stdin().is_terminal()
+            || !std::io::stdout().is_terminal()
+            || !std::io::stderr().is_terminal()
+            || std::env::var("TERM").is_ok_and(|term| term == "dumb")
+        {
+            return Err(AmbiguousPublishers {
+                candidates: releases
+                    .iter()
+                    .map(|r| release_json(r, trust, aliases))
+                    .collect(),
+            }
+            .into());
         }
-        eprint!("Choose a publisher [1-{}]: ", choices.len());
-        std::io::stderr().flush()?;
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let index: usize = input.trim().parse().context("enter a listed number")?;
-        ensure!(
-            index > 0 && index <= choices.len(),
-            "invalid publisher selection"
-        );
-        candidates.retain(|c| c.release.author() == choices[index - 1]);
+        eprintln!("Several publishers match. Choose one:");
+        eprintln!("↑/↓ move · Enter select · Esc cancel");
+        let theme = dialoguer::theme::ColorfulTheme {
+            active_item_style: dialoguer::console::Style::new().for_stderr().green(),
+            ..Default::default()
+        };
+        let index = dialoguer::Select::with_theme(&theme)
+            .items(&options)
+            .default(0)
+            .max_length(5)
+            .interact_opt()?
+            .context("cancelled; no publisher selected")?;
+        candidates.retain(|c| c.release.author() == choices[index]);
     }
     candidates.sort_by(|a, b| {
         b.release
@@ -535,31 +591,181 @@ fn select(
     Ok(candidates.remove(0))
 }
 
-fn print_release(release: &Release, trust: &Trust) -> Result<()> {
+// Terminal text must not execute control sequences from shared aliases or signed notes.
+fn terminal_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|c| {
+            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+fn release_label(release: &Release, aliases: &BTreeMap<String, String>) -> String {
+    format!(
+        "{}/{}",
+        terminal_text(&publisher_label(aliases, &release.author())),
+        release.data.package.name
+    )
+}
+
+fn relationship(trust: &Trust, author: &str) -> String {
+    match trust.distance(author) {
+        Some(0) => "you".into(),
+        Some(1) => "you follow".into(),
+        Some(hops) => format!("{hops} hops away"),
+        None => "outside your graph".into(),
+    }
+}
+
+fn attestation_summary(
+    release: &Release,
+    trust: &Trust,
+    aliases: &BTreeMap<String, String>,
+) -> String {
+    let mut names: Vec<_> = trust
+        .attesters(release)
+        .iter()
+        .map(|key| terminal_text(&publisher_label(aliases, key)))
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        "No trusted attestations".into()
+    } else {
+        format!("Attested by {}", names.join(", "))
+    }
+}
+
+fn release_json(
+    release: &Release,
+    trust: &Trust,
+    aliases: &BTreeMap<String, String>,
+) -> serde_json::Value {
+    let attestations: Vec<_> = trust
+        .attestations(release)
+        .iter()
+        .map(|event| {
+            serde_json::json!({"signer": event.pubkey.to_hex(),
+            "label": publisher_label(aliases, &event.pubkey.to_hex()), "event": event})
+        })
+        .collect();
+    serde_json::json!({
+        "identity": release.identity(),
+        "label": release_label(release, aliases),
+        "package": release.data.package, "publisher": release.author(),
+        "release_id": release.event.id.to_hex(), "manifest": release.data.manifest,
+        "follow_distance": trust.distance(&release.author()), "muted": trust.muted(&release.author()),
+        "attesters": trust.attesters(release), "attestations": attestations,
+    })
+}
+
+#[derive(Debug)]
+struct AmbiguousPublishers {
+    candidates: Vec<serde_json::Value>,
+}
+
+impl std::fmt::Display for AmbiguousPublishers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "multiple publishers use this name; choose an explicit publisher/name:"
+        )?;
+        for candidate in &self.candidates {
+            writeln!(
+                f,
+                "  {} ({})",
+                candidate["label"].as_str().unwrap(),
+                candidate["identity"].as_str().unwrap()
+            )?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for AmbiguousPublishers {}
+
+fn print_release(
+    release: &Release,
+    trust: &Trust,
+    aliases: &BTreeMap<String, String>,
+) -> Result<()> {
     println!(
         "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "package": release.data.package, "publisher": release.author(),
-            "release_id": release.event.id.to_hex(), "manifest": release.data.manifest,
-            "follow_distance": trust.distance(&release.author()), "muted": trust.muted(&release.author()),
-            "attesters": trust.attesters(release),
-        }))?
+        serde_json::to_string_pretty(&release_json(release, trust, aliases))?
     );
+    Ok(())
+}
+
+fn print_install_start(release: &Release, trust: &Trust, aliases: &BTreeMap<String, String>) {
+    eprintln!(
+        "Installing {} {}",
+        release_label(release, aliases),
+        release.data.package.version
+    );
+    eprintln!("  Signature verified");
+    eprintln!("  {}", attestation_summary(release, trust, aliases));
+    for event in trust.attestations(release) {
+        if let Ok(claim) = serde_json::from_str::<haps::trust::Attestation>(&event.content) {
+            eprintln!(
+                "    {}: {}",
+                terminal_text(&publisher_label(aliases, &event.pubkey.to_hex())),
+                terminal_text(&claim.note)
+            );
+        }
+    }
+}
+
+fn print_installed(
+    release: &Release,
+    trust: &Trust,
+    aliases: &BTreeMap<String, String>,
+    json: bool,
+) -> Result<()> {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"status": "installed", "release": release_json(release, trust, aliases)})
+        );
+    } else {
+        println!(
+            "Installed {} {}",
+            release_label(release, aliases),
+            release.data.package.version
+        );
+        if release.data.package.app.is_some() || !release.data.package.commands.is_empty() {
+            println!("Run with: haps run {}", release_label(release, aliases));
+        }
+    }
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    match execute(Cli::parse()).await {
+    let cli = Cli::parse();
+    let json = cli.command.json();
+    match execute(cli).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("haps: {error:#}");
+            if json {
+                let mut value = serde_json::json!({"code": "operation_failed", "message": format!("{error:#}")});
+                if let Some(ambiguous) = error.downcast_ref::<AmbiguousPublishers>() {
+                    value["code"] = "ambiguous_package".into();
+                    value["candidates"] = serde_json::json!(ambiguous.candidates);
+                }
+                println!("{}", serde_json::json!({"error": value}));
+            } else {
+                eprintln!("haps: {error:#}");
+            }
             ExitCode::FAILURE
         }
     }
 }
 
 async fn execute(mut cli: Cli) -> Result<u8> {
+    let non_interactive = cli.non_interactive || cli.command.json();
     if matches!(cli.command, Command::Target) {
         println!("{}", target());
         return Ok(0);
@@ -752,7 +958,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 save_config(&home, &config)?;
             }
         },
-        Command::Search { query } => {
+        Command::Search { query, json } => {
             let mut results = candidates(&home, &mut config, Some(&query)).await?;
             results.retain(|c| !trust.muted(&c.release.author()));
             // Unknown authors sort after known authors; fewer hops first.
@@ -762,25 +968,20 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     std::cmp::Reverse(trust.attesters(&c.release).len()),
                 )
             });
-            for candidate in results {
-                print_release(&candidate.release, &trust)?;
+            if json {
+                let releases: Vec<_> = results
+                    .iter()
+                    .map(|c| release_json(&c.release, &trust, &config.aliases))
+                    .collect();
+                println!("{}", serde_json::to_string(&releases)?);
+            } else {
+                for candidate in results {
+                    print_release(&candidate.release, &trust, &config.aliases)?;
+                }
             }
         }
-        Command::Info { package, version } => {
-            let candidate = select(
-                candidates(&home, &mut config, None).await?,
-                &package,
-                version.as_ref(),
-                &config.aliases,
-                &trust,
-            )?;
-            print_release(&candidate.release, &trust)?;
-        }
-        Command::Install {
-            package,
-            version,
-            allow_untrusted,
-            require_attestations,
+        Command::Info {
+            package, version, ..
         } => {
             let candidate = select(
                 candidates(&home, &mut config, None).await?,
@@ -788,6 +989,26 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 version.as_ref(),
                 &config.aliases,
                 &trust,
+                target(),
+                non_interactive,
+            )?;
+            print_release(&candidate.release, &trust, &config.aliases)?;
+        }
+        Command::Install {
+            package,
+            version,
+            allow_untrusted,
+            require_attestations,
+            json,
+        } => {
+            let candidate = select(
+                candidates(&home, &mut config, None).await?,
+                &package,
+                version.as_ref(),
+                &config.aliases,
+                &trust,
+                target(),
+                non_interactive,
             )?;
             let require_attestations = require_attestations.max(
                 installation
@@ -796,6 +1017,9 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     .map_or(0, |r| r.minimum_attestations),
             );
             trust.authorize(&candidate.release, allow_untrusted, require_attestations)?;
+            if !json {
+                print_install_start(&candidate.release, &trust, &config.aliases);
+            }
             let repo = Repository::open(
                 &config.sources[&candidate.source].location,
                 &home.join("cache"),
@@ -803,15 +1027,12 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             installation
                 .install_with_policy(&repo, &candidate.release, require_attestations)
                 .await?;
-            println!(
-                "Installed {} {}",
-                candidate.release.identity(),
-                candidate.release.data.package.version
-            );
+            print_installed(&candidate.release, &trust, &config.aliases, json)?;
         }
         Command::Update {
             package,
             allow_untrusted,
+            json,
         } => {
             let receipt = installation.receipt(&package)?;
             let current = Release::verify(receipt.current)?;
@@ -821,12 +1042,17 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 None,
                 &config.aliases,
                 &trust,
+                target(),
+                non_interactive,
             )?;
             trust.authorize(
                 &candidate.release,
                 allow_untrusted,
                 receipt.minimum_attestations,
             )?;
+            if !json {
+                print_install_start(&candidate.release, &trust, &config.aliases);
+            }
             installation
                 .install_with_policy(
                     &Repository::open(
@@ -837,11 +1063,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     receipt.minimum_attestations,
                 )
                 .await?;
-            println!(
-                "Installed {} {}",
-                candidate.release.identity(),
-                candidate.release.data.package.version
-            );
+            print_installed(&candidate.release, &trust, &config.aliases, json)?;
         }
         Command::Run {
             package,
@@ -891,13 +1113,21 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 "Omarchy menu integration failed"
             );
         }
-        Command::List => {
+        Command::List { json } => {
+            let mut releases = Vec::new();
             for (id, receipt) in installation.receipts()? {
                 let release = Release::verify(receipt.current)?;
-                println!(
-                    "{id}\t{}\t{}",
-                    release.data.package.version, release.event.id
-                );
+                if json {
+                    releases.push(release_json(&release, &trust, &config.aliases));
+                } else {
+                    println!(
+                        "{id}\t{}\t{}",
+                        release.data.package.version, release.event.id
+                    );
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string(&releases)?);
             }
         }
         Command::Rollback { package } => {
@@ -968,13 +1198,57 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             println!("Imported {count} signed events");
         }
         Command::Attest {
-            release_id,
+            release,
+            version,
+            target: requested_target,
             note,
             revoke,
             out,
+            json,
         } => {
             let keys = own_keys(&home, &config)?;
-            let mut event = attest(&keys, EventId::from_hex(&release_id)?, !revoke, note)?;
+            ensure!(
+                !note.trim().is_empty(),
+                "describe what you checked with --note"
+            );
+            let release_id = if let Ok(id) = EventId::from_hex(&release) {
+                ensure!(
+                    version.is_none(),
+                    "--version is only used with a package name"
+                );
+                id
+            } else {
+                let version = version.context(
+                    "use publisher/package --version VERSION, or an exact release event ID",
+                )?;
+                let package = resolve_package(&config, &release)?;
+                let candidate = select(
+                    candidates(&home, &mut config, None).await?,
+                    &package,
+                    Some(&version),
+                    &config.aliases,
+                    &trust,
+                    requested_target.as_deref().unwrap_or(target()),
+                    non_interactive,
+                )?;
+                if !json {
+                    eprintln!(
+                        "{} {} {} ({})",
+                        if revoke {
+                            "Revoking attestation for"
+                        } else {
+                            "Attesting to"
+                        },
+                        release_label(&candidate.release, &config.aliases),
+                        version,
+                        candidate.release.data.package.target
+                    );
+                    eprintln!("  Release: {}", candidate.release.event.id);
+                    eprintln!("  Claim: {}", terminal_text(&note));
+                }
+                candidate.release.event.id
+            };
+            let mut event = attest(&keys, release_id, !revoke, note)?;
             let identifier = tag_value(&event, "d")?;
             let previous = trust
                 .events()
@@ -996,8 +1270,15 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             }
             trust.ingest(event.clone())?;
             save_trust(&home, &trust)?;
+            let out =
+                out.unwrap_or_else(|| home.join("attestations").join(format!("{}.json", event.id)));
             atomic_write(&out, &serde_json::to_vec_pretty(&event)?)?;
-            println!("{}", event.id);
+            if json {
+                println!("{}", serde_json::to_string(&event)?);
+            } else {
+                println!("{}", event.id);
+                eprintln!("Saved signed attestation: {}", out.display());
+            }
         }
         Command::Comment {
             package,

@@ -138,7 +138,14 @@ impl Trust {
             .any(|p| p == author)
     }
     pub fn attesters(&self, release: &Release) -> Vec<String> {
-        let mut authors = BTreeSet::new();
+        self.attestations(release)
+            .iter()
+            .map(|event| event.pubkey.to_hex())
+            .collect()
+    }
+    /// Current positive attestations counted by the installation policy.
+    pub fn attestations(&self, release: &Release) -> Vec<&Event> {
+        let mut attestations = Vec::new();
         for event in self.events.values().filter(|e| e.kind == APP_KIND) {
             let author = event.pubkey.to_hex();
             if author == release.author()
@@ -151,10 +158,10 @@ impl Trust {
                 && a.release == release.event.id.to_hex()
                 && a.approved
             {
-                authors.insert(author);
+                attestations.push(event);
             }
         }
-        authors.into_iter().collect()
+        attestations
     }
     pub fn authorize(
         &self,
@@ -166,7 +173,7 @@ impl Trust {
         let attestations = self.attesters(release).len();
         ensure!(
             attestations >= minimum_attestations,
-            "release requires {minimum_attestations} attestations from you or people you follow; found {attestations}"
+            "release requires {minimum_attestations} attestations from you or keys you follow; found {attestations}"
         );
         ensure!(
             allow_untrusted

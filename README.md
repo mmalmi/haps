@@ -28,7 +28,7 @@ Implemented:
 - Author ranking using the actual `nostr-social-graph` library, imported signed
   follow/mute events, and explicit handling of ambiguous package names.
 - Release-specific signed attestations, revocation, and an optional minimum
-  number of reviewers from your direct follows. The requirement persists on updates.
+  number of attesters from your direct follows. The requirement persists on updates.
 - Staged installation, target checks, publisher-preserving updates, previous-version
   rollback, and local removal. Downloads must finish before activation changes.
 - Signed [NIP-22](https://github.com/nostr-protocol/nips/blob/master/22.md) comments
@@ -59,7 +59,7 @@ To inspect first or pin a version:
 ```sh
 curl -fsSL https://haps.hashtree.cc/install.sh -o install-haps.sh
 less install-haps.sh
-sh install-haps.sh --version v0.1.3 --bin-dir "$HOME/.local/bin"
+sh install-haps.sh --version v0.1.4 --bin-dir "$HOME/.local/bin"
 ```
 
 [Windows x64 zip and all release downloads](https://github.com/mmalmi/haps/releases/latest)
@@ -232,11 +232,32 @@ Aliases use the existing public `~/.hashtree/aliases` file and parser from
 shared configuration directory. Haps does not copy aliases into its own settings
 or read signing keys to resolve public aliases. Aliases do not imply trust.
 
-When a bare name matches multiple publishers, a terminal offers a numbered chooser
-ordered by social distance, then approvals of each publisher's newest matching
-release. The choices show the underlying public keys. Scripts receive the same
-ranked list and must specify a publisher explicitly. Existing installations retain
-their publisher on update.
+When a bare name matches multiple publishers, a terminal offers an arrow-key chooser
+ordered by social distance, then trusted attestations of each publisher's newest
+matching release. Enter selects; Escape cancels. Each choice shows a local alias
+(or full public key), the version, social distance, and attesters. Selection does
+not bypass trust policy. Existing installations retain their publisher on update.
+
+For agents and scripts, `--non-interactive` (or `HAPS_NON_INTERACTIVE=true`) disables
+prompts even in a terminal. Redirected stdin, stdout, or stderr also disables the chooser.
+`search`, `info`, `install`, `update`, `list`, and `attest` accept `--json`, which
+implies non-interactive mode. Search and list return one JSON array; info returns
+one release object; install/update return `{ "status": "installed", "release": ... }`.
+Attest returns the signed event. Runtime failures return a JSON `error` object and
+a nonzero exit status. Ambiguous names return `code: "ambiguous_package"` and a
+socially ranked `candidates` array, including full publisher keys, release IDs,
+and signed attestations. Diagnostics stay on stderr. CLI argument errors use
+the normal usage message on stderr.
+
+```sh
+haps search hello --json
+haps install npub1.../hello --version 1.0.0 --require-attestations 2 --json
+haps list --json
+```
+
+Choose an explicit publisher after inspecting the candidates; Haps never silently
+accepts the first match for an agent. Use public keys for reproducible automation;
+local aliases are conveniences, not global identities.
 
 ### Build from a Git repository
 
@@ -265,7 +286,7 @@ directory**, accessed through the public hashtree HTTP gateway. This is separate
 from Git source builds. Catalog signatures, publisher pins, content hashes, and
 rollback checks remain enforced.
 
-### Social discovery and reviews
+### Social discovery and release attestations
 
 ```sh
 haps identity use YOUR_NPUB                # discovery with an existing public identity
@@ -283,15 +304,28 @@ follow, excluding muted publishers. Other publishers require either explicit
 you/your direct follows. A publisher's self-attestation does not count.
 
 ```sh
-haps attest RELEASE_EVENT_ID --note "Built and tested this release" --out review.json
-haps import review.json
+haps attest alice/hello --version 1.0.0 --note "Built from source; tests pass" --out attestation.json
+haps import attestation.json
 haps install PUBLIC_KEY/hello --require-attestations 1
 haps attest RELEASE_EVENT_ID --revoke --note "Found a regression" --out revoked.json
 ```
 
-Signing a review records a person's assertion; Haps does not independently verify
-the claimed testing. Social distance is context, not a security guarantee. Unknown
-authors are shown distinctly rather than assigned invented reputation scores.
+The shortcut requires an explicit version and resolves the exact signed release
+for the current platform. Use `--target TARGET` for another platform, or pass a
+release event ID directly. Without `--out`, the signed event is saved under
+`HAPS_HOME/attestations/EVENT_ID.json`. It is also imported locally; nothing is
+automatically published to relays. Export and import events to share them.
+
+Install output shows **Attested by** and the signed notes. `info --json` includes
+the full signed events and signer keys. Only current positive attestations from
+you or your direct follows count; publisher self-attestations, muted signers,
+revocations, and attestations of a different release do not count. A future version
+or another platform needs its own attestations.
+
+An attestation is a signed claim by a person or agent about an exact release, such
+as tests run or code audited. It is not a product rating or automatic proof of a
+security audit. Haps verifies the signature and scope, not the claimed work.
+Social distance is context, not a security guarantee.
 
 ### Package and release comments
 
@@ -379,7 +413,7 @@ pins in future lockfiles.
 Even [npm already uses a content-addressable cache](https://docs.npmjs.com/cli/v11/commands/npm-cache/),
 and pnpm is a useful reference for shared content storage. The intended Haps
 combination is hashtree distribution **and search**, Nostr publisher identities,
-social-graph discovery, and signed release reviews. Content hashes verify bytes;
+social-graph discovery, and signed release attestations. Content hashes verify bytes;
 signatures identify who published them; social context informs the user's choice.
 Availability still requires retained copies and replication.
 

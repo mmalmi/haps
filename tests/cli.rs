@@ -395,3 +395,200 @@ fn fresh_install_has_a_visible_replaceable_maintainer_starting_point() {
         "none"
     );
 }
+
+#[test]
+fn attestation_shortcut_pins_version_platform_and_exports_signed_claims() {
+    let tmp = tempdir().unwrap();
+    let publisher = tmp.path().join("publisher");
+    let reader = tmp.path().join("reader");
+    let author = ok(&publisher, &["identity", "init"]);
+    let signer = ok(&reader, &["identity", "init"]);
+    let payload = tmp.path().join("payload");
+    fs::create_dir(&payload).unwrap();
+    fs::write(payload.join("data"), b"attestation fixture").unwrap();
+    let spec = tmp.path().join("haps.toml");
+    let repo = tmp.path().join("repo");
+    let host = haps::model::target();
+    let other = if host == "x86_64-pc-windows-msvc" {
+        "aarch64-apple-darwin"
+    } else {
+        "x86_64-pc-windows-msvc"
+    };
+    let mut releases = Vec::new();
+    for (version, target) in [("1.0.0", host), ("1.0.0", other), ("2.0.0", host)] {
+        fs::write(&spec, format!("name=\"hello\"\nversion=\"{version}\"\ntarget=\"{target}\"\ndescription=\"Fixture\"\n")).unwrap();
+        let event: nostr::Event = serde_json::from_str(&ok(
+            &publisher,
+            &[
+                "pack",
+                spec.to_str().unwrap(),
+                "--payload",
+                payload.to_str().unwrap(),
+                "--out",
+                repo.to_str().unwrap(),
+            ],
+        ))
+        .unwrap();
+        releases.push(event);
+    }
+    ok(
+        &reader,
+        &[
+            "source",
+            "add",
+            "alice",
+            repo.to_str().unwrap(),
+            "--author",
+            &author,
+        ],
+    );
+    ok(&reader, &["alias", "add", "alice", &author]);
+    ok(&reader, &["alias", "add", "me", &signer]);
+    // Never infer the latest release when signing a claim.
+    for args in [
+        vec!["attest", "alice/hello", "--note", "Checked", "--json"],
+        vec![
+            "attest",
+            "alice/hello",
+            "--version",
+            "9.0.0",
+            "--note",
+            "Checked",
+            "--json",
+        ],
+        vec![
+            "attest",
+            "alice/hello",
+            "--version",
+            "1.0.0",
+            "--note",
+            " ",
+            "--json",
+        ],
+    ] {
+        let result = cli(&reader, &args);
+        assert!(!result.status.success());
+        let error: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(error["error"]["code"], "operation_failed");
+    }
+    let note = "Ran tests\n\u{1b}[2Jnot terminal commands";
+    let signed: nostr::Event = serde_json::from_str(&ok(
+        &reader,
+        &[
+            "attest",
+            "alice/hello",
+            "--version",
+            "1.0.0",
+            "--note",
+            note,
+            "--json",
+        ],
+    ))
+    .unwrap();
+    signed.verify().unwrap();
+    let claim: haps::trust::Attestation = serde_json::from_str(&signed.content).unwrap();
+    assert_eq!(claim.release, releases[0].id.to_hex());
+    assert_eq!(claim.note, note);
+    assert!(claim.approved);
+    assert!(
+        reader
+            .join("attestations")
+            .join(format!("{}.json", signed.id))
+            .exists()
+    );
+    let info: serde_json::Value = serde_json::from_str(&ok(
+        &reader,
+        &["info", "alice/hello", "--version", "1.0.0", "--json"],
+    ))
+    .unwrap();
+    assert_eq!(info["attestations"][0]["label"], "me");
+    assert_eq!(info["attestations"][0]["event"]["id"], signed.id.to_hex());
+    // A package/version shortcut still binds one platform, never every build.
+    let foreign: nostr::Event = serde_json::from_str(&ok(
+        &reader,
+        &[
+            "attest",
+            "alice/hello",
+            "--version",
+            "1.0.0",
+            "--target",
+            other,
+            "--note",
+            "Inspected foreign build",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<haps::trust::Attestation>(&foreign.content)
+            .unwrap()
+            .release,
+        releases[1].id.to_hex()
+    );
+    let install = cli(
+        &reader,
+        &[
+            "install",
+            "alice/hello",
+            "--version",
+            "1.0.0",
+            "--require-attestations",
+            "1",
+        ],
+    );
+    assert!(install.status.success());
+    let output = String::from_utf8(install.stderr).unwrap();
+    assert!(output.contains("Attested by me"));
+    assert!(output.contains("\\n\\u{1b}[2J"));
+    assert!(!output.contains('\u{1b}'));
+    // A new release does not inherit claims about an old one.
+    let failed = cli(&reader, &["update", "alice/hello", "--json"]);
+    assert!(!failed.status.success());
+    let error: serde_json::Value = serde_json::from_slice(&failed.stdout).unwrap();
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("found 0")
+    );
+    // Revocation supersedes the claim, including same-second commands.
+    ok(
+        &reader,
+        &[
+            "attest",
+            "alice/hello",
+            "--version",
+            "1.0.0",
+            "--revoke",
+            "--note",
+            "Found a bug",
+            "--json",
+        ],
+    );
+    let info: serde_json::Value = serde_json::from_str(&ok(
+        &reader,
+        &["info", "alice/hello", "--version", "1.0.0", "--json"],
+    ))
+    .unwrap();
+    assert_eq!(info["attestations"], serde_json::json!([]));
+    assert!(
+        !cli(
+            &reader,
+            &[
+                "install",
+                "alice/hello",
+                "--version",
+                "1.0.0",
+                "--allow-untrusted",
+                "--json"
+            ]
+        )
+        .status
+        .success()
+    );
+    let search: serde_json::Value =
+        serde_json::from_str(&ok(&reader, &["search", "hello", "--json"])).unwrap();
+    assert_eq!(search.as_array().unwrap().len(), 3);
+    let list: serde_json::Value = serde_json::from_str(&ok(&reader, &["list", "--json"])).unwrap();
+    assert_eq!(list[0]["release_id"], releases[0].id.to_hex());
+}
