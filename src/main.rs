@@ -2,6 +2,7 @@ use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand};
 use haps::comments::{self, Comments, Scope};
 use haps::{
+    discovery::{Announcement, Discovery},
     install::{Installation, ensure_public_key, load_keys},
     model::*,
     repository::{Repository, Snapshot},
@@ -91,6 +92,16 @@ enum Command {
         /// Hashtree name to create or update under your hosting identity.
         #[arg(long)]
         name: String,
+        /// Catalog publisher's signing key (defaults to the local Haps identity).
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+    /// Retry queued announcements and refresh the private discovery cache.
+    Sync,
+    /// Configure shared signed indexes or build one from the local event cache.
+    Index {
+        #[command(subcommand)]
+        action: IndexAction,
     },
     /// Inspect or explicitly execute a build recipe from a pinned Git checkout.
     Build {
@@ -253,6 +264,27 @@ enum SourceAction {
 }
 
 #[derive(Subcommand)]
+enum IndexAction {
+    Add {
+        name: String,
+        location: String,
+        #[arg(long)]
+        author: String,
+    },
+    List,
+    Remove {
+        name: String,
+    },
+    /// Collect signed announcements and export a shareable Hashtree index.
+    Build {
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
 enum AliasAction {
     Add { name: String, public_key: String },
     List,
@@ -263,6 +295,8 @@ enum AliasAction {
 struct Config {
     identity: Option<String>,
     sources: BTreeMap<String, Source>,
+    #[serde(default)]
+    indexes: BTreeMap<String, Source>,
     #[serde(skip)]
     aliases: BTreeMap<String, String>,
     #[serde(default)]
@@ -460,19 +494,20 @@ async fn candidates(
     config: &mut Config,
     query: Option<&str>,
 ) -> Result<Vec<Candidate>> {
-    ensure!(
-        !config.sources.is_empty(),
-        "no sources configured; use `haps source add`"
-    );
     let mut found = Vec::new();
+    let mut available = 0;
     let mut seen = BTreeMap::new();
     for (name, source) in &mut config.sources {
         let repo = Repository::open(&source.location, &home.join("cache"))?;
-        let snapshot = repo
-            .catalog(&source.author)
-            .await
-            .with_context(|| format!("source {name} is unavailable or invalid"))?;
+        let snapshot = match repo.catalog(&source.author).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                eprintln!("Catalog {name} unavailable or invalid: {error:#}");
+                continue;
+            }
+        };
         check_checkpoint(source, &snapshot)?;
+        available += 1;
         let releases = if let Some(query) = query {
             repo.search(&snapshot, query).await?
         } else {
@@ -494,6 +529,10 @@ async fn candidates(
         }
     }
     save_config(home, config)?;
+    ensure!(
+        available > 0,
+        "no catalog could be read; discovery may be incomplete. Retry, or add a catalog with haps source add"
+    );
     Ok(found)
 }
 
@@ -894,6 +933,22 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         }
         _ => {}
     }
+    match &cli.command {
+        Command::Install { package, .. }
+        | Command::Info { package, .. }
+        | Command::Update { package, .. } => {
+            let publisher = package
+                .split_once('/')
+                .map(|(key, _)| nostr::PublicKey::parse(key))
+                .transpose()?;
+            // Registered catalogs already refresh their signed heads below. A
+            // qualified lookup also observes current publisher announcements.
+            if publisher.is_some() || config.sources.is_empty() {
+                refresh_discovery(&home, &mut config, publisher, None).await?;
+            }
+        }
+        _ => {}
+    }
     let installation = Installation::new(home.clone())?;
     let is_warning = matches!(&cli.command, Command::Warn(_));
     match cli.command {
@@ -964,13 +1019,23 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             let release = repo.publish(&keys, spec, &payload).await?;
             println!("{}", serde_json::to_string_pretty(&release.event)?);
         }
-        Command::Publish { catalog, name } => {
+        Command::Publish {
+            catalog,
+            name,
+            key_file,
+        } => {
             let path = catalog
                 .canonicalize()
                 .context("catalog directory is missing")?;
             let event: nostr::Event = read_json(&path.join("catalog.json"))?;
             let repository = Repository::local(path.clone())?;
-            repository.catalog(&event.pubkey.to_hex()).await?;
+            let snapshot = repository.catalog(&event.pubkey.to_hex()).await?;
+            let keys = load_keys(&key_file.unwrap_or_else(|| home.join("identity.key")))?;
+            ensure!(
+                keys.public_key() == event.pubkey,
+                "announcement key must match catalog publisher"
+            );
+            let releases = repository.releases(&snapshot).await?;
             let htree = haps::helpers::find("htree").context(
                 "Publishing needs htree. Install the Haps bundle or run `cargo install hashtree-cli --locked`."
             )?;
@@ -978,14 +1043,87 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 !name.is_empty() && !name.starts_with('-'),
                 "invalid catalog name"
             );
-            let status = std::process::Command::new(htree)
+            let output = std::process::Command::new(htree)
                 .arg("add")
                 .arg(&path)
                 .arg("--publish")
                 .arg(name)
-                .status()?;
-            ensure!(status.success(), "Hashtree catalog publication failed");
+                .output()?;
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            ensure!(
+                output.status.success(),
+                "Hashtree catalog publication failed"
+            );
+            let stdout = String::from_utf8(output.stdout)?;
+            let published = stdout
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("published: "))
+                .context("htree did not return a published catalog location")?;
+            let location = format!("htree://{published}");
+            let mut events = Vec::new();
+            let mut packages = BTreeMap::new();
+            for release in releases {
+                // A catalog may carry other publishers' releases. Only their keys
+                // can announce those packages; never impersonate them.
+                if release.event.pubkey == keys.public_key() {
+                    packages.insert(
+                        release.data.package.name.clone(),
+                        release.data.package.clone(),
+                    );
+                }
+                events.push(release.event);
+            }
+            for package in packages.into_values() {
+                events.push(Announcement::sign(&keys, &package, &location)?);
+            }
+            let discovery = Discovery::open(&home)?;
+            discovery.queue(&events)?;
+            discovery.ingest(events).await?;
+            flush_discovery(&home, &discovery).await;
         }
+        Command::Sync => {
+            let discovery = Discovery::open(&home)?;
+            flush_discovery(&home, &discovery).await;
+            refresh_discovery(&home, &mut config, None, None).await?;
+        }
+        Command::Index { action } => match action {
+            IndexAction::Add {
+                name,
+                location,
+                author,
+            } => {
+                safe_name(&name)?;
+                let author = resolve_key(&config, &author)?;
+                Discovery::open(&home)?
+                    .import_index(&location, &author)
+                    .await?;
+                config.indexes.insert(
+                    name,
+                    Source {
+                        location,
+                        author,
+                        sequence: 0,
+                        event_id: String::new(),
+                    },
+                );
+                save_config(&home, &config)?;
+            }
+            IndexAction::Remove { name } => {
+                ensure!(config.indexes.remove(&name).is_some(), "index not found");
+                save_config(&home, &config)?;
+            }
+            IndexAction::List => println!("{}", serde_json::to_string_pretty(&config.indexes)?),
+            IndexAction::Build { out, key_file } => {
+                refresh_discovery(&home, &mut config, None, None).await?;
+                let keys = load_keys(&key_file.unwrap_or_else(|| home.join("identity.key")))?;
+                Discovery::open(&home)?.export_index(&out, &keys).await?;
+                println!(
+                    "Built signed index in {}. Publish with htree add <directory> --publish <name>.",
+                    out.display()
+                );
+            }
+        },
         Command::Build {
             repository,
             rev,
@@ -1064,6 +1202,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             }
         },
         Command::Search { query, json } => {
+            refresh_discovery(&home, &mut config, None, Some(&query)).await?;
             let mut results = candidates(&home, &mut config, Some(&query)).await?;
             results.retain(|c| !trust.muted(&c.release.author()));
             // Unknown authors sort after known authors; fewer hops first.
@@ -1493,4 +1632,78 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         }
     }
     Ok(0)
+}
+
+async fn flush_discovery(home: &Path, discovery: &Discovery) {
+    match haps::discovery::relay_bus(home).await {
+        Ok(bus) => match discovery.flush(&bus).await {
+            Ok(0) => println!("Announcements acknowledged by a relay"),
+            Ok(pending) => eprintln!("{pending} announcements queued; retry with haps sync"),
+            Err(error) => eprintln!("Announcements remain queued: {error:#}"),
+        },
+        Err(error) => eprintln!("Announcements remain queued: {error:#}. Retry with haps sync"),
+    }
+}
+
+async fn refresh_discovery(
+    home: &Path,
+    config: &mut Config,
+    publisher: Option<nostr::PublicKey>,
+    query: Option<&str>,
+) -> Result<()> {
+    let discovery = Discovery::open(home)?;
+    for (name, source) in &config.indexes {
+        if let Err(error) = discovery
+            .import_index(&source.location, &source.author)
+            .await
+        {
+            eprintln!(
+                "Discovery index {name} unavailable or invalid; results may be incomplete: {error:#}"
+            );
+        }
+    }
+    // Explicit no-defaults configurations remain offline unless relays are
+    // configured. The normal configuration uses shared Hashtree networking.
+    if config.starting_point.is_some() || std::env::var_os("NOSTR_RELAYS").is_some() {
+        let result = async {
+            let bus = haps::discovery::relay_bus(home).await?;
+            discovery
+                .refresh(&bus, publisher, std::time::Duration::from_secs(3))
+                .await
+        }
+        .await;
+        if let Err(error) = result {
+            eprintln!("Relay discovery unavailable; using cached announcements: {error:#}");
+        }
+    }
+    for announcement in discovery.announcements(publisher).await? {
+        if let Some(query) = query {
+            let text =
+                format!("{} {}", announcement.name, announcement.event.content).to_lowercase();
+            if !query
+                .split_whitespace()
+                .any(|term| text.contains(&term.to_lowercase()))
+            {
+                continue;
+            }
+        }
+        let author = announcement.author();
+        if config
+            .sources
+            .values()
+            .any(|s| s.author == author && s.location == announcement.location)
+        {
+            continue;
+        }
+        let name = format!("discovered-{}-{}", author, announcement.name);
+        let source = config.sources.entry(name).or_insert_with(|| Source {
+            location: announcement.location.clone(),
+            author,
+            sequence: 0,
+            event_id: String::new(),
+        });
+        // Keep catalog sequence pinning when a publisher changes hosting.
+        source.location = announcement.location;
+    }
+    save_config(home, config)
 }

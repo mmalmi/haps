@@ -8,7 +8,7 @@ concurrency:
 jobs:
   test:
     name: Test (${{ matrix.os }})
-    timeout-minutes: 20
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +28,12 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test native installation and package lifecycle
         run: cargo test --locked
+      - name: Install real published example apps
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        timeout-minutes: 15
+        env:
+          HAPS_TEST_APPS: iris-chat,iris-drive,nostr-vpn
+        run: cargo test --locked --test published_apps -- --ignored --nocapture
       - name: Test installers and Omarchy integration
         if: runner.os == 'Linux'
         run: python3 -m unittest discover -s tests -p '*_test.py'

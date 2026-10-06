@@ -604,6 +604,60 @@ Native code is not sandboxed. No build or install hooks
 run during installation. `rollback` explicitly restores a retained local version;
 it does not re-evaluate current social approval of that older version.
 
+## Package discovery and shared indexes
+
+The canonical records are signed Nostr events. Hashtree stores those original
+events and derived search indexes; a server or index operator cannot change the
+package author. Installation still checks the publisher, catalog sequence,
+release signature and payload hashes, then applies your local social policy.
+
+`haps publish catalog --name my-packages` uploads the catalog and signs software
+announcements with your Haps publishing key. Readers can then use
+`haps install NPUB/package` or an existing local alias without first adding the
+catalog. An announcement is a location hint, not permission to install unknown
+software. Catalog hosting and package signing may use different identities.
+
+Announcements use the NIP-82 draft's application kind **32267**, with ordinary
+`d`, `name`, `repository` and description fields, plus `t=haps` and a
+`haps_catalog` location extension. Haps also distributes its original signed
+release events. This is application-metadata interoperability, not a claim that
+Haps directory manifests are Zapstore assets; NIP-82 asset/release conversion is
+not implemented.
+
+Discovery combines explicitly configured catalogs, a private local Hashtree
+event cache, any added shared indexes, and a bounded live relay observation.
+Shared indexes have a Hashtree full-text index; relay keyword search is not
+required. Results retain their original publishers and use the same social
+ranking and chooser. Unavailable sources produce diagnostics; a quiet relay
+window cannot establish that a package does not exist. New installs refresh
+catalog heads. `--no-defaults` keeps discovery offline unless `NOSTR_RELAYS` is
+explicitly configured or shared indexes are added.
+
+The cache uses `nostr-pubsub` and its existing Hashtree adapter. Networking reuses
+the shared Hashtree daemon when available, honors local-only mode, and otherwise
+uses configured relays. Your installed-package list is never published. Every
+client keeps a small bounded event index automatically; publishing an index is
+optional. Failed announcements remain in a durable outbox until a relay actually
+acknowledges them. Retry with `haps sync`.
+
+To query another signed index, or build your own from collected announcements:
+
+```sh
+haps index add community htree://HOST_NPUB/package-index --author INDEX_PUBLISHER
+haps search editor
+haps index build --out package-index
+htree add package-index --publish package-index
+```
+
+`index build` uses your local Haps identity (or `--key-file`), maintains a separate
+signed sequence, and preserves the original events. Import other indexes before
+building to combine their records. Multiple indexes are additive, duplicate
+announcements are deduplicated, and replacement announcements follow Nostr's
+newest-timestamp/lowest-event-ID rule. Neither an index signature nor its search
+ranking grants installation trust. Keep a worker's Haps home separate from a
+personal install; a scheduled `index build` and `htree add` can publish a shared
+index without publishing anyone's receipts or local follows.
+
 ## Development checks
 
 ```sh
@@ -612,8 +666,28 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-Tests use temporary identities, repositories, and homes. They do not touch real
-Nostr identities or publish to public relays. HTTP tests use loopback only.
+The regular suite uses temporary identities, repositories and homes, with loopback
+relays and HTTP servers. It covers announcement retries, publisher discovery,
+signed shared indexes and an install by `npub/package` without a registered catalog.
+
+CI additionally installs **Iris Chat, Iris Drive and Nostr VPN from the public
+catalog** on Apple silicon macOS and x86-64 Linux. This downloads the actual signed
+releases into an isolated home, verifies the executable and receipt, checks macOS
+code signatures and Linux desktop launchers, then removes the temporary install.
+It does not launch the apps or prove that their platform dependencies are present.
+Windows has native installer/lifecycle tests; these example packages do not yet
+have Windows releases in the catalog.
+
+Run the public-network smoke test **inside a VM, container, or CI runner**, never
+on a personal desktop (Iris Chat alone by default):
+
+```sh
+HAPS_TEST_ISOLATED=1 cargo test --locked --test published_apps -- --ignored --nocapture
+HAPS_TEST_ISOLATED=1 HAPS_TEST_APPS=iris-chat,iris-drive,nostr-vpn cargo test --locked --test published_apps -- --ignored --nocapture
+```
+
+Public catalog or transport outages fail this acceptance check; they are not
+silently skipped. Ordinary `cargo test` remains independent of public services.
 
 The static website lives in `website/public` and deploys with the adjacent Wrangler
 configuration. Publish that directory separately as `haps-site` on hashtree; the

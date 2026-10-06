@@ -104,21 +104,27 @@ impl Repository {
         }
     }
     pub async fn catalog(&self, author: &str) -> Result<Snapshot> {
-        let event: Event = match &self.location {
-            Location::Local(path) => read_json(&path.join("catalog.json"))?,
+        let event: Event = self.metadata("catalog.json").await?;
+        self.verify_catalog(event, author).await
+    }
+    /// Read bounded metadata from the same immutable directory as its blocks.
+    pub async fn metadata<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<T> {
+        safe_path(name)?;
+        Ok(match &self.location {
+            Location::Local(path) => read_json(&path.join(name))?,
             Location::Hashtree(transport) => {
-                serde_json::from_slice(&transport.read("catalog.json", MAX_METADATA).await?)?
+                serde_json::from_slice(&transport.read(name, MAX_METADATA).await?)?
             }
             Location::Http(url) => {
                 let client = reqwest::Client::builder()
                     .timeout(Duration::from_secs(30))
                     .redirect(reqwest::redirect::Policy::none())
                     .build()?;
-                serde_json::from_slice(
-                    &download(&client, url.join("catalog.json")?, MAX_METADATA).await?,
-                )?
+                serde_json::from_slice(&download(&client, url.join(name)?, MAX_METADATA).await?)?
             }
-        };
+        })
+    }
+    async fn verify_catalog(&self, event: Event, author: &str) -> Result<Snapshot> {
         verify_event(&event)?;
         ensure!(
             event.pubkey.to_hex() == author,

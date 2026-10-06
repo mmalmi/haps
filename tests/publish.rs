@@ -2,6 +2,7 @@ use haps::{
     model::{PackageSpec, target},
     repository::Repository,
 };
+use nostr::nips::nip19::ToBech32;
 use std::{collections::BTreeMap, fs, process::Command};
 
 #[tokio::test]
@@ -11,9 +12,12 @@ async fn publish_checks_catalog_before_using_existing_or_bundled_htree() -> anyh
     let payload = temp.path().join("payload");
     fs::create_dir(&payload)?;
     fs::write(payload.join("hello"), "hello")?;
+    let keys = nostr::Keys::generate();
+    let key_file = temp.path().join("publisher.key");
+    fs::write(&key_file, keys.secret_key().to_secret_hex())?;
     Repository::local(catalog.clone())?
         .publish(
-            &nostr::Keys::generate(),
+            &keys,
             PackageSpec {
                 name: "hello".into(),
                 version: "1.0.0".parse()?,
@@ -41,6 +45,7 @@ fn main() {
     assert_eq!(&args[2..], ["--publish", "my-packages"]);
     std::fs::write(std::env::var_os("PUBLISH_MARKER").unwrap(), std::env::current_exe().unwrap().to_string_lossy().as_bytes()).unwrap();
     if std::env::var_os("PUBLISH_FAIL").is_some() { std::process::exit(1); }
+    println!("  published: {}/my-packages", std::env::var("TEST_HOST").unwrap());
 }
 "#,
     )?;
@@ -62,12 +67,16 @@ fn main() {
         command
             .env("PATH", path)
             .env("PUBLISH_MARKER", &marker)
+            .env("TEST_HOST", keys.public_key().to_bech32().unwrap())
+            .env("NOSTR_RELAYS", "")
+            .env("HTREE_PREFER_LOCAL_DAEMON", "false")
             .env("HTREE_CONFIG_DIR", temp.path().join("hashtree"))
             .args(["--no-defaults", "--home"])
             .arg(temp.path().join("home"))
             .arg("publish")
             .arg(&catalog)
-            .args(["--name", "my-packages"]);
+            .args(["--name", "my-packages", "--key-file"])
+            .arg(&key_file);
         if fail {
             command.env("PUBLISH_FAIL", "1");
         }
@@ -82,6 +91,14 @@ fn main() {
         String::from_utf8_lossy(&bundled.stderr)
     );
     assert!(fs::read_to_string(&marker)?.contains("libexec"));
+    assert_eq!(
+        fs::read_dir(temp.path().join("home/discovery/outbox"))?.count(),
+        2
+    );
+    let announcements = haps::discovery::Discovery::open(&temp.path().join("home"))?
+        .announcements(Some(keys.public_key()))
+        .await?;
+    assert_eq!(announcements[0].name, "hello");
     let existing = temp.path().join("existing");
     fs::create_dir(&existing)?;
     fs::copy(&helper, existing.join(format!("htree{suffix}")))?;

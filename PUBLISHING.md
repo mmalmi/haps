@@ -122,12 +122,26 @@ Alternatively, serve the complete `catalog/` directory from a static HTTPS host.
 Readers can use its base URL instead of the `htree://` address. Any mirror can
 serve the same signed catalog and blobs without changing their identity.
 
-Give readers these commands, replacing both public keys:
+`haps publish` also announces the catalog on your configured Nostr relays using
+the Haps publisher's key. It must match the catalog signer; use `--key-file` when
+you packed with a separate key. The hosting identity remains independent.
+Announcements that do not receive a relay acknowledgement stay queued locally;
+retry them with `haps sync`.
+
+Readers can discover your catalog directly:
+
+```sh
+haps info PACKAGE_KEY/my-app
+haps install PACKAGE_KEY/my-app
+# Optional local shortcut:
+haps alias add maker PACKAGE_KEY
+```
+
+Discovery does not grant trust. For a private/offline catalog or an HTTPS mirror,
+readers can still register its location explicitly:
 
 ```sh
 haps source add maker htree://HOST_NPUB/my-packages --author PACKAGE_KEY
-haps alias add maker PACKAGE_KEY
-haps info maker/my-app
 ```
 
 Readers choose their own trust policy. If they want to follow your publishing
