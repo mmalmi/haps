@@ -12,9 +12,16 @@ import time
 
 
 def size(paths):
-    return sum(entry.stat(follow_symlinks=False).st_size
-               for path in paths for directory, _, files in os.walk(path, followlinks=False)
-               for name in files for entry in [Path(directory) / name])
+    total = 0
+    for path in paths:
+        for directory, _, files in os.walk(path, followlinks=False):
+            for name in files:
+                try:
+                    total += (Path(directory) / name).lstat().st_size
+                except FileNotFoundError:
+                    # A completed cache generation may retire while we measure it.
+                    pass
+    return total
 
 
 def run(args):
@@ -24,7 +31,7 @@ def run(args):
         raise RuntimeError("worker home and public output must be separate directories")
     home.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ, HAPS_HOME=str(home), HAPS_NON_INTERACTIVE="1")
+    env = dict(os.environ, HAPS_HOME=str(home), HAPS_NON_INTERACTIVE="true")
     if not (home / "identity.key").is_file():
         raise RuntimeError("initialize this worker's Haps identity before starting it")
     limit = args.max_state_mib * 1024 ** 2

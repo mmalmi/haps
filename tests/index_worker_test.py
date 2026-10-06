@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -14,6 +15,28 @@ spec.loader.exec_module(worker)
 
 
 class IndexWorkerTest(unittest.TestCase):
+    def test_real_cli_reaches_empty_index_check_without_upload(self):
+        binary = Path(os.environ.get('HAPS_TEST_BIN', ROOT / 'target/debug/haps')).resolve()
+        if not binary.is_file():
+            self.skipTest('build the Haps CLI first')
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home, output = root / 'private', root / 'public'
+            env = dict(os.environ, HAPS_HOME=str(home), HAPS_NO_DEFAULTS='true',
+                       HTREE_CONFIG_DIR=str(root / 'hashtree'))
+            env.pop('NOSTR_RELAYS', None)
+            env.pop('HAPS_NON_INTERACTIVE', None)
+            with patch.dict(os.environ, env, clear=True):
+                subprocess.run([str(binary), 'identity', 'init'], check=True,
+                               capture_output=True, timeout=10)
+                args = argparse.Namespace(home=home, output=output, haps=str(binary),
+                    htree=str(root / 'must-not-run'), name='packages', timeout=15,
+                    max_state_mib=16, min_free_gib=0)
+                with self.assertRaisesRegex(RuntimeError, 'empty publication'):
+                    worker.run(args)
+                self.assertTrue((output / 'index.json').is_file())
+                self.assertFalse((home / 'index-published.json').exists())
+
     def test_unchanged_index_skips_upload_and_failed_upload_retries(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
