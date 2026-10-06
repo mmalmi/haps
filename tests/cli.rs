@@ -474,6 +474,42 @@ fn fresh_install_has_a_visible_replaceable_maintainer_starting_point() {
             .unwrap()
             .starts_with("htree://")
     );
+    assert!(
+        config["indexes"]["haps"]["location"]
+            .as_str()
+            .unwrap()
+            .starts_with("htree://")
+    );
+    assert_eq!(config["discovery_defaults_version"], 1);
+    // Existing network profiles migrate once; later explicit changes survive.
+    let mut legacy = config;
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("discovery_defaults_version");
+    legacy["indexes"] = serde_json::json!({});
+    fs::write(
+        home.join("config.json"),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    assert!(run(&["starting-point"]).status.success());
+    let mut migrated: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.join("config.json")).unwrap()).unwrap();
+    assert!(migrated["indexes"]["haps"].is_object());
+    migrated["indexes"] = serde_json::json!({});
+    fs::write(
+        home.join("config.json"),
+        serde_json::to_vec(&migrated).unwrap(),
+    )
+    .unwrap();
+    assert!(run(&["starting-point"]).status.success());
+    let preserved: serde_json::Value =
+        serde_json::from_slice(&fs::read(home.join("config.json")).unwrap()).unwrap();
+    assert!(preserved["indexes"].as_object().unwrap().is_empty());
+    let help = String::from_utf8(run(&["--help"]).stdout).unwrap();
+    assert!(!help.contains("  source "));
+    assert!(!help.contains("  index "));
     assert!(run(&["starting-point", "--clear"]).status.success());
     assert_eq!(
         String::from_utf8_lossy(&run(&["starting-point"]).stdout).trim(),

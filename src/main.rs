@@ -22,7 +22,7 @@ use std::{
 struct Cli {
     #[arg(long, global = true, env = "HAPS_HOME")]
     home: Option<PathBuf>,
-    /// Start a fresh configuration without the maintainer catalog or trust seed.
+    /// Start a fresh configuration without discovery presets or a trust seed.
     #[arg(long, global = true, env = "HAPS_NO_DEFAULTS")]
     no_defaults: bool,
     /// Never prompt; require publisher/name when several publishers match.
@@ -76,7 +76,7 @@ enum Command {
     Target,
     /// Create a package manifest for a staged binary or macOS app.
     Init(haps::init::InitArgs),
-    /// Sign a staged directory and build a shareable hashtree catalog locally.
+    /// Sign staged files and prepare your package for publication.
     Pack {
         manifest: PathBuf,
         #[arg(long)]
@@ -86,8 +86,9 @@ enum Command {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
-    /// Upload a signed catalog using the installed or bundled Hashtree CLI.
+    /// Share signed packages through Hashtree and announce them on Nostr.
     Publish {
+        #[arg(value_name = "DIRECTORY")]
         catalog: PathBuf,
         /// Hashtree name to create or update under your hosting identity.
         #[arg(long)]
@@ -99,6 +100,7 @@ enum Command {
     /// Retry queued announcements and refresh the private discovery cache.
     Sync,
     /// Configure shared signed indexes or build one from the local event cache.
+    #[command(hide = true)]
     Index {
         #[command(subcommand)]
         action: IndexAction,
@@ -117,7 +119,8 @@ enum Command {
         #[arg(long, requires = "execute")]
         install: bool,
     },
-    /// Configure catalogs and pin their publishers' public keys.
+    /// Advanced compatibility controls for package sources.
+    #[command(hide = true)]
     Source {
         #[command(subcommand)]
         action: SourceAction,
@@ -199,11 +202,11 @@ enum Command {
     },
     /// Import verified Nostr follows, mutes, and release attestations.
     Import { events: PathBuf },
-    /// Sign an endorsement of an exact release; no relay publishing is performed.
+    /// Publish a signed endorsement of an exact release.
     Attest(ClaimArgs),
-    /// Sign a warning about an exact release; no relay publishing is performed.
+    /// Publish a signed warning about an exact release.
     Warn(ClaimArgs),
-    /// Write a signed package comment, release comment, or reply.
+    /// Publish a signed package comment, release comment, or reply.
     Comment {
         package: String,
         text: String,
@@ -212,11 +215,11 @@ enum Command {
         release: Option<String>,
         #[arg(long)]
         reply_to: Option<String>,
-        /// Export the NIP-22 event for sharing. No relay publishing.
+        /// Also export the signed comment to a file.
         #[arg(long)]
-        out: PathBuf,
+        out: Option<PathBuf>,
     },
-    /// Read imported comments, with social context and local mutes applied.
+    /// Find comments, with social context and local mutes applied.
     Comments {
         package: String,
         #[arg(long)]
@@ -301,11 +304,26 @@ struct Config {
     aliases: BTreeMap<String, String>,
     #[serde(default)]
     starting_point: Option<String>,
+    #[serde(default)]
+    discovery_defaults_version: u32,
+}
+
+fn discovery_presets(config: &mut Config) {
+    config.indexes.entry("haps".into()).or_insert_with(|| Source {
+        location: "htree://npub1q6g6t3yk0m2ppp5mrqsze4xg6uqhw5p29kjutet5m3uk637xjfaqac3p2a/package-index".into(),
+        author: "731fd6f74667cac0e86b7b4f7cd2c828996db866c3044368a2f26d87cb571ad0".into(),
+        sequence: 0,
+        event_id: String::new(),
+    });
 }
 
 fn fresh_config(no_defaults: bool) -> Result<Config> {
-    let mut config = Config::default();
+    let mut config = Config {
+        discovery_defaults_version: 1,
+        ..Default::default()
+    };
     if !no_defaults {
+        discovery_presets(&mut config);
         let npub = hashtree_config::DEFAULT_SOCIALGRAPH_ENTRYPOINT_NPUB;
         let key = ensure_public_key(npub)?;
         config.starting_point = Some(key.clone());
@@ -501,14 +519,16 @@ async fn candidates(
         let repo = match Repository::open(&source.location, &home.join("cache")) {
             Ok(repo) => repo,
             Err(error) => {
-                eprintln!("Catalog {name} unavailable; results may be incomplete: {error:#}");
+                eprintln!(
+                    "Package source {name} unavailable; results may be incomplete: {error:#}"
+                );
                 continue;
             }
         };
         let snapshot = match repo.catalog(&source.author).await {
             Ok(snapshot) => snapshot,
             Err(error) => {
-                eprintln!("Catalog {name} unavailable or invalid: {error:#}");
+                eprintln!("Package source {name} unavailable or invalid: {error:#}");
                 continue;
             }
         };
@@ -537,7 +557,7 @@ async fn candidates(
     save_config(home, config)?;
     ensure!(
         available > 0,
-        "no catalog could be read; discovery may be incomplete. Retry, or add a catalog with haps source add"
+        "package discovery is unavailable or incomplete. Check your connection and try haps sync"
     );
     Ok(found)
 }
@@ -910,6 +930,15 @@ async fn execute(mut cli: Cli) -> Result<u8> {
     } else {
         fresh_config(cli.no_defaults)?
     };
+    if config.discovery_defaults_version == 0 {
+        if !cli.no_defaults
+            && (config.starting_point.is_some() || config.sources.contains_key("iris"))
+        {
+            discovery_presets(&mut config);
+        }
+        config.discovery_defaults_version = 1;
+        save_config(&home, &config)?;
+    }
     config.aliases = haps::aliases::read()?;
     if !config_file.exists() {
         if config.starting_point.is_some() {
@@ -942,7 +971,9 @@ async fn execute(mut cli: Cli) -> Result<u8> {
     match &cli.command {
         Command::Install { package, .. }
         | Command::Info { package, .. }
-        | Command::Update { package, .. } => {
+        | Command::Update { package, .. }
+        | Command::Comment { package, .. }
+        | Command::Comments { package, .. } => {
             let publisher = package
                 .split_once('/')
                 .map(|(key, _)| nostr::PublicKey::parse(key))
@@ -1207,6 +1238,12 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         Command::Search { query, json } => {
             refresh_discovery(&home, &mut config, None, Some(&query)).await?;
             let mut results = candidates(&home, &mut config, Some(&query)).await?;
+            let releases: Vec<_> = results
+                .iter()
+                .take(128)
+                .map(|c| c.release.clone())
+                .collect();
+            refresh_feedback(&home, &config, &mut trust, &releases).await?;
             results.retain(|c| !trust.muted(&c.release.author()));
             // Unknown authors sort after known authors; fewer hops first.
             results.sort_by_key(|c| {
@@ -1239,6 +1276,13 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 target(),
                 non_interactive,
             )?;
+            refresh_feedback(
+                &home,
+                &config,
+                &mut trust,
+                std::slice::from_ref(&candidate.release),
+            )
+            .await?;
             print_release(&candidate.release, &trust, &config.aliases)?;
         }
         Command::Install {
@@ -1258,6 +1302,13 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 target(),
                 non_interactive,
             )?;
+            refresh_feedback(
+                &home,
+                &config,
+                &mut trust,
+                std::slice::from_ref(&candidate.release),
+            )
+            .await?;
             let require_attestations = require_attestations.max(
                 installation
                     .receipts()?
@@ -1299,6 +1350,13 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 target(),
                 non_interactive,
             )?;
+            refresh_feedback(
+                &home,
+                &config,
+                &mut trust,
+                std::slice::from_ref(&candidate.release),
+            )
+            .await?;
             trust.authorize_with_policy(
                 &candidate.release,
                 allow_untrusted,
@@ -1553,6 +1611,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             let out =
                 out.unwrap_or_else(|| home.join("attestations").join(format!("{}.json", event.id)));
             atomic_write(&out, &serde_json::to_vec_pretty(&event)?)?;
+            publish_feedback(&home, &config, &event).await?;
             if json {
                 println!("{}", serde_json::to_string(&event)?);
             } else {
@@ -1572,10 +1631,21 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 &package,
                 release.as_deref(),
             )?;
+            refresh_feedback(
+                &home,
+                &config,
+                &mut trust,
+                std::slice::from_ref(&candidate.release),
+            )
+            .await?;
             let mut comments = load_comments(&home)?;
             let parent = reply_to.as_deref().map(EventId::from_hex).transpose()?;
             let parent = parent
-                .map(|id| comments.get(&id).context("reply target is not imported"))
+                .map(|id| {
+                    comments
+                        .get(&id)
+                        .context("reply target is unavailable; try haps comments first")
+                })
                 .transpose()?;
             let root = if release.is_some() {
                 candidate.release.event.clone()
@@ -1606,7 +1676,10 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             )?;
             comments.ingest(event.clone())?;
             save_comments(&home, &comments)?;
-            atomic_write(&out, &serde_json::to_vec_pretty(&event)?)?;
+            if let Some(out) = out {
+                atomic_write(&out, &serde_json::to_vec_pretty(&event)?)?;
+            }
+            publish_feedback(&home, &config, &event).await?;
             println!("{}", event.id);
         }
         Command::Comments { package, release } => {
@@ -1615,6 +1688,13 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 &package,
                 release.as_deref(),
             )?;
+            refresh_feedback(
+                &home,
+                &config,
+                &mut trust,
+                std::slice::from_ref(&candidate.release),
+            )
+            .await?;
             let scope = if release.is_some() {
                 Scope::release(&candidate.release)
             } else {
@@ -1635,6 +1715,61 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         }
     }
     Ok(0)
+}
+
+fn networking_enabled(config: &Config) -> bool {
+    config.starting_point.is_some() || std::env::var_os("NOSTR_RELAYS").is_some()
+}
+
+async fn publish_feedback(home: &Path, config: &Config, event: &Event) -> Result<()> {
+    let discovery = Discovery::open(home)?;
+    discovery.queue(std::slice::from_ref(event))?;
+    if networking_enabled(config) {
+        let result = async {
+            let bus = haps::discovery::relay_bus(home).await?;
+            discovery.flush(&bus).await
+        }
+        .await;
+        match result {
+            Ok(0) => eprintln!("Signed feedback acknowledged by a relay"),
+            Ok(_) => eprintln!("Signed feedback queued; retry with haps sync"),
+            Err(error) => eprintln!("Signed feedback queued: {error:#}. Retry with haps sync"),
+        }
+    }
+    Ok(())
+}
+
+async fn refresh_feedback(
+    home: &Path,
+    config: &Config,
+    trust: &mut Trust,
+    releases: &[Release],
+) -> Result<()> {
+    if !networking_enabled(config) || releases.is_empty() {
+        return Ok(());
+    }
+    let result = async {
+        let bus = haps::discovery::relay_bus(home).await?;
+        haps::feedback::refresh(&bus, releases).await
+    }
+    .await;
+    let events = match result {
+        Ok(events) => events,
+        Err(error) => {
+            eprintln!("Feedback refresh unavailable; cached findings may be incomplete: {error:#}");
+            return Ok(());
+        }
+    };
+    let mut comments = load_comments(home)?;
+    for event in events {
+        if event.kind == Kind::Comment {
+            comments.ingest(event)?;
+        } else {
+            trust.ingest(event)?;
+        }
+    }
+    save_trust(home, trust)?;
+    save_comments(home, &comments)
 }
 
 async fn flush_discovery(home: &Path, discovery: &Discovery) {

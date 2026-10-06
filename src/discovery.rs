@@ -301,7 +301,10 @@ impl Discovery {
             "publication outbox is full; run haps sync"
         );
         for event in events {
-            ensure!(retained(event), "unsupported discovery event");
+            ensure!(
+                retained(event) || crate::feedback::valid(event),
+                "unsupported publication event"
+            );
             atomic_write(
                 &dir.join(format!("{}.json", event.id)),
                 &serde_json::to_vec(event)?,
@@ -321,7 +324,10 @@ impl Discovery {
         for entry in fs::read_dir(&dir)? {
             let path = entry?.path();
             let event: Event = read_json(&path)?;
-            ensure!(retained(&event), "invalid queued event");
+            ensure!(
+                retained(&event) || crate::feedback::valid(&event),
+                "invalid queued event"
+            );
             // EventBus::publish only acknowledges an in-memory send queue.
             // Keep the durable copy until an actual relay sends a positive OK.
             let result = tokio::time::timeout(

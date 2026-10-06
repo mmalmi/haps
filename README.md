@@ -87,7 +87,7 @@ Website: [haps.hashtree.cc](https://haps.hashtree.cc).
 [Source and documentation](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps)
 live on Hashtree, with an additional [GitHub mirror](https://github.com/mmalmi/haps).
 
-Fresh configurations include the Iris catalog and **Sirius Business Ltd**, the
+Fresh configurations include discovery presets and **Sirius Business Ltd**, the
 project-maintenance identity, as a local social-graph starting point. The first
 Iris Chat, Iris Drive, and Nostr VPN GUI packages target Apple silicon Macs and
 x86-64 Linux (current Arch/Omarchy).
@@ -95,8 +95,7 @@ Inspect the starting point with `haps starting-point`, replace it with
 `haps starting-point PUBLIC_KEY`, or disable it with `haps starting-point --clear`.
 It is a local trust preference, not a published follow event. Explicit local mutes
 still block a publisher. Use `--no-defaults` on the first invocation to start with
-no catalog or starting point. Removing a catalog and removing the starting point
-are independent actions.
+no discovery presets or starting point. Discovery and trust remain separate preferences.
 
 ```sh
 cargo build --locked
@@ -211,8 +210,8 @@ with `haps publish catalog --name my-packages` or serve the directory over HTTPS
 
 The **[publishing guide](PUBLISHING.md)** covers staging, testing, Hashtree setup,
 sharing install commands, multiple platforms, ignore rules, and updates. No
-registry account or submission is required. Readers add your catalog explicitly;
-Haps does not yet discover every published catalog automatically.
+registry account or submission is required. Readers find packages by name or publisher through preset indexes and signed
+announcements. No manual catalog setup is required.
 
 `haps init` generates a manifest without prompts and never overwrites an existing
 one. The guide also covers writing the manifest by hand.
@@ -284,9 +283,8 @@ argument arrays, followed by an explicit mapping of output files into the packag
 the current build target. Haps signs local build results with the builder's identity
 and records the original Git URL and commit in the signed package metadata.
 
-`haps source add` also accepts `htree://npub/CATALOG_TREE` for a signed **catalog
-directory**, resolved from signed Hashtree roots and read as verified content. This is separate
-from Git source builds. Catalog signatures, publisher pins, content hashes, and
+Discovered package locations can be `htree://` directories, resolved from signed
+Hashtree roots and read as verified content. This is separate from Git source builds. Catalog signatures, publisher pins, content hashes, and
 rollback checks remain enforced.
 
 ### Social discovery and release attestations
@@ -308,7 +306,6 @@ you/your direct follows. A publisher's self-attestation does not count.
 
 ```sh
 haps attest alice/hello --version 1.0.0 --note "Built from source; tests pass" --out attestation.json
-haps import attestation.json
 haps install PUBLIC_KEY/hello --require-attestations 1
 haps warn alice/hello --version 1.0.0 --note "Unexpected outbound connection; report: https://example.org/report" --out warning.json
 haps attest RELEASE_EVENT_ID --revoke --note "Withdrawing my earlier endorsement" --out revoked.json
@@ -317,8 +314,9 @@ haps attest RELEASE_EVENT_ID --revoke --note "Withdrawing my earlier endorsement
 The shortcut requires an explicit version and resolves the exact signed release
 for the current platform. Use `--target TARGET` for another platform, or pass a
 release event ID directly. Without `--out`, the signed event is saved under
-`HAPS_HOME/attestations/EVENT_ID.json`. It is also imported locally; nothing is
-automatically published to relays. Export and import events to share them.
+`HAPS_HOME/attestations/EVENT_ID.json`. It is also kept locally and queued for relay publication. Failed sends remain
+queued until acknowledged; retry with `haps sync`. Readers fetch findings when
+searching, inspecting or installing that release.
 
 Install output shows **Attested by** and the signed notes. `info --json` includes
 the full signed events and signer keys. Only current positive attestations from
@@ -362,9 +360,9 @@ warning policy; readers need 0.1.6 for that.
 
 #### Set up an agent to scan releases
 
-Give the agent its own signing identity, add the catalogs it should scan, and run
+Give the agent its own signing identity and the packages it should scan, then run
 it using your scheduler or agent service. Other users can follow its public key
-and import its exported claims. It gains no special authority: the same social
+and see its signed findings automatically. It gains no special authority: the same social
 filter applies to people and agents.
 
 For example, create a persistent agent profile once (POSIX shell):
@@ -373,7 +371,7 @@ For example, create a persistent agent profile once (POSIX shell):
 export HAPS_HOME="$HOME/.local/share/haps-scan-agent"
 haps identity init
 haps identity show
-haps source add publisher CATALOG_URL --author CATALOG_PUBLIC_KEY
+haps search my-app
 ```
 
 Use that same `HAPS_HOME` in the scheduled job. Back up its signing key and share
@@ -407,18 +405,12 @@ case "$result" in
 esac
 ```
 
-Share `claim.json` through your chosen transport. Recipients import it explicitly:
-
-```sh
-haps follow AGENT_PUBLIC_KEY
-haps import claim.json
-haps install PUBLISHER/my-app --version 1.0.0 --require-attestations 1
-```
-
-Haps does not currently poll agents or automatically publish/subscribe to their
-claims. Keep prior findings unless new evidence changes them; use `--revoke` when
-you intend to withdraw a previous claim. Include the scanner version, checks run,
-and a report link or hash in the note so readers can assess its scope.
+The signing command publishes its event through the same durable outbox as
+package announcements. Readers follow the agent and inspect its exact-release
+findings with `haps info`; `--require-attestations 1` can enforce the local policy.
+Exports remain useful for offline transfer, but are not required for discovery.
+Keep prior findings unless new evidence changes them; use `--revoke` to withdraw
+your claim. Include scanner versions, checks and evidence in the note.
 
 An attestation is a signed claim by a person or agent about an exact release, such
 as tests run or code audited. It is not a product rating or automatic proof of a
@@ -427,16 +419,20 @@ Social distance is context, not a security guarantee.
 
 ### Package and release comments
 
+From Haps 0.1.11, comments, endorsements and warnings publish automatically and
+readers retrieve them through Nostr. Signed exports and imports remain available
+for offline use. Discovery is bounded; a quiet or unavailable relay does not prove
+that there are no findings.
+
 ```sh
-haps comment hello "Does this support Wayland?" --out comment.json
-haps comment hello "This build works here" --release RELEASE_EVENT_ID --out release-comment.json
-haps comment hello "Yes, it does" --reply-to COMMENT_EVENT_ID --out reply.json
-haps import reply.json
+haps comment hello "Does this support Wayland?"
+haps comment hello "This build works here" --release RELEASE_EVENT_ID
+haps comment hello "Yes, it does" --reply-to COMMENT_EVENT_ID
 haps comments hello
 haps comments hello --release RELEASE_EVENT_ID
 ```
 
-Import a parent comment before replying. Package discussions use the stable package
+Haps retrieves package and release comments before displaying a thread or replying. Package discussions use the stable package
 address across versions and platforms. Release discussions use an exact event ID,
 including its target and content manifest. Replies cannot change their root thread.
 Events contain plain text and signatures, suitable for reuse by Hapstore or other
@@ -517,9 +513,8 @@ Availability still requires retained copies and replication.
 
 ## Catalogs and mirrors
 
-You can create a catalog without registering anywhere and configure several
-sources with `haps source add`. Search queries all configured catalogs and ranks
-publishers using your social graph. Catalog signatures and package signatures
+Discovery sources are preset or learned from signed announcements. Search uses
+those sources automatically and ranks publishers using your social graph. Catalog signatures and package signatures
 are checked separately: hosting or indexing a package does not make its host the
 package author.
 
@@ -578,7 +573,7 @@ the new format. Other fact profiles, identity links, ratings, and disputes do no
 authorize installation. Signatures prove authorship, not the claimed testing or
 audit work.
 
-Catalog authors are pinned on source addition. Saved sequence/event checkpoints
+Discovery pins package locations to the signed publisher identity. Saved sequence/event checkpoints
 reject older catalogs and changes at an already-seen sequence. This cannot prove
 global freshness or prevent a first-time reader receiving an old signed snapshot.
 Installed publisher identities and release IDs remain pinned. Missing or corrupt
@@ -640,28 +635,21 @@ client keeps a small bounded event index automatically; publishing an index is
 optional. Failed announcements remain in a durable outbox until a relay actually
 acknowledges them. Retry with `haps sync`.
 
-To query another signed index, or build your own from collected announcements:
+The public Haps index is a discovery preset, alongside relay discovery. It
+refreshes roughly every 30 minutes and retains up to 2,048 recent records; it is
+not a complete directory of every package. Its operator does not become trusted
+as a package author. Existing network-enabled profiles receive this preset once;
+`--no-defaults` profiles stay offline unless networking is explicitly configured.
+
+Index operators can create their own portable index:
 
 ```sh
-haps index add community htree://HOST_NPUB/package-index --author INDEX_PUBLISHER
-haps search editor
 haps index build --out package-index
 htree add package-index --publish package-index
 ```
 
-The public Haps index is available as an optional discovery source:
-
-```sh
-haps index add haps htree://npub1q6g6t3yk0m2ppp5mrqsze4xg6uqhw5p29kjutet5m3uk637xjfaqac3p2a/package-index --author 731fd6f74667cac0e86b7b4f7cd2c828996db866c3044368a2f26d87cb571ad0
-```
-
-It refreshes roughly every 30 minutes and retains up to 2,048 recent records;
-it is not a complete directory of every package. Adding it does not follow or
-trust its publisher, and `haps index remove haps` removes it.
-
 `index build` uses your local Haps identity (or `--key-file`), maintains a separate
-signed sequence, and preserves the original events. Import other indexes before
-building to combine their records. Multiple indexes are additive, duplicate
+signed sequence, and preserves the original events. Configured indexes contribute their original records when building. Multiple indexes are additive, duplicate
 announcements are deduplicated, and replacement announcements follow Nostr's
 newest-timestamp/lowest-event-ID rule. Neither an index signature nor its search
 ranking grants installation trust. Keep a worker's Haps home separate from a
@@ -692,6 +680,14 @@ cargo test --locked
 The regular suite uses temporary identities, repositories and homes, with loopback
 relays and HTTP servers. It covers announcement retries, publisher discovery,
 signed shared indexes and an install by `npub/package` without a registered catalog.
+A three-user relay test covers discovery, comments and replies, socially filtered
+endorsements and warnings, installation blocking, and revoked findings without
+manual event imports. A separate opt-in `tests/public_discovery_e2e.py` runs the
+publisher and reader in different disposable containers against public relays
+and Hashtree; its public proof file contains no secret keys or catalog URL. The `review` and
+`read-feedback` roles extend that check to three users, checking remote comments,
+socially relevant warnings and installation blocking. Run each role in a fresh
+container with Haps installed; pass only the previous role’s JSON output on stdin.
 
 CI additionally installs **Iris Chat, Iris Drive and Nostr VPN from the public
 catalog** on Apple silicon macOS and x86-64 Linux. This downloads the actual signed

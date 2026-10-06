@@ -85,42 +85,27 @@ give `pack` an external key with `--key-file`.
 and content-addressed files. It checks the complete payload, including ignore
 rules and whether declared commands are included. It does not upload anything.
 
-Use that catalog with the same Haps identity to test your own signed release:
+Try the staged app's basic functionality inside a VM or container before sharing.
+After publishing, test discovery and installation from a separate Haps profile as
+shown below. A successful install alone does not prove the app works.
 
-```sh
-haps source add mine ./catalog --author PACKAGE_KEY
-haps info PACKAGE_KEY/my-app
-haps install PACKAGE_KEY/my-app --version 0.1.0
-haps run my-app
-```
-
-Try the app's basic functionality on its target platform. For GUI apps,
-`haps run` opens the bundle or launches the declared executable. A successful
-package install alone does not prove the app works.
-
-Only add the source once. After repacking, Haps reads its updated catalog.
-
-## 4. Share the catalog
+## 4. Share your package
 
 The prebuilt Haps bundle includes the [Hashtree CLI](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/rust/crates/hashtree-cli/README.md?g=)
 and Git helper. `haps publish` uses a compatible `htree` on PATH or its bundled
 copy. If you installed only Haps through Cargo, run `cargo install hashtree-cli --locked`
 once if you do not already have it.
 
-Choose a new name for this catalog when first publishing:
+Choose a publication name once, then keep it for future updates:
 
 ```sh
 haps publish catalog --name my-packages
 ```
 
-The publication output shows the **hosting identity**. Its public key goes in the
-`htree://HOST_NPUB/my-packages` address. The hosting identity can differ from the
-package publisher; keep the `--author PACKAGE_KEY` pin tied to the Haps catalog
-signer. Never share either secret key.
-
-Alternatively, serve the complete `catalog/` directory from a static HTTPS host.
-Readers can use its base URL instead of the `htree://` address. Any mirror can
-serve the same signed catalog and blobs without changing their identity.
+The hosting identity can differ from the package publisher. Haps discovers the
+location from signed announcements and pins it to the original publisher;
+readers find your package automatically. Keep both
+signing keys private.
 
 `haps publish` also announces the catalog on your configured Nostr relays using
 the Haps publisher's key. It must match the catalog signer; use `--key-file` when
@@ -128,20 +113,14 @@ you packed with a separate key. The hosting identity remains independent.
 Announcements that do not receive a relay acknowledgement stay queued locally;
 retry them with `haps sync`.
 
-Readers can discover your catalog directly:
+Readers can find your package by name or publisher:
 
 ```sh
+haps search my-app
 haps info PACKAGE_KEY/my-app
 haps install PACKAGE_KEY/my-app
 # Optional local shortcut:
 haps alias add maker PACKAGE_KEY
-```
-
-Discovery does not grant trust. For a private/offline catalog or an HTTPS mirror,
-readers can still register its location explicitly:
-
-```sh
-haps source add maker htree://HOST_NPUB/my-packages --author PACKAGE_KEY
 ```
 
 Readers choose their own trust policy. If they want to follow your publishing
@@ -150,7 +129,7 @@ key, they can create a Haps signing identity once and follow it:
 ```sh
 haps identity init # skip if already configured
 haps follow PACKAGE_KEY
-haps install maker/my-app
+haps install PACKAGE_KEY/my-app
 haps run my-app
 ```
 
@@ -158,9 +137,10 @@ Alternatively, readers can require release attestations from keys they already
 trust. See [release attestations](README.md#social-discovery-and-release-attestations).
 Adding a source or alias alone does not authorize installing its packages.
 
-Publish the catalog address, its signer public key, and these instructions
-where people can find them. Haps currently searches configured catalogs; uploading
-a new catalog does not automatically add it to a global directory.
+Share `haps install PACKAGE_KEY/my-app`. Discovery uses preset indexes and
+signed announcements, with results ranked by the reader's social graph. No
+manual catalog setup is required. A relay or index may not have every package;
+failed publication acknowledgements can be retried with `haps sync`.
 
 ## 5. Publish updates and other platforms
 

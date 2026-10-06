@@ -3,6 +3,7 @@ pub mod build;
 pub mod comments;
 pub mod desktop;
 pub mod discovery;
+pub mod feedback;
 pub mod helpers;
 pub mod init;
 pub mod install;
