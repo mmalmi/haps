@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing stable tag to build and publish (v0.1.8)'
+        description: 'Existing stable tag to build and publish (v0.1.9)'
         required: true
 permissions:
   contents: read
@@ -37,6 +37,8 @@ jobs:
           with open('Cargo.toml', 'rb') as file:
               assert 'v' + tomllib.load(file)['package']['version'] == os.environ['TAG']
           PY
+      - name: Check pinned companions are publicly available
+        run: python3 scripts/bundle.py
       - name: Require successful CI for this exact source
         uses: actions/github-script@v7
         env:

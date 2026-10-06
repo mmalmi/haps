@@ -10,9 +10,24 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent
 
+def check_release():
+    """Fail before building if companions are not publicly downloadable."""
+    lock = json.loads((ROOT / 'hashtree-bundle.json').read_text())
+    url = f'https://api.github.com/repos/mmalmi/hashtree/releases/tags/{lock["tag"]}'
+    request = urllib.request.Request(url, headers={'User-Agent': 'haps-release'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        release = json.load(response)
+    assert release['tag_name'] == lock['tag']
+    assert not release['draft'] and not release['prerelease']
+    assets = {asset['name']: asset for asset in release['assets']}
+    for asset in lock['assets'].values():
+        assert assets[asset['name']]['digest'] == 'sha256:' + asset['sha256']
+    print(f'All five pinned Hashtree {lock["tag"]} assets are published')
+
 def stage_helpers(target, destination, cache):
     lock = json.loads((ROOT / 'hashtree-bundle.json').read_text())
     asset = lock['assets'][target]
+    cache = cache / lock['tag']
     cache.mkdir(parents=True, exist_ok=True)
     archive = cache / asset['name']
     if not archive.exists():
@@ -46,3 +61,6 @@ def stage_helpers(target, destination, cache):
     assert helper.returncode != 0 and 'Usage: git-remote-htree' in helper.stderr
     shutil.copyfile(ROOT / 'hashtree-LICENSE', destination / 'hashtree-LICENSE')
     return {'hashtree': lock['tag'], 'archive_sha256': asset['sha256']}
+
+if __name__ == '__main__':
+    check_release()

@@ -1,11 +1,26 @@
 {
-  "tag": "v0.2.151",
+  "tag": "v0.2.150",
   "minimum_version": "0.2.114",
   "assets": {
-    "aarch64-apple-darwin": {"name": "hashtree-aarch64-apple-darwin.tar.gz", "sha256": "1a7d4016b0ff711a179ab0bb07ea56c34fb5543b9147484231ed7e92bf9c7f3f"},
-    "x86_64-apple-darwin": {"name": "hashtree-x86_64-apple-darwin.tar.gz", "sha256": "fab8b95ffd0fc73f7cf7cc9bffcbf567d6f3fe72878ec08eb91aa465990c5a6c"},
-    "aarch64-unknown-linux-gnu": {"name": "hashtree-aarch64-unknown-linux-musl.tar.gz", "sha256": "5ff1ff2c4b3246b44a76e0381548584987ee92a4d3fa9c85c7297ac6733d640c"},
-    "x86_64-unknown-linux-gnu": {"name": "hashtree-x86_64-unknown-linux-musl.tar.gz", "sha256": "68d7e1daab0680d71f0ab273c346e9e4899fc6605cbbd255c440c44031c4287c"},
-    "x86_64-pc-windows-msvc": {"name": "hashtree-x86_64-pc-windows-msvc.zip", "sha256": "533fde6f3ed0223bfff1fd1a90903076ad9d73d38b131e939e777ddbac370572"}
+    "aarch64-apple-darwin": {
+      "name": "hashtree-aarch64-apple-darwin.tar.gz",
+      "sha256": "ea575ecfb06d5dc461010fd577a6d3a7397f0bd82dc64fdddf0261d0a11706ad"
+    },
+    "x86_64-apple-darwin": {
+      "name": "hashtree-x86_64-apple-darwin.tar.gz",
+      "sha256": "934841b6ff1e413be399f44408423f02cad49d77d8006eeebb721c073892108d"
+    },
+    "aarch64-unknown-linux-gnu": {
+      "name": "hashtree-aarch64-unknown-linux-musl.tar.gz",
+      "sha256": "9ea661e38039fb876b52a6cda240da6a4ddae6166cf6548b8eb0ae7ecae98b0b"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "name": "hashtree-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "d309f938ead838fabaf1c072c89d9b844bfdfb7d3a3549f90804109a26f536de"
+    },
+    "x86_64-pc-windows-msvc": {
+      "name": "hashtree-x86_64-pc-windows-msvc.zip",
+      "sha256": "bb181a959a58ac0641ed9e1cf443ad3803bdd7ed87f864cd26aa910b5d4b0079"
+    }
   }
 }
