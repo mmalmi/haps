@@ -60,7 +60,7 @@ impl Repository {
     }
     pub fn open(location: &str, cache: &Path) -> Result<Self> {
         if location.starts_with("htree://") {
-            return Self::hashtree(location, cache, hashtree_client::ClientConfig::from_env()?);
+            return Self::from_transport(Arc::new(CatalogTransport::new(location, cache)?), cache);
         }
         if location.starts_with("http://") || location.starts_with("https://") {
             let mut url = reqwest::Url::parse(location)?;
@@ -92,6 +92,9 @@ impl Repository {
         config: hashtree_client::ClientConfig,
     ) -> Result<Self> {
         let transport = Arc::new(CatalogTransport::with_config(location, cache, config)?);
+        Self::from_transport(transport, cache)
+    }
+    fn from_transport(transport: Arc<CatalogTransport>, cache: &Path) -> Result<Self> {
         Ok(Self {
             store: VerifiedStore::hashtree(cache, transport.clone())?,
             location: Location::Hashtree(transport),

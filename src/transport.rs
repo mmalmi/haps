@@ -2,7 +2,7 @@
 use anyhow::Result;
 use hashtree_client::Cid;
 use hashtree_client::{Client, ClientConfig, Reference};
-use std::path::Path;
+use std::{path::Path, time::Duration};
 use tokio::sync::OnceCell;
 
 pub struct CatalogTransport {
@@ -13,7 +13,11 @@ pub struct CatalogTransport {
 
 impl CatalogTransport {
     pub fn new(location: &str, cache: &Path) -> Result<Self> {
-        Self::with_config(location, cache, ClientConfig::from_env()?)
+        let mut config = ClientConfig::from_env()?;
+        // Include cold public-relay connections in the signed-root observation
+        // window. Three seconds was too short for fresh installs in CI.
+        config.resolve_window = Duration::from_secs(10);
+        Self::with_config(location, cache, config)
     }
 
     pub fn with_config(location: &str, cache: &Path, config: ClientConfig) -> Result<Self> {

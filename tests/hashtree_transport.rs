@@ -12,7 +12,17 @@ use haps::{
 use hashtree_client::ClientConfig;
 use hashtree_core::{Cid, DirEntry, HashTree, HashTreeConfig, LinkType, MemoryStore, Store};
 use nostr::{Event, EventBuilder, Keys, Kind, Tag, nips::nip19::ToBech32};
-use std::{collections::BTreeMap, fs, future::Future, pin::Pin, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    fs,
+    future::Future,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 fn add_directory<'a>(
     tree: &'a HashTree<MemoryStore>,
@@ -45,6 +55,7 @@ fn add_directory<'a>(
 struct Fixture {
     store: Arc<MemoryStore>,
     event: Event,
+    delay_ms: Arc<AtomicU64>,
 }
 
 async fn ws(State(state): State<Fixture>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
@@ -56,6 +67,10 @@ async fn ws(State(state): State<Fixture>, upgrade: WebSocketUpgrade) -> impl Int
             let value: serde_json::Value = serde_json::from_str(&text).unwrap();
             if value[0] == "REQ" {
                 let id = &value[1];
+                tokio::time::sleep(Duration::from_millis(
+                    state.delay_ms.load(Ordering::Relaxed),
+                ))
+                .await;
                 if socket
                     .send(Message::Text(
                         serde_json::json!(["EVENT", id, state.event]).to_string(),
@@ -91,7 +106,7 @@ async fn blob(State(state): State<Fixture>, Path(hash): Path<String>) -> impl In
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
     let publisher = Keys::generate();
@@ -131,11 +146,16 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
     let event = EventBuilder::new(Kind::Custom(30064), "")
         .tags(tags)
         .sign_with_keys(&host)?;
+    let delay_ms = Arc::new(AtomicU64::new(0));
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws))
         .route("/:hash", get(blob))
-        .with_state(Fixture { store, event });
+        .with_state(Fixture {
+            store,
+            event,
+            delay_ms: delay_ms.clone(),
+        });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let task = tokio::spawn(async move {
@@ -174,6 +194,35 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
             b"verified app payload"
         );
     }
+    // Public relays can take longer than three seconds to connect and respond.
+    // Exercise the CLI's actual defaults, with separate profile and transport state.
+    delay_ms.store(3500, Ordering::Relaxed);
+    let config_dir = temp.path().join("htree-config");
+    fs::create_dir(&config_dir)?;
+    fs::write(
+        config_dir.join("config.toml"),
+        format!("[blossom]\nread_servers=[{url:?}]\nservers=[]\n"),
+    )?;
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_haps"))
+        .env("HAPS_HOME", temp.path().join("slow-relay-reader"))
+        .env("HAPS_NO_DEFAULTS", "true")
+        .env("HTREE_CONFIG_DIR", config_dir)
+        .env("HTREE_PREFER_LOCAL_DAEMON", "false")
+        .env("NOSTR_RELAYS", url.replace("http:", "ws:") + "/ws")
+        .args([
+            "source",
+            "add",
+            "fixture",
+            &location,
+            "--author",
+            &publisher.public_key().to_hex(),
+        ])
+        .output()?;
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     task.abort();
     Ok(())
 }
