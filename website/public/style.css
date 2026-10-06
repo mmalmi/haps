@@ -3,7 +3,7 @@
 @media(max-width:650px){.header{height:83px}nav{gap:19px;font-size:11px}nav a:nth-child(2){display:none}.brand{font-size:26px;gap:7px}.brand img{width:27px}.hero{display:block;padding-top:35px;padding-bottom:48px}h1{font-size:58px;letter-spacing:-2.8px}.intro{font-size:15px}.hero-copy{margin-bottom:45px}.terminal{max-width:450px;margin:0 auto;transform:none}.terminal-body{font-size:11px;padding:24px 21px}.terminal-choice{font-size:11px}.terminal-choice small{font-size:9px}.principles{grid-template-columns:1fr;gap:30px;padding-top:34px;padding-bottom:34px}.principles h2{font-size:19px}.principles p{max-width:390px}h2{font-size:29px}.install-command{margin-top:25px}.install-command code{font-size:12px}.section-title{display:block}.availability{display:inline-block;margin-top:16px}.package-row{flex-wrap:wrap;gap:13px;padding:22px 0}.package-row>img{width:46px;height:46px}.package-description{flex:1}.package-description p{font-size:11px}.package-description h3{font-size:16px}.package-command{order:4;width:100%;margin-left:59px;justify-content:space-between}.package-command code{font-size:11px}.arrow{margin-left:0}.source-section{display:block;padding-top:65px;padding-bottom:50px}.source-example{margin-top:30px}.source-section h2 br{display:none}footer{flex-wrap:wrap;gap:22px}footer>div{margin-left:0;gap:19px;flex-wrap:wrap;font-size:10px}}
 @media(prefers-reduced-motion:reduce){:root{scroll-behavior:auto}}
 
-.principles p a{text-decoration:underline;text-underline-offset:3px}
+.principles p a,.starting-point p a{text-decoration:underline;text-underline-offset:3px}
 
 
 
