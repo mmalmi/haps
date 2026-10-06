@@ -19,7 +19,7 @@ use std::{
     pin::Pin,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -56,6 +56,8 @@ struct Fixture {
     store: Arc<MemoryStore>,
     event: Event,
     delay_ms: Arc<AtomicU64>,
+    one_root_only: Arc<AtomicBool>,
+    root_requests: Arc<AtomicU64>,
 }
 
 async fn ws(State(state): State<Fixture>, upgrade: WebSocketUpgrade) -> impl IntoResponse {
@@ -67,16 +69,25 @@ async fn ws(State(state): State<Fixture>, upgrade: WebSocketUpgrade) -> impl Int
             let value: serde_json::Value = serde_json::from_str(&text).unwrap();
             if value[0] == "REQ" {
                 let id = &value[1];
-                tokio::time::sleep(Duration::from_millis(
-                    state.delay_ms.load(Ordering::Relaxed),
-                ))
-                .await;
-                if socket
-                    .send(Message::Text(
-                        serde_json::json!(["EVENT", id, state.event]).to_string(),
+                let root_request = value[2]["#d"]
+                    .as_array()
+                    .is_some_and(|tags| tags.iter().any(|tag| tag == "packages"));
+                let answer = root_request
+                    && (!state.one_root_only.load(Ordering::Relaxed)
+                        || state.root_requests.fetch_add(1, Ordering::Relaxed) == 0);
+                if answer {
+                    tokio::time::sleep(Duration::from_millis(
+                        state.delay_ms.load(Ordering::Relaxed),
                     ))
-                    .await
-                    .is_err()
+                    .await;
+                }
+                if answer
+                    && socket
+                        .send(Message::Text(
+                            serde_json::json!(["EVENT", id, state.event]).to_string(),
+                        ))
+                        .await
+                        .is_err()
                 {
                     return;
                 }
@@ -147,6 +158,8 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
         .tags(tags)
         .sign_with_keys(&host)?;
     let delay_ms = Arc::new(AtomicU64::new(0));
+    let one_root_only = Arc::new(AtomicBool::new(false));
+    let root_requests = Arc::new(AtomicU64::new(0));
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws))
@@ -155,6 +168,8 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
             store,
             event,
             delay_ms: delay_ms.clone(),
+            one_root_only: one_root_only.clone(),
+            root_requests: root_requests.clone(),
         });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
@@ -203,25 +218,45 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
         config_dir.join("config.toml"),
         format!("[blossom]\nread_servers=[{url:?}]\nservers=[]\n"),
     )?;
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_haps"))
-        .env("HAPS_HOME", temp.path().join("slow-relay-reader"))
-        .env("HAPS_NO_DEFAULTS", "true")
-        .env("HTREE_CONFIG_DIR", config_dir)
-        .env("HTREE_PREFER_LOCAL_DAEMON", "false")
-        .env("NOSTR_RELAYS", url.replace("http:", "ws:") + "/ws")
-        .args([
-            "source",
-            "add",
-            "fixture",
-            &location,
-            "--author",
-            &publisher.public_key().to_hex(),
-        ])
-        .output()?;
+    let cli_home = temp.path().join("slow-relay-reader");
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_haps"))
+            .env("HAPS_HOME", &cli_home)
+            .env("HAPS_NO_DEFAULTS", "true")
+            .env("HTREE_CONFIG_DIR", &config_dir)
+            .env("HTREE_PREFER_LOCAL_DAEMON", "false")
+            .env("NOSTR_RELAYS", url.replace("http:", "ws:") + "/ws")
+            .args(args)
+            .output()
+    };
+    let output = run(&[
+        "source",
+        "add",
+        "fixture",
+        &location,
+        "--author",
+        &publisher.public_key().to_hex(),
+    ])?;
     assert!(
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    // Once discovery authenticates the root, installation must keep using it.
+    // The relay stops answering subsequent requests, while content stays available.
+    delay_ms.store(0, Ordering::Relaxed);
+    one_root_only.store(true, Ordering::Relaxed);
+    let output = run(&["install", "hello", "--allow-untrusted", "--json"])?;
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert_eq!(root_requests.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        fs::read(Installation::new(cli_home)?.command("hello", None)?)?,
+        b"verified app payload"
     );
     task.abort();
     Ok(())

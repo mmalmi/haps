@@ -15,6 +15,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::Arc,
 };
 
 #[derive(Parser)]
@@ -374,7 +375,8 @@ struct Source {
 }
 
 struct Candidate {
-    source: String,
+    repository: Arc<Repository>,
+    snapshot: Arc<Snapshot>,
     release: Release,
 }
 
@@ -517,7 +519,7 @@ async fn candidates(
     let mut seen = BTreeMap::new();
     for (name, source) in &mut config.sources {
         let repo = match Repository::open(&source.location, &home.join("cache")) {
-            Ok(repo) => repo,
+            Ok(repo) => Arc::new(repo),
             Err(error) => {
                 eprintln!(
                     "Package source {name} unavailable; results may be incomplete: {error:#}"
@@ -526,7 +528,7 @@ async fn candidates(
             }
         };
         let snapshot = match repo.catalog(&source.author).await {
-            Ok(snapshot) => snapshot,
+            Ok(snapshot) => Arc::new(snapshot),
             Err(error) => {
                 eprintln!("Package source {name} unavailable or invalid: {error:#}");
                 continue;
@@ -549,7 +551,8 @@ async fn candidates(
                 continue;
             }
             found.push(Candidate {
-                source: name.clone(),
+                repository: repo.clone(),
+                snapshot: snapshot.clone(),
                 release,
             });
         }
@@ -1324,12 +1327,12 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             if !json {
                 print_install_start(&candidate.release, &trust, &config.aliases);
             }
-            let repo = Repository::open(
-                &config.sources[&candidate.source].location,
-                &home.join("cache"),
-            )?;
             installation
-                .install_with_policy(&repo, &candidate.release, require_attestations)
+                .install_with_policy(
+                    &candidate.repository,
+                    &candidate.release,
+                    require_attestations,
+                )
                 .await?;
             print_installed(&candidate.release, &trust, &config.aliases, json)?;
         }
@@ -1368,10 +1371,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             }
             installation
                 .install_with_policy(
-                    &Repository::open(
-                        &config.sources[&candidate.source].location,
-                        &home.join("cache"),
-                    )?,
+                    &candidate.repository,
                     &candidate.release,
                     receipt.minimum_attestations,
                 )
@@ -1654,15 +1654,13 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             let root = if release.is_some() {
                 candidate.release.event.clone()
             } else {
-                let source = &config.sources[&candidate.source];
-                let repo = Repository::open(&source.location, &home.join("cache"))?;
-                let snapshot = repo.catalog(&source.author).await?;
-                let cid = snapshot
+                let cid = candidate
+                    .snapshot
                     .catalog
                     .packages
                     .get(&candidate.release.identity())
                     .context("package card is missing")?;
-                let event: Event = repo.json(cid).await?;
+                let event: Event = candidate.repository.json(cid).await?;
                 ensure!(
                     event.pubkey == candidate.release.event.pubkey
                         && tag_value(&event, "d")?
