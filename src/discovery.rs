@@ -113,6 +113,8 @@ struct CacheState {
 }
 pub struct Discovery {
     home: PathBuf,
+    // Serialize independent readers/writers before retiring a private generation.
+    _guard: std::fs::File,
     cache: tokio::sync::Mutex<CacheState>,
 }
 fn generation(home: &Path, root: Option<&Cid>) -> PathBuf {
@@ -137,6 +139,7 @@ async fn cached_events(state: &CacheState, filters: Vec<Filter>) -> Result<Vec<E
 }
 impl Discovery {
     pub fn open(home: &Path) -> Result<Self> {
+        let guard = lock(&home.join("discovery/cache.lock"))?;
         let path = home.join("discovery/root.json");
         let head: CacheHead = if path.exists() {
             read_json(&path)?
@@ -147,6 +150,7 @@ impl Discovery {
         let store = VerifiedStore::new(&generation(home, root.as_ref()), None)?;
         Ok(Self {
             home: home.into(),
+            _guard: guard,
             cache: tokio::sync::Mutex::new(CacheState { root, store }),
         })
     }
@@ -201,6 +205,19 @@ impl Discovery {
         if !destination.exists() {
             fs::rename(staging.path(), &destination)?;
         }
+        let next = CacheState {
+            store: VerifiedStore::new(&destination, None)?,
+            root: root.clone(),
+        };
+        let verified = cached_events(&next, vec![Filter::new()]).await?;
+        ensure!(
+            verified
+                .iter()
+                .map(|e| e.id)
+                .collect::<std::collections::BTreeSet<_>>()
+                == events.iter().map(|e| e.id).collect(),
+            "new discovery generation failed validation"
+        );
         atomic_write(
             &self.home.join("discovery/root.json"),
             &serde_json::to_vec(&CacheHead {
@@ -208,10 +225,7 @@ impl Discovery {
             })?,
         )?;
         let old = generation(&self.home, state.root.as_ref());
-        *state = CacheState {
-            store: VerifiedStore::new(&destination, None)?,
-            root,
-        };
+        *state = next;
         // Only regenerable private event-cache blocks are collected, after commit.
         if old != destination && old.exists() {
             fs::remove_dir_all(old)?;

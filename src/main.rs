@@ -1087,6 +1087,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         Command::Sync => {
             let discovery = Discovery::open(&home)?;
             flush_discovery(&home, &discovery).await;
+            drop(discovery);
             refresh_discovery(&home, &mut config, None, None).await?;
         }
         Command::Index { action } => match action {
@@ -1656,7 +1657,7 @@ async fn refresh_discovery(
     let discovery = Discovery::open(home)?;
     for (name, source) in &config.indexes {
         if let Err(error) = discovery
-            .import_index(&source.location, &source.author)
+            .lookup_index(&source.location, &source.author, query, publisher)
             .await
         {
             eprintln!(
