@@ -649,6 +649,16 @@ haps index build --out package-index
 htree add package-index --publish package-index
 ```
 
+The public Haps index is available as an optional discovery source:
+
+```sh
+haps index add haps htree://npub1q6g6t3yk0m2ppp5mrqsze4xg6uqhw5p29kjutet5m3uk637xjfaqac3p2a/package-index --author 731fd6f74667cac0e86b7b4f7cd2c828996db866c3044368a2f26d87cb571ad0
+```
+
+It refreshes roughly every 30 minutes and retains up to 2,048 recent records;
+it is not a complete directory of every package. Adding it does not follow or
+trust its publisher, and `haps index remove haps` removes it.
+
 `index build` uses your local Haps identity (or `--key-file`), maintains a separate
 signed sequence, and preserves the original events. Import other indexes before
 building to combine their records. Multiple indexes are additive, duplicate
@@ -667,6 +677,9 @@ are templates, not an enabled service. Set up the worker identity, networking
 and executable paths before a single manual canary run; enable the timer only
 after measuring its effect. A process limit does not bound work delegated to a
 shared Hashtree daemon.
+If the local daemon does not carry package announcements, set
+`HTREE_PREFER_LOCAL_DAEMON=false` for the worker to query its configured relays
+directly. Give publication its own `HTREE_CONFIG_DIR`, identity and storage.
 
 ## Development checks
 

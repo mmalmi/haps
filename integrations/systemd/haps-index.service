@@ -15,6 +15,7 @@ TimeoutStartSec=100
 CPUQuota=25%
 MemoryMax=256M
 TasksMax=32
+IOAccounting=yes
 Nice=19
 IOSchedulingClass=idle
 NoNewPrivileges=yes
