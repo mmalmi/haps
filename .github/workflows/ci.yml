@@ -30,7 +30,7 @@ jobs:
         run: cargo test --locked
       - name: Install real published example apps
         if: runner.os == 'Linux' || runner.os == 'macOS'
-        timeout-minutes: 15
+        timeout-minutes: 25
         env:
           HAPS_TEST_APPS: iris-chat,iris-drive,nostr-vpn
         run: cargo test --locked --test published_apps -- --ignored --nocapture
