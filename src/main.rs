@@ -498,7 +498,13 @@ async fn candidates(
     let mut available = 0;
     let mut seen = BTreeMap::new();
     for (name, source) in &mut config.sources {
-        let repo = Repository::open(&source.location, &home.join("cache"))?;
+        let repo = match Repository::open(&source.location, &home.join("cache")) {
+            Ok(repo) => repo,
+            Err(error) => {
+                eprintln!("Catalog {name} unavailable; results may be incomplete: {error:#}");
+                continue;
+            }
+        };
         let snapshot = match repo.catalog(&source.author).await {
             Ok(snapshot) => snapshot,
             Err(error) => {
@@ -941,11 +947,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 .split_once('/')
                 .map(|(key, _)| nostr::PublicKey::parse(key))
                 .transpose()?;
-            // Registered catalogs already refresh their signed heads below. A
-            // qualified lookup also observes current publisher announcements.
-            if publisher.is_some() || config.sources.is_empty() {
-                refresh_discovery(&home, &mut config, publisher, None).await?;
-            }
+            refresh_discovery(&home, &mut config, publisher, None).await?;
         }
         _ => {}
     }
