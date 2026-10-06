@@ -38,8 +38,10 @@ fn published_example_apps_install() -> anyhow::Result<()> {
             .output()?;
         anyhow::ensure!(
             output.status.success(),
-            "{app} install failed: {}",
-            String::from_utf8_lossy(&output.stderr)
+            "{app} install failed ({}): {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
         );
         serde_json::from_slice::<serde_json::Value>(&output.stdout)?;
         let installed = Installation::new(home.clone())?.with_desktop_dir(None);
