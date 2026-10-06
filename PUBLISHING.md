@@ -104,7 +104,7 @@ Only add the source once. After repacking, Haps reads its updated catalog.
 
 The prebuilt Haps bundle includes the [Hashtree CLI](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/rust/crates/hashtree-cli/README.md?g=)
 and Git helper. `haps publish` uses a compatible `htree` on PATH or its bundled
-copy. With a Cargo-only Haps install, run `cargo install hashtree-cli --locked`
+copy. If you installed only Haps through Cargo, run `cargo install hashtree-cli --locked`
 once if you do not already have it.
 
 Choose a new name for this catalog when first publishing:

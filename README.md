@@ -72,22 +72,16 @@ separate runtime requirements below.
 Cargo remains supported on all three operating systems:
 
 ```sh
-cargo install haps --locked
+cargo install haps hashtree-cli git-remote-htree --locked
 haps install iris-drive
 haps run iris-drive
 ```
 
-Cargo installs Haps itself. Normal package installs work without a separate
-`htree` executable: the shared Hashtree client is compiled into Haps. Cargo and
-prebuilt installs both reuse an existing daemon and compatible tools on `PATH`.
-For publishing or Hashtree Git builds after a Cargo install, add the tools once:
-
-```sh
-cargo install hashtree-cli git-remote-htree --locked
-```
-
-The prebuilt bundle already includes them. Git itself and build toolchains remain
-separate prerequisites for source builds.
+This installs Haps and the companion tools for publishing and Hashtree Git builds.
+For normal package installs, `cargo install haps --locked` alone is enough: the
+shared Hashtree client is compiled into Haps. Cargo and prebuilt installs both
+reuse an existing daemon and compatible tools on `PATH`. Git itself and build
+toolchains remain separate prerequisites for source builds.
 
 Website: [haps.hashtree.cc](https://haps.hashtree.cc).
 [Source and documentation](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps)
