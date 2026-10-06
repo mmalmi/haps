@@ -10,6 +10,7 @@ import subprocess
 import tarfile
 import tempfile
 import zipfile
+from bundle import stage_helpers
 
 TARGETS = [
     'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu',
@@ -28,12 +29,21 @@ def package(tag, target, output):
     assert subprocess.check_output([str(binary), 'target'], text=True).strip() == target
     output.mkdir(parents=True, exist_ok=True)
     archive = output / f'haps-{tag}-{target}{".zip" if "windows" in target else ".tar.gz"}'
-    if 'windows' in target:
-        with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
-            bundle.write(binary, name)
-    else:
-        with tarfile.open(archive, 'w:gz') as bundle:
-            bundle.add(binary, arcname=name)
+    with tempfile.TemporaryDirectory() as temp:
+        stage = Path(temp)
+        shutil.copyfile(binary, stage / name)
+        (stage / name).chmod(0o755)
+        metadata = stage_helpers(target, stage / 'libexec', Path('work/hashtree-bundle'))
+        (stage / 'bundle.json').write_text(json.dumps(metadata, indent=2) + '\n')
+        files = sorted(p for p in stage.rglob('*') if p.is_file())
+        if 'windows' in target:
+            with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
+                for path in files:
+                    bundle.write(path, path.relative_to(stage).as_posix())
+        else:
+            with tarfile.open(archive, 'w:gz') as bundle:
+                for path in files:
+                    bundle.add(path, arcname=path.relative_to(stage).as_posix())
     # Exercise the archive's bytes through the production signed package flow.
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -46,6 +56,8 @@ def package(tag, target, output):
             with tarfile.open(archive) as bundle:
                 bundle.extractall(payload, filter='data')
         extracted = payload / name
+        suffix = '.exe' if 'windows' in target else ''
+        subprocess.run([str(payload / 'libexec' / ('htree' + suffix)), '--version'], check=True)
         home = root / 'home'
         author = run(extracted, home, 'identity', 'init')
         spec = root / 'haps.toml'
@@ -66,7 +78,7 @@ def index(tag, commit, output):
         assets.append({'name': name, 'target': target, 'size': file.stat().st_size,
                        'sha256': hashlib.sha256(file.read_bytes()).hexdigest()})
     (output / 'SHA256SUMS').write_text(''.join(f'{a["sha256"]}  {a["name"]}\n' for a in assets))
-    (output / 'release.json').write_text(json.dumps({'schema': 'haps.binary-release.v1', 'tag': tag, 'version': tag[1:], 'commit': commit, 'assets': assets}, indent=2) + '\n')
+    (output / 'release.json').write_text(json.dumps({'schema': 'haps.binary-release.v1', 'tag': tag, 'version': tag[1:], 'commit': commit, 'companions': json.loads(Path('scripts/hashtree-bundle.json').read_text()), 'assets': assets}, indent=2) + '\n')
     shutil.copyfile('website/public/install.sh', output / 'install.sh')
 
 if __name__ == '__main__':

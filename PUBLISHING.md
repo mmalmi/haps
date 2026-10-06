@@ -2,7 +2,7 @@
 
 Haps publishes software under your Nostr public key. There is no registry account,
 submission queue, or globally reserved package name. This guide uses an
-already-built program called `my-app` and Haps 0.1.5 or later.
+already-built program called `my-app` and Haps 0.1.8 or later.
 
 ## 1. Stage the files
 
@@ -102,18 +102,18 @@ Only add the source once. After repacking, Haps reads its updated catalog.
 
 ## 4. Share the catalog
 
-Install the [Hashtree CLI](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/rust/crates/git-remote-htree/README.md?g=)
-if you do not already have it; for example, `cargo install hashtree-cli --locked`.
-Haps does not bundle `htree` or `git-remote-htree`.
+The prebuilt Haps bundle includes the [Hashtree CLI](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/rust/crates/hashtree-cli/README.md?g=)
+and Git helper. `haps publish` uses a compatible `htree` on PATH or its bundled
+copy. With a Cargo-only Haps install, run `cargo install hashtree-cli --locked`
+once if you do not already have it.
 
 Choose a new name for this catalog when first publishing:
 
 ```sh
-htree add catalog --publish my-packages
-htree user
+haps publish catalog --name my-packages
 ```
 
-`htree user` shows the **hosting identity**. Its public key goes in the
+The publication output shows the **hosting identity**. Its public key goes in the
 `htree://HOST_NPUB/my-packages` address. The hosting identity can differ from the
 package publisher; keep the `--author PACKAGE_KEY` pin tied to the Haps catalog
 signer. Never share either secret key.
@@ -154,7 +154,7 @@ For an update, rebuild, restage, increment `version`, and repeat:
 
 ```sh
 haps pack haps.toml --payload stage --out catalog
-htree add catalog --publish my-packages
+haps publish catalog --name my-packages
 ```
 
 Keep the same signing key, catalog directory, and Hashtree name. The local catalog

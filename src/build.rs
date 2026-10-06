@@ -79,8 +79,12 @@ impl Checkout {
             .prefix("source-")
             .tempdir_in(work)?;
         let root = directory.path().join("repo");
+        let mut clone = git();
+        if source.git.starts_with("htree://") {
+            crate::helpers::configure_git(&mut clone)?;
+        }
         git_ok(
-            git()
+            clone
                 .current_dir(directory.path())
                 .args(["clone", "--no-checkout", "--", &source.git])
                 .arg("repo"),

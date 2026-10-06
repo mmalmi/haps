@@ -17,6 +17,7 @@ pub struct VerifiedStore {
     directory: PathBuf,
     remote: Option<reqwest::Url>,
     client: reqwest::Client,
+    transport: Option<Arc<crate::transport::CatalogTransport>>,
 }
 
 impl VerifiedStore {
@@ -25,11 +26,20 @@ impl VerifiedStore {
             inner: FsBlobStore::new(path)?,
             directory: path.to_path_buf(),
             remote,
+            transport: None,
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(30))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?,
         }))
+    }
+    pub fn hashtree(
+        path: &Path,
+        transport: Arc<crate::transport::CatalogTransport>,
+    ) -> Result<Arc<Self>> {
+        let mut store = Self::new(path, None)?;
+        Arc::get_mut(&mut store).unwrap().transport = Some(transport);
+        Ok(store)
     }
     pub fn tree(self: &Arc<Self>) -> HashTree<Self> {
         HashTree::new(HashTreeConfig::new(self.clone()))
@@ -94,19 +104,25 @@ impl Store for VerifiedStore {
             check(hash, &bytes)?;
             return Ok(Some(bytes));
         }
-        let Some(remote) = &self.remote else {
-            return Ok(None);
-        };
         let relative = format!(
             "blobs/{}",
             block_path(hash).to_string_lossy().replace('\\', "/")
         );
-        let url = remote
-            .join(&relative)
-            .map_err(|e| StoreError::Other(e.to_string()))?;
-        let bytes = download(&self.client, url, MAX_BLOCK)
-            .await
-            .map_err(|e| StoreError::Other(e.to_string()))?;
+        let bytes = if let Some(transport) = &self.transport {
+            transport
+                .read(&relative, MAX_BLOCK)
+                .await
+                .map_err(|e| StoreError::Other(e.to_string()))?
+        } else if let Some(remote) = &self.remote {
+            let url = remote
+                .join(&relative)
+                .map_err(|e| StoreError::Other(e.to_string()))?;
+            download(&self.client, url, MAX_BLOCK)
+                .await
+                .map_err(|e| StoreError::Other(e.to_string()))?
+        } else {
+            return Ok(None);
+        };
         check(hash, &bytes)?;
         self.inner.put(*hash, bytes.clone()).await?;
         Ok(Some(bytes))

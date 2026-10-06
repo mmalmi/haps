@@ -1,6 +1,7 @@
 use crate::{
     model::*,
     store::{VerifiedStore, download},
+    transport::CatalogTransport,
 };
 use anyhow::{Context, Result, bail, ensure};
 use hashtree_core::Cid;
@@ -46,6 +47,7 @@ pub struct Repository {
 enum Location {
     Local(PathBuf),
     Http(reqwest::Url),
+    Hashtree(Arc<CatalogTransport>),
 }
 
 impl Repository {
@@ -58,27 +60,7 @@ impl Repository {
     }
     pub fn open(location: &str, cache: &Path) -> Result<Self> {
         if location.starts_with("htree://") {
-            // Catalog transport is a public hashtree directory. Git source builds
-            // use git-remote-htree instead; neither path bypasses signature checks.
-            let parsed = reqwest::Url::parse(location)?;
-            ensure!(
-                parsed.username().is_empty()
-                    && parsed.password().is_none()
-                    && parsed.query().is_none()
-                    && parsed.fragment().is_none(),
-                "catalog URL must be a public hashtree directory"
-            );
-            let owner = parsed.host_str().context("hashtree publisher is missing")?;
-            nostr::PublicKey::parse(owner)
-                .context("hashtree catalog URLs require an explicit public key")?;
-            ensure!(
-                parsed.path() != "/" && !parsed.path().is_empty(),
-                "hashtree catalog name is missing"
-            );
-            return Self::open(
-                &format!("https://upload.iris.to/{owner}{}", parsed.path()),
-                cache,
-            );
+            return Self::hashtree(location, cache, hashtree_client::ClientConfig::from_env()?);
         }
         if location.starts_with("http://") || location.starts_with("https://") {
             let mut url = reqwest::Url::parse(location)?;
@@ -104,6 +86,17 @@ impl Repository {
             Self::local(path)
         }
     }
+    pub fn hashtree(
+        location: &str,
+        cache: &Path,
+        config: hashtree_client::ClientConfig,
+    ) -> Result<Self> {
+        let transport = Arc::new(CatalogTransport::with_config(location, cache, config)?);
+        Ok(Self {
+            store: VerifiedStore::hashtree(cache, transport.clone())?,
+            location: Location::Hashtree(transport),
+        })
+    }
     pub fn path(&self) -> Option<&Path> {
         match &self.location {
             Location::Local(p) => Some(p),
@@ -113,6 +106,9 @@ impl Repository {
     pub async fn catalog(&self, author: &str) -> Result<Snapshot> {
         let event: Event = match &self.location {
             Location::Local(path) => read_json(&path.join("catalog.json"))?,
+            Location::Hashtree(transport) => {
+                serde_json::from_slice(&transport.read("catalog.json", MAX_METADATA).await?)?
+            }
             Location::Http(url) => {
                 let client = reqwest::Client::builder()
                     .timeout(Duration::from_secs(30))

@@ -44,7 +44,7 @@ shutil.copyfile(source, output)
         p.write_text(content)
         p.chmod(0o755)
 
-    def archive(self, target='x86_64-unknown-linux-gnu', version='0.1.3', member='haps'):
+    def archive(self, target='x86_64-unknown-linux-gnu', version='0.1.3', member='haps', bundled=False, broken_helper=False):
         name = f'haps-v0.1.3-{target}.tar.gz'
         binary = f'#!/bin/sh\necho haps {version}\n'.encode()
         archive = self.root / name
@@ -53,6 +53,17 @@ shutil.copyfile(source, output)
             info.size = len(binary)
             info.mode = 0o755
             bundle.addfile(info, io.BytesIO(binary))
+            if bundled:
+                for entry, content in {
+                    'bundle.json': b'{"hashtree":"v0.2.151"}',
+                    'libexec/hashtree-LICENSE': b'MIT fixture license',
+                    'libexec/htree': b'#!/bin/sh\necho htree 0.2.151\n',
+                    'libexec/git-remote-htree': b'#!/bin/sh\necho "Usage: git-remote-htree" >&2\nexit 1\n' if not broken_helper else b'broken executable',
+                }.items():
+                    info = tarfile.TarInfo(entry)
+                    info.size = len(content)
+                    info.mode = 0o755
+                    bundle.addfile(info, io.BytesIO(content))
         (self.root / 'SHA256SUMS').write_text(hashlib.sha256(archive.read_bytes()).hexdigest() + '  ' + name + '\n')
         return archive
 
@@ -88,6 +99,26 @@ shutil.copyfile(source, output)
         self.assertNotEqual(self.run_installer('--version', '../evil').returncode, 0)
         self.env['HAPS_TEST_ARCH'] = 'riscv64'
         self.assertNotEqual(self.run_installer().returncode, 0)
+
+    def test_bundle_and_upgrade_preserve_separately_installed_tools(self):
+        self.archive(bundled=True)
+        (self.bin / 'htree').write_text('separately managed htree')
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        first = (self.bin / 'haps').resolve()
+        self.assertTrue((first.parent / 'libexec/git-remote-htree').exists())
+        self.assertEqual((self.bin / 'htree').read_text(), 'separately managed htree')
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        second = (self.bin / 'haps').resolve()
+        self.assertNotEqual(first, second)
+        self.assertTrue(first.exists(), 'previous bundle remains recoverable')
+        self.assertEqual((self.bin / 'htree').read_text(), 'separately managed htree')
+
+    def test_broken_bundled_helper_preserves_existing_install(self):
+        self.archive(bundled=True, broken_helper=True)
+        self.assertNotEqual(self.run_installer().returncode, 0)
+        self.assertEqual((self.bin / 'haps').read_text(), 'old executable')
 
 if __name__ == '__main__':
     unittest.main()

@@ -1,6 +1,6 @@
 [package]
 name = "haps"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 description = "Hashtree Package System: signed packages, content-addressed distribution, social discovery"
 license = "MIT"
@@ -22,6 +22,7 @@ hashtree-core = "=0.2.90"
 hashtree-config = "=0.2.83"
 hashtree-fs = "=0.2.82"
 hashtree-index = "=0.2.84"
+hashtree-client = "=0.1.2"
 hex = "0.4"
 ignore = "0.4"
 nostr = "=0.44.8"
@@ -39,6 +40,7 @@ dialoguer = { version = "0.12", default-features = false }
 
 [dev-dependencies]
 tiny_http = "0.12"
+axum = { version = "0.7", features = ["ws"] }
 
 [profile.dev]
 debug = 0

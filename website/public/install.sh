@@ -25,7 +25,7 @@ main() {
         x86_64|amd64) arch=x86_64 ;;
         *) die 'Unsupported CPU architecture' ;;
     esac
-    for cmd in curl tar awk grep mktemp; do
+    for cmd in curl tar awk grep mktemp sort readlink; do
         command -v "$cmd" >/dev/null 2>&1 || die "Required command is missing: $cmd"
     done
     if command -v sha256sum >/dev/null 2>&1; then
@@ -57,20 +57,61 @@ main() {
         actual=$(shasum -a 256 "$tmp/archive.tar.gz" | awk '{print $1}')
     fi
     [ "$actual" = "$expected" ] || die 'Checksum mismatch; existing Haps was not changed'
-    [ "$(tar -tzf "$tmp/archive.tar.gz")" = haps ] || die 'Unexpected archive contents'
-    # Extract bytes into a new regular file; never restore archive link entries.
-    tar -xOzf "$tmp/archive.tar.gz" haps > "$tmp/haps"
+    entries=$(tar -tzf "$tmp/archive.tar.gz" | LC_ALL=C sort)
+    expected_entries=$(printf '%s\n' bundle.json haps libexec/git-remote-htree libexec/hashtree-LICENSE libexec/htree)
+    bundled=false
+    if [ "$entries" = "$expected_entries" ]; then
+        bundled=true
+    elif [ "$entries" != haps ]; then
+        die 'Unexpected archive contents'
+    fi
+    mkdir -p "$tmp/payload/libexec"
+    # Extract bytes into new regular files; never restore archive link entries.
+    for entry in $entries; do
+        tar -xOzf "$tmp/archive.tar.gz" "$entry" > "$tmp/payload/$entry"
+    done
+    cp "$tmp/payload/haps" "$tmp/haps"
     [ -f "$tmp/haps" ] && [ ! -L "$tmp/haps" ] || die 'Archive does not contain a regular binary'
     chmod 755 "$tmp/haps"
     reported=$("$tmp/haps" --version) || die 'This binary cannot run here; existing Haps was not changed'
     [ "$reported" = "haps ${version#v}" ] || die 'Release version mismatch'
+    if [ "$bundled" = true ]; then
+        chmod 755 "$tmp/payload/libexec/htree" "$tmp/payload/libexec/git-remote-htree"
+        "$tmp/payload/libexec/htree" --version >/dev/null || die 'Bundled htree cannot run here; existing installation was not changed'
+        helper_usage=$("$tmp/payload/libexec/git-remote-htree" 2>&1 || true)
+        printf '%s\n' "$helper_usage" | grep -q 'Usage: git-remote-htree' || die 'Bundled Git helper cannot run here'
+    fi
     [ -n "$bin_dir" ] && [ ! -d "$bin_dir/haps" ] || die 'Invalid installation directory'
-    mkdir -p "$bin_dir"
-    stage=$(mktemp "$bin_dir/.haps.XXXXXXXX")
-    cp "$tmp/haps" "$stage"
-    chmod 755 "$stage"
-    mv -f "$stage" "$bin_dir/haps"
+    [ ! -L "$bin_dir/.haps" ] || die 'Managed bundle directory must not be a symlink'
+    mkdir -p "$bin_dir/.haps"
+    stage=$(mktemp -d "$bin_dir/.haps/$version.XXXXXXXX")
+    cp -R "$tmp/payload/." "$stage/"
+    chmod 755 "$stage/haps"
+    bundle_name=${stage##*/}
+    link_stage=$(mktemp "$bin_dir/.haps-link.XXXXXXXX")
+    rm -f "$link_stage"
+    ln -s ".haps/$bundle_name/haps" "$link_stage"
+    mv -f "$link_stage" "$bin_dir/haps"
+    link_stage=
+    # Keep the previous bundle available for recovery. Only replace helper links
+    # we own; separate Cargo, Homebrew, or system installations stay in place.
     stage=
+    if [ "$bundled" = true ]; then
+        for tool in htree git-remote-htree; do
+            managed=false
+            case "$(readlink "$bin_dir/$tool" 2>/dev/null || true)" in
+                .haps/*/libexec/"$tool") managed=true ;;
+            esac
+            if [ "$managed" = true ] || { [ ! -e "$bin_dir/$tool" ] && [ ! -L "$bin_dir/$tool" ] && ! command -v "$tool" >/dev/null 2>&1; }; then
+                link_stage=$(mktemp "$bin_dir/.haps-link.XXXXXXXX")
+                rm -f "$link_stage"
+                ln -s ".haps/$bundle_name/libexec/$tool" "$link_stage"
+                mv -f "$link_stage" "$bin_dir/$tool"
+                link_stage=
+            fi
+        done
+        printf 'Included htree and git-remote-htree; existing tools were preserved.\n'
+    fi
     printf 'Installed %s to %s/haps\n' "$reported" "$bin_dir"
     case ":$PATH:" in
         *":$bin_dir:"*) ;;
@@ -84,7 +125,8 @@ fetch() {
         --tlsv1.2 --retry 2 --connect-timeout 10 --max-time 180 "$1" -o "$2"
 }
 cleanup() {
-    [ -z "${stage:-}" ] || rm -f "$stage"
+    [ -z "${link_stage:-}" ] || rm -f "$link_stage"
+    [ -z "${stage:-}" ] || rm -rf "$stage"
     [ -z "${tmp:-}" ] || rm -rf "$tmp"
 }
 

@@ -90,6 +90,116 @@ commands = [["rustc", "hello.rs", "-o", "hello{exe}"]]
 }
 
 #[test]
+fn htree_build_uses_existing_or_bundled_helper_and_explains_missing_tool() {
+    let tmp = tempdir().unwrap();
+    let source = tmp.path().join("source");
+    fs::create_dir(&source).unwrap();
+    git(&source, &["init"]);
+    git(&source, &["config", "user.name", "Test"]);
+    git(&source, &["config", "user.email", "test@example.invalid"]);
+    fs::write(
+        source.join("haps-build.toml"),
+        r#"
+[package]
+name = "fixture"
+version = "1.0.0"
+target = "host"
+description = "Helper transport fixture"
+[package.commands]
+fixture = "bin/fixture{exe}"
+[build]
+commands = [["rustc", "fixture.rs"]]
+[build.artifacts]
+"bin/fixture{exe}" = "fixture{exe}"
+"#,
+    )
+    .unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "Fixture"]);
+    let rev = git(&source, &["rev-parse", "HEAD"]);
+    let helper_source = tmp.path().join("helper.rs");
+    fs::write(&helper_source, r#"
+use std::{io::{self, BufRead, Write}, process::{Command, Stdio}};
+fn main() {
+    if std::env::args().len() == 1 {
+        eprintln!("Usage: git-remote-htree <remote-name> <url>");
+        std::process::exit(1);
+    }
+    std::fs::write(std::env::var_os("HELPER_MARKER").unwrap(), std::env::current_exe().unwrap().to_string_lossy().as_bytes()).unwrap();
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        match line.unwrap().as_str() {
+            "capabilities" => { println!("connect\n"); io::stdout().flush().unwrap(); }
+            "connect git-upload-pack" => {
+                println!(); io::stdout().flush().unwrap();
+                let status = Command::new("git").arg("upload-pack").arg(std::env::var_os("HELPER_REPO").unwrap())
+                    .stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit()).status().unwrap();
+                std::process::exit(status.code().unwrap_or(1));
+            }
+            "" => break,
+            value => panic!("Unexpected Git helper request: {}", value),
+        }
+    }
+}
+"#).unwrap();
+    let bundle = tmp.path().join("bundle with spaces");
+    fs::create_dir_all(bundle.join("libexec")).unwrap();
+    let suffix = std::env::consts::EXE_SUFFIX;
+    let helper = bundle
+        .join("libexec")
+        .join(format!("git-remote-htree{suffix}"));
+    assert!(
+        Command::new("rustc")
+            .arg(&helper_source)
+            .arg("-o")
+            .arg(&helper)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let haps = bundle.join(format!("haps{suffix}"));
+    fs::copy(env!("CARGO_BIN_EXE_haps"), &haps).unwrap();
+    let marker = tmp.path().join("marker");
+    let url = "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/fixture";
+    let run = |binary: &Path, path: &std::ffi::OsStr| {
+        Command::new(binary)
+            .env("PATH", path)
+            .env("HELPER_REPO", &source)
+            .env("HELPER_MARKER", &marker)
+            .env("HTREE_CONFIG_DIR", tmp.path().join("hashtree"))
+            .args(["--no-defaults", "--home"])
+            .arg(tmp.path().join("home"))
+            .args(["build", url, "--rev", &rev])
+            .output()
+            .unwrap()
+    };
+    // Only keep directories containing Git/system utilities, excluding any real
+    // Hashtree helper on the developer's PATH.
+    let paths: Vec<_> = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .filter(|p| !p.join(format!("git-remote-htree{suffix}")).exists())
+        .collect();
+    let path = std::env::join_paths(&paths).unwrap();
+    let result = run(&haps, &path);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(fs::read_to_string(&marker).unwrap().contains("libexec"));
+    let existing = tmp.path().join("existing");
+    fs::create_dir(&existing).unwrap();
+    fs::copy(&helper, existing.join(format!("git-remote-htree{suffix}"))).unwrap();
+    let existing_path = std::env::join_paths(std::iter::once(existing).chain(paths)).unwrap();
+    assert!(run(&haps, &existing_path).status.success());
+    assert!(fs::read_to_string(&marker).unwrap().contains("existing"));
+    let bare = tmp.path().join(format!("haps{suffix}"));
+    fs::copy(&haps, &bare).unwrap();
+    let missing = run(&bare, std::ffi::OsStr::new(""));
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("cargo install git-remote-htree"));
+}
+
+#[test]
 fn htree_source_urls_accept_pinned_public_repos_only() {
     use haps::model::SourceInfo;
     let source = SourceInfo {

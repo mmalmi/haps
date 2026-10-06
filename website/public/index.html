@@ -54,7 +54,7 @@ haps install alice/hello --version 1.0.0 --json</pre></section>
 <section class="wrap source-section publish-section" id="publish"><div><h2>Add your package.</h2><p>Stage your built app and its runtime files, then describe them in <code>haps.toml</code>. Sign your catalog with a Nostr key and share it through Hashtree.</p><p>No submission queue. People add your catalog and choose whether to trust your releases.</p><a class="text-link" href="https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps/PUBLISHING.md?g=">Publishing guide ↗</a></div><div class="source-example"><span class="small-index">CREATE YOUR SIGNING KEY ONCE</span><pre>haps identity init</pre><span class="small-index">PACKAGE AND SHARE YOUR APP</span><pre>haps init --name my-app \
   --command bin/my-app --payload stage
 haps pack haps.toml --payload stage --out catalog
-htree add catalog --publish my-packages</pre><p class="small">The guide covers staging, local testing, installing from your catalog, updates, and setting up htree.</p></div></section>
+haps publish catalog --name my-packages</pre><p class="small">The guide covers staging, local testing, installing from your catalog, updates, and setting up htree.</p></div></section>
 </main>
 <footer class="wrap"><a class="brand" href="./"><img src="./mark.svg?v=3" width="25" height="25" alt="">haps</a><span>HAshtree Package System</span><div><a href="https://hashtree.cc">Hashtree</a><a href="https://crates.io/crates/haps">crates.io</a><a href="https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps">Source</a><a href="https://github.com/mmalmi/haps">GitHub</a></div></footer>
 <div id="notice" role="status" aria-live="polite"></div>

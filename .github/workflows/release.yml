@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing stable tag to build and publish (v0.1.6)'
+        description: 'Existing stable tag to build and publish (v0.1.8)'
         required: true
 permissions:
   contents: read
@@ -136,5 +136,5 @@ jobs:
           TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
         run: |
-          printf 'Prebuilt Haps binaries for macOS, Linux, and Windows.\n\nBuilt from commit %s and tested on each target platform. SHA256SUMS covers all binary archives.\n\nInstallation: https://haps.hashtree.cc/#install\n' "$SOURCE_SHA" > release-notes.txt
+          printf 'Haps bundles for macOS, Linux, and Windows, including checksum-pinned htree and git-remote-htree helpers.\n\nBuilt from commit %s and tested on each target platform. SHA256SUMS covers all binary archives.\n\nInstallation: https://haps.hashtree.cc/#install\n' "$SOURCE_SHA" > release-notes.txt
           gh release create "$TAG" dist/* --verify-tag --title "Haps $TAG" --notes-file release-notes.txt

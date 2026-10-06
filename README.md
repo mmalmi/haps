@@ -49,8 +49,10 @@ curl -fsSL https://haps.hashtree.cc/install.sh | sh
 ```
 
 The installer downloads the published archive from Hashtree, checks SHA-256 and
-runs `haps --version` before replacing the executable in `~/.local/bin`. Add that
-directory to your `PATH` if needed. It does not use sudo or edit shell startup
+checks all three executables before activation. The bundle includes `haps`, `htree`,
+and `git-remote-htree`. It keeps versioned files under `~/.local/bin/.haps` and adds
+command links in `~/.local/bin`; separately installed helpers are preserved. Add
+that directory to your `PATH` if needed. It does not use sudo or edit shell startup
 files. The checksum verifies the download against the release manifest; it is
 served by the same publisher, not a separate trust authority.
 
@@ -59,10 +61,11 @@ To inspect first or pin a version:
 ```sh
 curl -fsSL https://haps.hashtree.cc/install.sh -o install-haps.sh
 less install-haps.sh
-sh install-haps.sh --version v0.1.7 --bin-dir "$HOME/.local/bin"
+sh install-haps.sh --version v0.1.8 --bin-dir "$HOME/.local/bin"
 ```
 
-[Windows x64 zip and all release downloads](#downloads) are also available. Extract `haps.exe` into a directory on your `PATH`.
+[Windows x64 zip and all release downloads](#downloads) are also available. Extract the entire zip, keeping `haps.exe`, `bundle.json`, and `libexec/` together,
+into a directory on your `PATH`. Haps finds its bundled helpers automatically.
 The prebuilt Linux CLI requires glibc 2.35 or newer; application packages have
 separate runtime requirements below.
 
@@ -73,6 +76,18 @@ cargo install haps --locked
 haps install iris-drive
 haps run iris-drive
 ```
+
+Cargo installs Haps itself. Normal package installs work without a separate
+`htree` executable: the shared Hashtree client is compiled into Haps. Cargo and
+prebuilt installs both reuse an existing daemon and compatible tools on `PATH`.
+For publishing or Hashtree Git builds after a Cargo install, add the tools once:
+
+```sh
+cargo install hashtree-cli git-remote-htree --locked
+```
+
+The prebuilt bundle already includes them. Git itself and build toolchains remain
+separate prerequisites for source builds.
 
 Website: [haps.hashtree.cc](https://haps.hashtree.cc).
 [Source and documentation](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps)
@@ -156,7 +171,7 @@ Use the same installation route you started with:
   archive and executable before replacing Haps. If you originally used a custom
   directory, pass the same `--bin-dir` or `HAPS_INSTALL_DIR` again.
 - **Windows zip:** close running Haps processes, extract the new release, and
-  replace `haps.exe` in the directory where you installed it.
+  replace the complete bundle, including `libexec/`, in the directory where you installed it.
 - **Source checkout:** update the source and repeat `cargo install --path . --locked`.
 
 ```sh
@@ -174,17 +189,17 @@ Cargo-managed installs back to Cargo.
 
 ### Downloads
 
-Prebuilt Haps 0.1.7 archives, hosted on Hashtree:
+Prebuilt Haps 0.1.8 archives, hosted on Hashtree:
 
 | Platform | Archive |
 | --- | --- |
-| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.7/assets/haps-v0.1.7-aarch64-apple-darwin.tar.gz) |
-| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.7/assets/haps-v0.1.7-x86_64-apple-darwin.tar.gz) |
-| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.7/assets/haps-v0.1.7-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.7/assets/haps-v0.1.7-aarch64-unknown-linux-gnu.tar.gz) |
-| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.7/assets/haps-v0.1.7-x86_64-pc-windows-msvc.zip) |
+| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.8/assets/haps-v0.1.8-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.8/assets/haps-v0.1.8-x86_64-apple-darwin.tar.gz) |
+| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.8/assets/haps-v0.1.8-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.8/assets/haps-v0.1.8-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.8/assets/haps-v0.1.8-x86_64-pc-windows-msvc.zip) |
 
-The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.7/release.json) records archive sizes and SHA-256 checksums.
+The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.8/release.json) records archive sizes and SHA-256 checksums.
 
 ### Publish your package
 
@@ -198,7 +213,7 @@ haps pack haps.toml --payload stage --out catalog
 ```
 
 `pack` signs a local catalog. Test it locally, then publish it
-with `htree add catalog --publish my-packages` or serve the directory over HTTPS.
+with `haps publish catalog --name my-packages` or serve the directory over HTTPS.
 
 The **[publishing guide](PUBLISHING.md)** covers staging, testing, Hashtree setup,
 sharing install commands, multiple platforms, ignore rules, and updates. No
@@ -256,7 +271,7 @@ local aliases are conveniences, not global identities.
 ### Build from a Git repository
 
 ```sh
-cargo install git-remote-htree --locked
+# Cargo-only install: cargo install git-remote-htree --locked
 haps identity init
 haps build htree://npub1.../project --rev FULL_COMMIT_HASH
 haps build htree://npub1.../project --rev FULL_COMMIT_HASH --execute --install
@@ -276,7 +291,7 @@ the current build target. Haps signs local build results with the builder's iden
 and records the original Git URL and commit in the signed package metadata.
 
 `haps source add` also accepts `htree://npub/CATALOG_TREE` for a signed **catalog
-directory**, accessed through the public hashtree HTTP gateway. This is separate
+directory**, resolved from signed Hashtree roots and read as verified content. This is separate
 from Git source builds. Catalog signatures, publisher pins, content hashes, and
 rollback checks remain enforced.
 
@@ -521,10 +536,25 @@ original catalog signer; changing a catalog requires signing a new catalog under
 your own key. There is not yet a CLI command for forking or curating a catalog of
 other publishers' releases.
 
-The current reader supports local directories and HTTP(S); `htree://` catalog
-addresses resolve through a Hashtree HTTP gateway. Haps does not yet share a
-running htree daemon's peer connections. Content is independent of its location,
-but reading still needs an available copy and supported transport.
+The reader supports local directories, HTTP(S), and `htree://` catalogs. Hashtree
+reads use `hashtree-client`: an existing local daemon supplies signed root events
+through its relay and raw blocks through its shared cache and peer connections.
+Without a daemon, the same binary uses the relays and Blossom servers from the
+shared Hashtree configuration. No public directory gateway is required.
+
+Haps observes signed roots for a bounded window, then reads one immutable catalog
+snapshot. Hosting signatures, catalog signatures, publisher pins, block hashes,
+and catalog rollback protection remain separate checks. No daemon is started
+and no identity is created just to download a package.
+
+`HTREE_CONFIG_DIR` selects the shared configuration. `HTREE_DAEMON_URL` can select
+a loopback HTTP endpoint; otherwise the configured server port is used.
+`HTREE_PREFER_LOCAL_DAEMON=0` skips the daemon. `HTREE_LOCAL_DAEMON_ONLY=1` disables
+external fallback. `NOSTR_RELAYS` overrides standalone relays (comma-separated).
+
+Haps keeps verified download caches and installed/rollback files in its own data
+directory. Daemon cache eviction is safe: Haps retains the bytes it needs and never
+opens the daemon's database or alters pins belonging to another application.
 
 ## Protocol and current limits
 

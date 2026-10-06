@@ -85,6 +85,13 @@ enum Command {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Upload a signed catalog using the installed or bundled Hashtree CLI.
+    Publish {
+        catalog: PathBuf,
+        /// Hashtree name to create or update under your hosting identity.
+        #[arg(long)]
+        name: String,
+    },
     /// Inspect or explicitly execute a build recipe from a pinned Git checkout.
     Build {
         repository: String,
@@ -955,6 +962,28 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             let repo = Repository::local(out)?;
             let release = repo.publish(&keys, spec, &payload).await?;
             println!("{}", serde_json::to_string_pretty(&release.event)?);
+        }
+        Command::Publish { catalog, name } => {
+            let path = catalog
+                .canonicalize()
+                .context("catalog directory is missing")?;
+            let event: nostr::Event = read_json(&path.join("catalog.json"))?;
+            let repository = Repository::local(path.clone())?;
+            repository.catalog(&event.pubkey.to_hex()).await?;
+            let htree = haps::helpers::find("htree").context(
+                "Publishing needs htree. Install the Haps bundle or run `cargo install hashtree-cli --locked`."
+            )?;
+            ensure!(
+                !name.is_empty() && !name.starts_with('-'),
+                "invalid catalog name"
+            );
+            let status = std::process::Command::new(htree)
+                .arg("add")
+                .arg(&path)
+                .arg("--publish")
+                .arg(name)
+                .status()?;
+            ensure!(status.success(), "Hashtree catalog publication failed");
         }
         Command::Build {
             repository,
