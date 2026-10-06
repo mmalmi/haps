@@ -26,6 +26,7 @@ fn published_example_apps_install() -> anyhow::Result<()> {
             matches!(app, "iris-chat" | "iris-drive" | "nostr-vpn"),
             "unknown example app"
         );
+        eprintln!("Installing {app} from the public catalog...");
         let output = Command::new(env!("CARGO_BIN_EXE_haps"))
             .env("HAPS_HOME", &home)
             .env("XDG_DATA_HOME", &data)
