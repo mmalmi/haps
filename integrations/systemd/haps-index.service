@@ -1,0 +1,24 @@
+[Unit]
+Description=Refresh the signed Haps package index
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=haps-index
+Group=haps-index
+StateDirectory=haps-index
+UMask=0077
+EnvironmentFile=/etc/haps-index.env
+ExecStart=/usr/bin/python3 /opt/haps/scripts/index-worker.py --home /var/lib/haps-index/private --output /var/lib/haps-index/public --name package-index --min-free-gib 20 --max-state-mib 128 --timeout 90
+TimeoutStartSec=100
+CPUQuota=25%
+MemoryMax=256M
+TasksMax=32
+Nice=19
+IOSchedulingClass=idle
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/haps-index

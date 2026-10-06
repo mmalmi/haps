@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically refresh the Haps package index
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=30min
+RandomizedDelaySec=5min
+Unit=haps-index.service
+
+[Install]
+WantedBy=timers.target

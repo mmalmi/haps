@@ -43,3 +43,10 @@ jobs:
       - name: Launch a desktop entry through GIO
         if: runner.os == 'Linux'
         run: HAPS_TEST_DESKTOP=1 cargo test --locked desktop_launcher_tracks_install_update_rollback_and_removal
+      - name: Retain the verified Linux worker binary
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: haps-linux-verified
+          path: target/debug/haps
+          retention-days: 7

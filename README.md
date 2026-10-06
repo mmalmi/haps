@@ -658,6 +658,16 @@ ranking grants installation trust. Keep a worker's Haps home separate from a
 personal install; a scheduled `index build` and `htree add` can publish a shared
 index without publishing anyone's receipts or local follows.
 
+For a dedicated Linux worker, `scripts/index-worker.py` refreshes and publishes
+only changed indexes, retries failed uploads, refuses empty publications and
+stops at a time, storage or free-space limit. The example units in
+`integrations/systemd/` use a separate service account, 25% of one CPU, 256 MiB
+RAM, a 90-second deadline, a 128 MiB state budget and a 30-minute cadence. They
+are templates, not an enabled service. Set up the worker identity, networking
+and executable paths before a single manual canary run; enable the timer only
+after measuring its effect. A process limit does not bound work delegated to a
+shared Hashtree daemon.
+
 ## Development checks
 
 ```sh
