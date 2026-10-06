@@ -1588,8 +1588,11 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 .into_iter()
                 .max();
             if let Some(previous) = previous
-                && previous >= attestation_time_ms(&event)?
+                && previous / 1000 >= event.created_at.as_secs()
             {
+                // Relays replace addressable events by whole seconds, not our
+                // fact snapshot's millisecond field. Rapid edits must advance
+                // that timestamp too, or a warning/revocation can be discarded.
                 let claim = parse_attestation(&event)?;
                 let build = if is_warning { warn_at } else { attest_at };
                 event = build(
@@ -1601,8 +1604,9 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                         claim.approved
                     },
                     claim.note,
-                    previous
+                    (previous / 1000)
                         .checked_add(1)
+                        .and_then(|seconds| seconds.checked_mul(1000))
                         .context("attestation timestamp overflow")?,
                 )?;
             }

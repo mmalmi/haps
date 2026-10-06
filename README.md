@@ -608,8 +608,8 @@ release signature and payload hashes, then applies your local social policy.
 
 `haps publish catalog --name my-packages` uploads the catalog and signs software
 announcements with your Haps publishing key. Readers can then use
-`haps install NPUB/package` or an existing local alias without first adding the
-catalog. An announcement is a location hint, not permission to install unknown
+`haps install NPUB/package` or an existing local alias without manual setup.
+An announcement is a location hint, not permission to install unknown
 software. Catalog hosting and package signing may use different identities.
 
 Announcements use the NIP-82 draft's application kind **32267**, with ordinary
@@ -619,14 +619,14 @@ release events. This is application-metadata interoperability, not a claim that
 Haps directory manifests are Zapstore assets; NIP-82 asset/release conversion is
 not implemented.
 
-Discovery combines explicitly configured catalogs, a private local Hashtree
-event cache, any added shared indexes, and a bounded live relay observation.
+Discovery combines preset and automatically discovered package sources, a
+private local Hashtree event cache, shared indexes, and a bounded live relay observation.
 Shared indexes have a Hashtree full-text index; relay keyword search is not
 required. Results retain their original publishers and use the same social
 ranking and chooser. Unavailable sources produce diagnostics; a quiet relay
 window cannot establish that a package does not exist. New installs refresh
-catalog heads. `--no-defaults` keeps discovery offline unless `NOSTR_RELAYS` is
-explicitly configured or shared indexes are added.
+catalog heads. `--no-defaults` keeps discovery offline unless networking is
+explicitly configured.
 
 The cache uses `nostr-pubsub` and its existing Hashtree adapter. Networking reuses
 the shared Hashtree daemon when available, honors local-only mode, and otherwise

@@ -872,3 +872,54 @@ fn attestation_shortcut_pins_version_platform_and_exports_signed_claims() {
     let list: serde_json::Value = serde_json::from_str(&ok(&reader, &["list", "--json"])).unwrap();
     assert_eq!(list[0]["release_id"], releases[0].id.to_hex());
 }
+
+#[test]
+fn rapid_findings_advance_the_relay_replacement_timestamp() {
+    let temp = tempdir().unwrap();
+    let home = temp.path().join("reader");
+    ok(&home, &["identity", "init"]);
+    let keys = nostr::Keys::parse(
+        fs::read_to_string(home.join("identity.key"))
+            .unwrap()
+            .trim(),
+    )
+    .unwrap();
+    let release = nostr::EventId::from_hex(&"ab".repeat(32)).unwrap();
+    // A slightly future local claim makes this deterministic across second boundaries.
+    let previous = haps::trust::attest_at(
+        &keys,
+        release,
+        true,
+        "Earlier finding".into(),
+        (nostr::Timestamp::now().as_secs() + 2) * 1000,
+    )
+    .unwrap();
+    let file = temp.path().join("previous.json");
+    fs::write(&file, serde_json::to_vec(&previous).unwrap()).unwrap();
+    ok(&home, &["import", file.to_str().unwrap()]);
+    let warning: nostr::Event = serde_json::from_str(&ok(
+        &home,
+        &[
+            "warn",
+            &release.to_hex(),
+            "--note",
+            "Changed finding",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert!(warning.created_at > previous.created_at);
+    let withdrawn: nostr::Event = serde_json::from_str(&ok(
+        &home,
+        &[
+            "warn",
+            &release.to_hex(),
+            "--revoke",
+            "--note",
+            "Withdrawn",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert!(withdrawn.created_at > warning.created_at);
+}

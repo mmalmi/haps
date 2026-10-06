@@ -51,7 +51,26 @@ pub async fn relay(
                 event.verify().unwrap();
                 let accepted = state.accept.load(std::sync::atomic::Ordering::Relaxed);
                 if accepted {
-                    state.events.lock().await.push(event.clone());
+                    let mut events = state.events.lock().await;
+                    let same_address = |old: &nostr::Event| {
+                        old.pubkey == event.pubkey
+                            && old.kind == event.kind
+                            && (event.kind.is_replaceable()
+                                || (event.kind.is_addressable()
+                                    && haps::model::tag_value(old, "d").ok()
+                                        == haps::model::tag_value(&event, "d").ok()))
+                    };
+                    let newer = |old: &nostr::Event| {
+                        event.created_at > old.created_at
+                            || (event.created_at == old.created_at && event.id < old.id)
+                    };
+                    if !events
+                        .iter()
+                        .any(|old| old.id == event.id || (same_address(old) && !newer(old)))
+                    {
+                        events.retain(|old| !same_address(old));
+                        events.push(event.clone());
+                    }
                 }
                 if socket
                     .send(Message::Text(
