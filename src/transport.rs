@@ -7,7 +7,7 @@ use tokio::sync::OnceCell;
 
 pub struct CatalogTransport {
     client: Client,
-    reference: Reference,
+    reference: Option<Reference>,
     root: OnceCell<Cid>,
 }
 
@@ -21,17 +21,32 @@ impl CatalogTransport {
     }
 
     pub fn with_config(location: &str, cache: &Path, config: ClientConfig) -> Result<Self> {
+        let (reference, root) = if let Some(hash) = location.strip_prefix("htree://nhash") {
+            let decoded = hashtree_core::nhash_decode(&format!("nhash{hash}"))?;
+            (
+                None,
+                OnceCell::new_with(Some(Cid {
+                    hash: decoded.hash,
+                    key: decoded.decrypt_key,
+                })),
+            )
+        } else {
+            (Some(Reference::parse(location)?), OnceCell::new())
+        };
         Ok(Self {
             client: Client::new(config, &cache.join("transport"))?,
-            reference: Reference::parse(location)?,
-            root: OnceCell::new(),
+            reference,
+            root,
         })
     }
 
     pub async fn read(&self, path: &str, limit: usize) -> Result<Vec<u8>> {
         let root = self
             .root
-            .get_or_try_init(|| self.client.resolve(&self.reference))
+            .get_or_try_init(|| {
+                self.client
+                    .resolve(self.reference.as_ref().expect("unresolved named root"))
+            })
             .await?;
         self.client.read_file(root, path, limit).await
     }

@@ -89,6 +89,42 @@ Try the staged app's basic functionality inside a VM or container before sharing
 After publishing, test discovery and installation from a separate Haps profile as
 shown below. A successful install alone does not prove the app works.
 
+## Managed event catalogs
+
+For routine publishing, Haps can maintain the output directory and selected
+Nostr event index itself:
+
+```sh
+haps add haps.toml --payload stage
+haps catalog show
+haps catalog publish
+```
+
+The default catalog is `default`; use `--catalog NAME` on `add` for another
+collection and `haps catalog publish NAME` to share it. A local publishing
+identity is created on the first staged `add` if none is configured. Keep that
+identity for subsequent releases. An identity configured with `identity use`
+contains only a public key and cannot sign releases.
+
+Adding a staged release does not upload or install it. Publishing uploads its
+content, signs package heads that reference exact releases and immutable
+Hashtree roots, and publishes an ordinary `hashtree-nostr` event index. Its root
+uses the existing Hashtree kind-30064 announcement format, so other Nostr index
+readers can query it without Haps-specific metadata. `haps install
+publisher/package` can then resolve the package directly through Nostr relays or
+Hashtree event indexes, without resolving a mutable directory catalog.
+
+To include an existing publisher's package, use `haps add publisher/package`
+without `--payload`. Its original signed events are preserved. Repeat the
+command to refresh the selected records. `haps catalog remove publisher/package`
+removes the selection from the next catalog publication; it does not revoke the
+publisher's release or uninstall anything.
+Empty collections are not published.
+
+The directory-based workflow below remains supported. `haps publish` also
+produces direct package heads using the uploaded directory's immutable hash.
+Existing readers can still use its named directory catalog.
+
 ## 4. Share your package
 
 The prebuilt Haps bundle includes the [Hashtree CLI](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/rust/crates/hashtree-cli/README.md?g=)

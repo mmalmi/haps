@@ -38,14 +38,29 @@ async fn publish_checks_catalog_before_using_existing_or_bundled_htree() -> anyh
         &source,
         r#"
 fn main() {
-    let args: Vec<_> = std::env::args().skip(1).collect();
+    let mut args: Vec<_> = std::env::args().skip(1).collect();
     if args == ["--version"] { println!("htree 0.2.151"); return; }
+    if args[0] == "--data-dir" { args.drain(..2); }
+    if args[0] == "nostr-index" {
+        assert_eq!(&args[..3], ["nostr-index", "import", "--events"]);
+        let events = std::fs::read_to_string(&args[3]).unwrap();
+        assert!(events.contains("haps_head") && events.contains("haps/release/"));
+        println!("{{\"root\":\"{}\",\"imported\":2}}", std::env::var("TEST_ROOT").unwrap());
+        return;
+    }
+    if args[0] == "push" {
+        assert_eq!(args[1], std::env::var("TEST_ROOT").unwrap());
+        if std::env::var_os("PUSH_FAIL").is_some() { std::process::exit(1); }
+        return;
+    }
     assert_eq!(args[0], "add");
-    assert!(std::path::Path::new(&args[1]).join("catalog.json").exists());
-    assert_eq!(&args[2..], ["--publish", "my-packages"]);
+    let directory = std::path::Path::new(&args[1]);
+    assert!(directory.join("catalog.json").exists() || directory.join("index.json").exists());
+    assert!(args[2..] == ["--local"] || args[2..] == ["--publish", "my-packages"]);
     std::fs::write(std::env::var_os("PUBLISH_MARKER").unwrap(), std::env::current_exe().unwrap().to_string_lossy().as_bytes()).unwrap();
     if std::env::var_os("PUBLISH_FAIL").is_some() { std::process::exit(1); }
     println!("  published: {}/my-packages", std::env::var("TEST_HOST").unwrap());
+    println!("  url: {}", std::env::var("TEST_ROOT").unwrap());
 }
 "#,
     )?;
@@ -68,6 +83,7 @@ fn main() {
             .env("PATH", path)
             .env("PUBLISH_MARKER", &marker)
             .env("TEST_HOST", keys.public_key().to_bech32().unwrap())
+            .env("TEST_ROOT", hashtree_core::nhash_encode(&[1; 32]).unwrap())
             .env("NOSTR_RELAYS", "")
             .env("HTREE_PREFER_LOCAL_DAEMON", "false")
             .env("HTREE_CONFIG_DIR", temp.path().join("hashtree"))
@@ -99,6 +115,7 @@ fn main() {
         .announcements(Some(keys.public_key()))
         .await?;
     assert_eq!(announcements[0].name, "hello");
+    assert!(announcements[0].head.is_some());
     let existing = temp.path().join("existing");
     fs::create_dir(&existing)?;
     fs::copy(&helper, existing.join(format!("htree{suffix}")))?;
@@ -110,6 +127,88 @@ fn main() {
     let missing = run(&bare, &empty, false);
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("cargo install hashtree-cli"));
+    // Exercise the public catalog workflow too: Haps manages its own event index
+    // and advertises an immutable root, with no external htree command required.
+    let managed = temp.path().join("managed");
+    let manifest = temp.path().join("haps.toml");
+    fs::write(
+        &manifest,
+        format!(
+            "name='hello'\nversion='1.0.0'\ntarget='{}'\ndescription='Hello'\n[commands]\nhello='hello'\n",
+            target()
+        ),
+    )?;
+    let managed_run = |args: &[&str], fail: bool| {
+        let mut command = Command::new(&haps);
+        if fail {
+            command.env("PUSH_FAIL", "1");
+        }
+        command
+            .env("PATH", &empty)
+            .env("PUBLISH_MARKER", &marker)
+            .env("TEST_HOST", keys.public_key().to_bech32().unwrap())
+            .env("TEST_ROOT", hashtree_core::nhash_encode(&[1; 32]).unwrap())
+            .env("NOSTR_RELAYS", "")
+            .env("HTREE_PREFER_LOCAL_DAEMON", "false")
+            .env("HTREE_CONFIG_DIR", temp.path().join("hashtree"))
+            .env("HAPS_HOME", &managed)
+            .env("HAPS_NO_DEFAULTS", "true")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(
+        managed_run(
+            &[
+                "add",
+                manifest.to_str().unwrap(),
+                "--payload",
+                payload.to_str().unwrap()
+            ],
+            false
+        )
+        .status
+        .success()
+    );
+    let failed = managed_run(&["catalog", "publish"], true);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("content upload failed"));
+    assert!(!managed.join("discovery/outbox").exists());
+    let published = managed_run(&["catalog", "publish"], false);
+    assert!(
+        published.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&published.stderr),
+        String::from_utf8_lossy(&published.stdout)
+    );
+    let own_key: nostr::PublicKey = nostr::PublicKey::parse(
+        String::from_utf8(managed_run(&["identity", "show"], false).stdout)?.trim(),
+    )?;
+    let selected = haps::discovery::Discovery::open(&managed.join("catalogs/default"))?;
+    let heads = selected.announcements(Some(own_key)).await?;
+    assert_eq!(heads.len(), 1);
+    assert!(
+        heads[0]
+            .head
+            .as_ref()
+            .unwrap()
+            .payload
+            .starts_with("htree://nhash")
+    );
+    assert!(!managed.join("catalogs/default/public/index.json").exists());
+    let discoveries = haps::discovery::Discovery::open(&managed)?;
+    let announcements = discoveries
+        .events(vec![
+            nostr::Filter::new().kind(haps::event_catalog::INDEX_KIND),
+        ])
+        .await?;
+    assert_eq!(announcements.len(), 1);
+    assert_eq!(announcements[0].pubkey, own_key);
+    assert!(hashtree_nostr::parse_verified_hashtree_root_event(&announcements[0])?.is_some());
+    assert_eq!(
+        haps::event_catalog::IndexAnnouncement::verify(announcements[0].clone())?.name,
+        "default"
+    );
     fs::remove_file(&marker)?;
     let file = catalog.join("catalog.json");
     let mut event: serde_json::Value = serde_json::from_slice(&fs::read(&file)?)?;

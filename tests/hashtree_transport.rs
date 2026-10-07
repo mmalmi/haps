@@ -10,13 +10,11 @@ use haps::{
     repository::Repository,
 };
 use hashtree_client::ClientConfig;
-use hashtree_core::{Cid, DirEntry, HashTree, HashTreeConfig, LinkType, MemoryStore, Store};
+use hashtree_core::{HashTree, HashTreeConfig, MemoryStore, Store};
 use nostr::{Event, EventBuilder, Keys, Kind, Tag, nips::nip19::ToBech32};
 use std::{
     collections::BTreeMap,
     fs,
-    future::Future,
-    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -24,32 +22,9 @@ use std::{
     time::Duration,
 };
 
-fn add_directory<'a>(
-    tree: &'a HashTree<MemoryStore>,
-    path: &'a std::path::Path,
-) -> Pin<Box<dyn Future<Output = anyhow::Result<Cid>> + Send + 'a>> {
-    Box::pin(async move {
-        let mut entries = vec![];
-        for entry in fs::read_dir(path)? {
-            let entry = entry?;
-            let (cid, size, kind) = if entry.file_type()?.is_dir() {
-                (add_directory(tree, &entry.path()).await?, 0, LinkType::Dir)
-            } else {
-                let (cid, size) = tree.put(&fs::read(entry.path())?).await?;
-                (cid, size, LinkType::File)
-            };
-            entries.push(DirEntry {
-                name: entry.file_name().to_str().unwrap().into(),
-                hash: cid.hash,
-                key: cid.key,
-                size,
-                link_type: kind,
-                meta: None,
-            });
-        }
-        Ok(tree.put_directory(entries).await?)
-    })
-}
+#[path = "support/tree.rs"]
+mod tree;
+use tree::add_directory;
 
 #[derive(Clone)]
 struct Fixture {

@@ -285,6 +285,18 @@ impl Trust {
             .contains(author)
             .then(|| self.graph.get_follow_distance(author))
     }
+    /// Bounded social discovery; known nearer authors take priority.
+    pub fn discovery_authors(&self, distance: u32) -> Vec<nostr::PublicKey> {
+        let mut authors: Vec<_> = self
+            .reachable
+            .iter()
+            .filter(|key| !self.muted(key))
+            .filter_map(|key| Some((self.distance(key)?, nostr::PublicKey::parse(key).ok()?)))
+            .filter(|(d, _)| *d <= distance)
+            .collect();
+        authors.sort();
+        authors.into_iter().take(256).map(|(_, key)| key).collect()
+    }
     pub fn muted(&self, author: &str) -> bool {
         self.graph
             .get_muted_by_user(&self.root)

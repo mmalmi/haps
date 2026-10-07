@@ -3,7 +3,7 @@
 use crate::{model::*, repository::Repository, store::VerifiedStore};
 use anyhow::{Context, Result, ensure};
 use hashtree_core::Cid;
-use hashtree_index::{SearchIndex, SearchIndexOptions, SearchOptions};
+use hashtree_index::{SearchIndex, SearchIndexOptions};
 use hashtree_nostr::{NostrEventStore, stored_event_from_nostr_sdk_event};
 use hashtree_nostr_pubsub::HashtreeNostrIndexEventBus;
 use nostr::{Event, EventBuilder, Filter, Keys, Kind, PublicKey, Tag};
@@ -26,6 +26,7 @@ pub struct Announcement {
     pub event: Event,
     pub name: String,
     pub location: String,
+    pub head: Option<crate::package_head::PackageHead>,
 }
 impl Announcement {
     pub fn verify(event: Event) -> Result<Self> {
@@ -36,8 +37,28 @@ impl Announcement {
         );
         let name = tag_value(&event, "d")?.to_owned();
         safe_name(&name)?;
-        let location = tag_value(&event, "haps_catalog")?.to_owned();
-        validate_location(&location)?;
+        let head = if event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice().first().is_some_and(|v| v == "haps_head"))
+        {
+            ensure!(
+                tag_value(&event, "haps_head")? == "1",
+                "unsupported package head tag"
+            );
+            let head: crate::package_head::PackageHead = serde_json::from_str(&event.content)?;
+            head.validate()?;
+            Some(head)
+        } else {
+            None
+        };
+        let location = if head.is_some() {
+            String::new()
+        } else {
+            let location = tag_value(&event, "haps_catalog")?.to_owned();
+            validate_location(&location)?;
+            location
+        };
         ensure!(
             !tag_value(&event, "name")?.is_empty(),
             "missing software name"
@@ -46,7 +67,35 @@ impl Announcement {
             event,
             name,
             location,
+            head,
         })
+    }
+    pub async fn sign_direct(
+        keys: &Keys,
+        repo: &Repository,
+        snapshot: &crate::repository::Snapshot,
+        name: &str,
+        payload: &str,
+    ) -> Result<Event> {
+        safe_name(name)?;
+        let head = crate::package_head::PackageHead::from_catalog(
+            repo,
+            snapshot,
+            &keys.public_key().to_hex(),
+            name,
+            payload,
+        )
+        .await?;
+        let event = EventBuilder::new(SOFTWARE_KIND, serde_json::to_string(&head)?)
+            .tags([
+                Tag::identifier(name),
+                Tag::parse(["name", name])?,
+                Tag::hashtag("haps"),
+                Tag::parse(["haps_head", "1"])?,
+            ])
+            .sign_with_keys(keys)?;
+        Self::verify(event.clone())?;
+        Ok(event)
     }
     pub fn sign(keys: &Keys, package: &PackageSpec, location: &str) -> Result<Event> {
         safe_name(&package.name)?;
@@ -71,10 +120,14 @@ impl Announcement {
     }
 }
 
-fn validate_location(location: &str) -> Result<()> {
+pub(crate) fn validate_location(location: &str) -> Result<()> {
     ensure!(location.len() <= 2048, "catalog location too long");
     if location.starts_with("htree://") {
-        hashtree_client::Reference::parse(location)?;
+        if let Some(hash) = location.strip_prefix("htree://nhash") {
+            hashtree_core::nhash_decode(&format!("nhash{hash}"))?;
+        } else {
+            hashtree_client::Reference::parse(location)?;
+        }
     } else {
         let url = reqwest::Url::parse(location)?;
         ensure!(
@@ -99,7 +152,8 @@ fn retained(event: &Event) -> bool {
     if event.kind == SOFTWARE_KIND {
         return Announcement::verify(event.clone()).is_ok();
     }
-    event.kind == APP_KIND && Release::verify(event.clone()).is_ok()
+    crate::event_catalog::IndexAnnouncement::verify(event.clone()).is_ok()
+        || (event.kind == APP_KIND && Release::verify(event.clone()).is_ok())
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -155,10 +209,21 @@ impl Discovery {
         })
     }
     pub async fn ingest(&self, events: impl IntoIterator<Item = Event>) -> Result<usize> {
+        self.write_events(events, false).await
+    }
+    pub async fn replace_events(&self, events: impl IntoIterator<Item = Event>) -> Result<usize> {
+        self.write_events(events, true).await
+    }
+    async fn write_events(
+        &self,
+        events: impl IntoIterator<Item = Event>,
+        replace: bool,
+    ) -> Result<usize> {
         let mut state = self.cache.lock().await;
         let previous = cached_events(&state, vec![Filter::new()]).await?;
         let mut merged: BTreeMap<_, _> = previous
             .iter()
+            .filter(|_| !replace)
             .map(|event| (event.id, event.clone()))
             .collect();
         let mut count = 0;
@@ -168,7 +233,7 @@ impl Discovery {
                 count += 1;
             }
         }
-        if count == 0 {
+        if count == 0 && !replace {
             return Ok(0);
         }
         // Keep the newest addressable record before applying the retention cap.
@@ -261,37 +326,87 @@ impl Discovery {
         publisher: Option<PublicKey>,
         window: Duration,
     ) -> Result<usize> {
-        use nostr_pubsub::NostrEventSubscriber;
-        let mut filter = Filter::new()
-            .kind(SOFTWARE_KIND)
-            .hashtag("haps")
-            .limit(LIMIT);
+        self.lookup(
+            Some(std::sync::Arc::new(bus.clone())),
+            publisher,
+            None,
+            window,
+        )
+        .await
+    }
+    pub async fn lookup(
+        &self,
+        relay: Option<std::sync::Arc<RelayEventBus>>,
+        publisher: Option<PublicKey>,
+        name: Option<&str>,
+        window: Duration,
+    ) -> Result<usize> {
+        self.lookup_sources(relay, &[], publisher, name, None, window)
+            .await
+    }
+    pub async fn lookup_sources(
+        &self,
+        relay: Option<std::sync::Arc<RelayEventBus>>,
+        indexes: &[(String, String)],
+        publisher: Option<PublicKey>,
+        name: Option<&str>,
+        query: Option<&str>,
+        window: Duration,
+    ) -> Result<usize> {
+        let lookup = self.event_lookup(relay, indexes, window).await?;
+        let mut filter = Filter::new().kind(SOFTWARE_KIND).limit(LIMIT);
         if let Some(publisher) = publisher {
             filter = filter.author(publisher);
         }
-        let (sender, mut receiver) = tokio::sync::mpsc::channel(LIMIT);
-        let subscription = bus
-            .subscribe(
-                vec![filter],
-                std::sync::Arc::new(move |event| {
-                    let _ = sender.try_send(event.event.into_event());
-                }),
-            )
-            .await?;
-        let deadline = tokio::time::sleep(window);
-        tokio::pin!(deadline);
-        let mut events = BTreeMap::new();
-        loop {
-            tokio::select! {
-                ()=&mut deadline => break,
-                event=receiver.recv() => match event {
-                    Some(event) => {events.insert(event.id,event); if events.len() >= LIMIT {break;}},
-                    None => break,
-                }
-            }
+        if let Some(name) = name {
+            filter = filter.identifier(name);
+        } else {
+            filter = filter.hashtag("haps");
         }
-        drop(subscription);
-        self.ingest(events.into_values()).await
+        if let Some(query) = query {
+            filter = filter.search(query);
+        }
+        let mut events = lookup.query(vec![filter]).await?;
+        let ids: Vec<_> = events
+            .iter()
+            .filter_map(|event| Announcement::verify(event.clone()).ok())
+            .filter_map(|a| a.head)
+            .flat_map(|head| head.releases.into_iter())
+            .filter_map(|pointer| nostr::EventId::from_hex(&pointer.id).ok())
+            .collect();
+        if !ids.is_empty() {
+            events.extend(
+                lookup
+                    .query(vec![Filter::new().ids(ids).limit(LIMIT)])
+                    .await?,
+            );
+        }
+        self.ingest(events).await
+    }
+    /// Ordinary Nostr filters across cached events, known indexes, and relays.
+    /// This also discovers index roots; package kinds are a caller concern.
+    pub async fn event_lookup(
+        &self,
+        relay: Option<std::sync::Arc<RelayEventBus>>,
+        indexes: &[(String, String)],
+        window: Duration,
+    ) -> Result<crate::lookup::Lookup> {
+        let state = self.cache.lock().await;
+        let bus = HashtreeNostrIndexEventBus::new(
+            state.store.clone(),
+            state.root.clone(),
+            EventSource::local_index("haps-private"),
+        );
+        let mut lookup =
+            crate::lookup::Lookup::default().index("haps-private", std::sync::Arc::new(bus))?;
+        for (location, author) in indexes {
+            let reader = crate::index_reader::IndexReader::new(&self.home, location, author);
+            lookup = lookup.index(&format!("{author}:{location}"), std::sync::Arc::new(reader))?;
+        }
+        if let Some(relay) = relay {
+            lookup = lookup.relays(relay, window)?;
+        }
+        Ok(lookup)
     }
     pub fn queue(&self, events: &[Event]) -> Result<()> {
         let dir = self.home.join("discovery/outbox");
@@ -355,79 +470,24 @@ impl Discovery {
         query: Option<&str>,
         publisher: Option<PublicKey>,
     ) -> Result<usize> {
-        let repo = Repository::open(location, &self.home.join("cache"))?;
-        let event: Event = repo.metadata("index.json").await?;
-        verify_event(&event)?;
-        ensure!(
-            event.pubkey.to_hex() == author && tag_value(&event, "d")? == INDEX_ID,
-            "index publisher mismatch"
-        );
-        let head: IndexHead = serde_json::from_str(&event.content)?;
-        ensure!(
-            head.schema == "haps.discovery.v1",
-            "unsupported index schema"
-        );
-        let checkpoint = self.home.join("discovery/indexes").join(format!(
-            "{}.json",
-            hex::encode(sha2::Sha256::digest(
-                format!("{author}:{location}").as_bytes()
-            ))
-        ));
-        if checkpoint.exists() {
-            let previous: Event = read_json(&checkpoint)?;
-            let old: IndexHead = serde_json::from_str(&previous.content)?;
-            ensure!(
-                head.sequence > old.sequence
-                    || (head.sequence == old.sequence && event.id == previous.id),
-                "discovery index rollback or conflict"
-            );
+        let mut filter =
+            Filter::new().kinds([SOFTWARE_KIND, APP_KIND, crate::event_catalog::INDEX_KIND]);
+        if let Some(publisher) = publisher {
+            filter = filter.author(publisher);
         }
-        let events = if let Some(query) = query {
-            let index = SearchIndex::new(repo.store.clone(), SearchIndexOptions::default());
-            let root = head.search.as_deref().map(Cid::parse).transpose()?;
-            let results = index
-                .search(
-                    root.as_ref(),
-                    "",
-                    query,
-                    SearchOptions {
-                        limit: Some(100),
-                        full_match: false,
-                    },
-                )
-                .await?;
-            let mut events = Vec::new();
-            for result in results {
-                let announcement = Announcement::verify(repo.json(&result.value).await?)?;
-                ensure!(
-                    result.id == announcement.event.id.to_hex(),
-                    "search index event ID mismatch"
-                );
-                if publisher.is_none_or(|key| announcement.event.pubkey == key) {
-                    events.push(announcement.event);
-                }
-            }
-            events
-        } else {
-            let bus = HashtreeNostrIndexEventBus::new(
-                repo.store.clone(),
-                head.root.as_deref().map(Cid::parse).transpose()?,
-                EventSource::local_index(location),
-            );
-            let mut filter = Filter::new().kind(SOFTWARE_KIND);
-            if let Some(publisher) = publisher {
-                filter = filter.author(publisher);
-            }
-            bus.query(vec![filter], QueryOptions { limit: Some(LIMIT) })
-                .await?
+        if let Some(query) = query {
+            filter = filter.kind(SOFTWARE_KIND).search(query);
+        }
+        let report = crate::index_reader::IndexReader::new(&self.home, location, author)
+            .query(vec![filter], QueryOptions { limit: Some(LIMIT) })
+            .await?;
+        self.ingest(
+            report
                 .events
                 .into_iter()
-                .map(|e| e.event.into_event())
-                .collect()
-        };
-        let count = self.ingest(events).await?;
-        atomic_write(&checkpoint, &serde_json::to_vec(&event)?)?;
-        Ok(count)
+                .map(|event| event.event.into_event()),
+        )
+        .await
     }
     pub async fn export_index(&self, out: &Path, keys: &Keys) -> Result<()> {
         let _guard = lock(&out.join("index.lock"))?;
@@ -493,14 +553,13 @@ impl Discovery {
         atomic_write(&previous, &serde_json::to_vec(&event)?)
     }
 }
-use sha2::Digest;
 #[derive(Serialize, Deserialize)]
-struct IndexHead {
-    schema: String,
-    sequence: u64,
-    root: Option<String>,
+pub(crate) struct IndexHead {
+    pub schema: String,
+    pub sequence: u64,
+    pub root: Option<String>,
     #[serde(default)]
-    search: Option<String>,
+    pub search: Option<String>,
 }
 fn newer(a: &Event, b: &Event) -> bool {
     a.created_at > b.created_at || (a.created_at == b.created_at && a.id < b.id)

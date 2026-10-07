@@ -522,10 +522,11 @@ Catalogs, search indexes, and files are content addressed. Copies keep the same
 content hashes, so the data can move between servers or be mirrored unchanged.
 Keep `catalog.json` and its referenced `blobs/` together. A mirror keeps the
 original catalog signer; changing a catalog requires signing a new catalog under
-your own key. There is not yet a CLI command for forking or curating a catalog of
-other publishers' releases.
+your own key. Use `haps add publisher/package --catalog NAME` to curate original signed
+package events in a named catalog.
 
-The reader supports local directories, HTTP(S), and `htree://` catalogs. Hashtree
+The reader supports local directories, HTTP(S), mutable `htree://npub/name`
+catalogs, and immutable `htree://nhash...` payloads and indexes. Hashtree
 reads use `hashtree-client`: an existing local daemon supplies signed root events
 through its relay and raw blocks through its shared cache and peer connections.
 Without a daemon, the same binary uses the relays and Blossom servers from the
@@ -547,11 +548,13 @@ opens the daemon's database or alters pins belonging to another application.
 
 ## Protocol and current limits
 
-Catalogs, package cards, and releases use kind-30078 app-data events with
+Legacy directory catalogs, package cards, and releases use kind-30078 app-data events with
 `d` tags `haps/catalog/v1`, `haps/package/NAME`, and
 `haps/release/NAME/VERSION/TARGET`. Their content and search indexes are Hashtree
 CIDs. Package comments use NIP-22 kind 1111 with an `A` root; release comments use
 an `E` root. This is not yet Zapstore software-event compatibility.
+Package heads use kind 32267; event catalogs use the native Hashtree Nostr index
+and kind-30064 root events described below.
 
 Release attestations use the shared [fact-event format](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/nostr-social-graph/nips/fact-events.md?g=):
 kind `37368`, empty content, and the exact release event hash in both
@@ -599,62 +602,84 @@ Native code is not sandboxed. No build or install hooks
 run during installation. `rollback` explicitly restores a retained local version;
 it does not re-evaluate current social approval of that older version.
 
-## Package discovery and shared indexes
+## Package discovery and event catalogs
 
-The canonical records are signed Nostr events. Hashtree stores those original
-events and derived search indexes; a server or index operator cannot change the
-package author. Installation still checks the publisher, catalog sequence,
-release signature and payload hashes, then applies your local social policy.
+A package is identified by its publisher and name. Haps queries signed Nostr
+package events by kind **32267**, publisher, and `d` tag. The current package
+head names exact release event IDs, versions, platforms, and an immutable
+Hashtree payload root. Installation verifies the original release signature and
+file hashes; it does not need a mutable catalog root for these package heads.
+Existing catalog-location announcements and signed directory catalogs remain
+readable for compatibility.
 
-`haps publish catalog --name my-packages` uploads the catalog and signs software
-announcements with your Haps publishing key. Readers can then use
-`haps install NPUB/package` or an existing local alias without manual setup.
-An announcement is a location hint, not permission to install unknown
-software. Catalog hosting and package signing may use different identities.
+`nostr-pubsub` routes the same event filters to Hashtree-backed Nostr indexes and
+relays. Indexes contribute independent results, duplicates are merged, and
+addressable events use newest timestamp/lowest-event-ID ordering. Live relay
+observations remain open past EOSE for a bounded window. Unavailable sources are
+reported; a quiet relay cannot establish that a package does not exist.
 
-Announcements use the NIP-82 draft's application kind **32267**, with ordinary
-`d`, `name`, `repository` and description fields, plus `t=haps` and a
-`haps_catalog` location extension. Haps also distributes its original signed
-release events. This is application-metadata interoperability, not a claim that
-Haps directory manifests are Zapstore assets; NIP-82 asset/release conversion is
-not implemented.
-
-Discovery combines preset and automatically discovered package sources, a
-private local Hashtree event cache, shared indexes, and a bounded live relay observation.
-Shared indexes have a Hashtree full-text index; relay keyword search is not
-required. Results retain their original publishers and use the same social
-ranking and chooser. Unavailable sources produce diagnostics; a quiet relay
-window cannot establish that a package does not exist. New installs refresh
-catalog heads. `--no-defaults` keeps discovery offline unless networking is
-explicitly configured.
-
-The cache uses `nostr-pubsub` and its existing Hashtree adapter. Networking reuses
-the shared Hashtree daemon when available, honors local-only mode, and otherwise
-uses configured relays. Your installed-package list is never published. Every
-client keeps a small bounded event index automatically; publishing an index is
-optional. Failed announcements remain in a durable outbox until a relay actually
-acknowledges them. Retry with `haps sync`.
-
-The public Haps index is a discovery preset, alongside relay discovery. It
-refreshes roughly every 30 minutes and retains up to 2,048 recent records; it is
-not a complete directory of every package. Its operator does not become trusted
-as a package author. Existing network-enabled profiles receive this preset once;
-`--no-defaults` profiles stay offline unless networking is explicitly configured.
-
-Index operators can create their own portable index:
+Your catalog is an ordinary `hashtree-nostr` event index containing a selected
+collection of original signed events, separate from
+your browsing cache and installed-package list. Add your own staged package:
 
 ```sh
-haps index build --out package-index
-htree add package-index --publish package-index
+haps add haps.toml --payload stage
+haps catalog show
+haps catalog publish
 ```
 
-`index build` uses your local Haps identity (or `--key-file`), maintains a separate
-signed sequence, and preserves the original events. Configured indexes contribute their original records when building. Multiple indexes are additive, duplicate
-announcements are deduplicated, and replacement announcements follow Nostr's
-newest-timestamp/lowest-event-ID rule. Neither an index signature nor its search
-ranking grants installation trust. Keep a worker's Haps home separate from a
-personal install; a scheduled `index build` and `htree add` can publish a shared
-index without publishing anyone's receipts or local follows.
+`add` creates a local Haps publishing identity if none is configured. It signs
+the staged release and adds it to the `default` catalog. It does not upload,
+install, or execute the package. `catalog publish` uploads content, exports the
+selected Nostr event index, and announces its immutable address. Publication
+uses the existing `htree` helper, included in the Haps bundle.
+
+You can also curate other publishers' packages without changing their signatures:
+
+```sh
+haps add npub1.../editor --catalog favorites
+haps catalog show favorites
+haps catalog publish favorites
+haps catalog remove npub1.../editor --catalog favorites
+```
+
+Repeat `add` to refresh a curated package's records. Removing a selection affects
+future publications of that catalog; it does not uninstall the package or revoke
+the original publisher's release. Publishing shares the selected events, not
+private identity keys, browsing history, or installed-package receipts.
+
+Catalog roots use ordinary signed Hashtree kind-30064 events with `l=hashtree`,
+`hash`, optional `key`, and `d=nostr-event-index` for general indexes. Haps publishes
+curated collections under `nostr-event-index/<name>`, including `/default`, so
+they do not replace an existing general archive. No Haps-specific `index.json`
+wrapper is required. Haps can query mixed Nostr indexes maintained by existing
+Hashtree indexers; it filters for package events itself. Root announcements and
+signed follow/mute records are queried through the same `nostr-pubsub` router,
+using known indexes and relays. Catalogs from known people up to two follow hops
+away are discovered with bounded author queries. Muted owners are excluded. The social graph
+ranks package publishers; an index owner's signature does not grant installation
+trust to the packages they collect.
+
+```sh
+haps catalog discover
+haps catalog list
+haps search editor
+# Explicitly include another signed index:
+haps catalog add community htree://npub1.../nostr-event-index --author npub1...
+```
+
+Search combines configured indexes, socially discovered indexes, the local event
+cache, and available relays. `--no-defaults` stays offline unless networking is
+explicitly configured. The shared Hashtree daemon is used when available;
+`NOSTR_RELAYS` selects standalone relays. Failed publications remain in a durable
+outbox until a relay acknowledges them; retry with `haps sync`.
+
+The existing public Haps index remains a discovery preset. Its configured
+worker refreshes roughly every 30 minutes and retains up to 2,048 recent
+records; it is not a complete directory. The advanced `haps index build --out
+package-index` command still exports a broad discovery-cache index for workers.
+For personal curation, use `haps add` and `haps catalog publish` instead.
+Older directory-based Haps indexes remain readable for compatibility.
 
 For a dedicated Linux worker, `scripts/index-worker.py` refreshes and publishes
 only changed indexes, retries failed uploads, refuses empty publications and

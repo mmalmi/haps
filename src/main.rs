@@ -77,6 +77,20 @@ enum Command {
     Target,
     /// Create a package manifest for a staged binary or macOS app.
     Init(haps::init::InitArgs),
+    /// Add a staged package or another publisher's package to your event catalog.
+    Add {
+        package: String,
+        /// With a manifest path, sign a release from this staged directory.
+        #[arg(long)]
+        payload: Option<PathBuf>,
+        #[arg(long, default_value = "default")]
+        catalog: String,
+    },
+    /// Maintain and discover searchable catalogs of signed package events.
+    Catalog {
+        #[command(subcommand)]
+        action: CatalogAction,
+    },
     /// Sign staged files and prepare your package for publication.
     Pack {
         manifest: PathBuf,
@@ -254,6 +268,37 @@ enum IdentityAction {
 }
 
 #[derive(Subcommand)]
+enum CatalogAction {
+    /// List your catalogs and the indexes searched by Haps.
+    List,
+    /// Show the original signed events in one of your catalogs.
+    Show {
+        #[arg(default_value = "default")]
+        name: String,
+    },
+    /// Remove a package from your catalog; installed packages are unaffected.
+    Remove {
+        package: String,
+        #[arg(long, default_value = "default")]
+        catalog: String,
+    },
+    /// Include a published event index in searches.
+    Add {
+        name: String,
+        location: String,
+        #[arg(long)]
+        author: String,
+    },
+    /// Find event catalogs published by people in your social graph.
+    Discover,
+    /// Upload your catalog and announce its immutable index on Nostr.
+    Publish {
+        #[arg(default_value = "default")]
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum SourceAction {
     Add {
         name: String,
@@ -376,7 +421,7 @@ struct Source {
 
 struct Candidate {
     repository: Arc<Repository>,
-    snapshot: Arc<Snapshot>,
+    package_card: Option<String>,
     release: Release,
 }
 
@@ -493,6 +538,26 @@ fn own_keys(home: &Path, config: &Config) -> Result<Keys> {
     Ok(keys)
 }
 
+fn publishing_keys(home: &Path, config: &mut Config) -> Result<Keys> {
+    if config.identity.is_none() && !home.join("identity.key").exists() {
+        use std::io::Write;
+        let keys = Keys::generate();
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(home.join("identity.key"))?;
+        file.write_all(keys.secret_key().to_secret_hex().as_bytes())?;
+        file.sync_all()?;
+        config.identity = Some(keys.public_key().to_hex());
+        save_config(home, config)?;
+    }
+    own_keys(home, config)
+}
+
 fn check_checkpoint(source: &mut Source, snapshot: &Snapshot) -> Result<()> {
     ensure!(
         snapshot.head.sequence >= source.sequence,
@@ -509,15 +574,84 @@ fn check_checkpoint(source: &mut Source, snapshot: &Snapshot) -> Result<()> {
     Ok(())
 }
 
+async fn direct_candidates(
+    home: &Path,
+    query: Option<&str>,
+    package: Option<&str>,
+) -> Result<Vec<Candidate>> {
+    let discovery = Discovery::open(home)?;
+    let announcements = discovery.announcements(None).await?;
+    let cached: BTreeMap<_, _> = discovery
+        .events(vec![nostr::Filter::new().kind(APP_KIND)])
+        .await?
+        .into_iter()
+        .map(|event| (event.id.to_hex(), event))
+        .collect();
+    drop(discovery);
+    let mut found = Vec::new();
+    for announcement in announcements {
+        let Some(ref head) = announcement.head else {
+            continue;
+        };
+        let author = announcement.author();
+        let identity = format!("{author}/{}", announcement.name);
+        if package.is_some_and(|p| p != identity && p != announcement.name) {
+            continue;
+        }
+        if let Some(query) = query {
+            let text = format!("{} {}", announcement.name, head.description).to_lowercase();
+            if !query
+                .split_whitespace()
+                .all(|term| text.contains(&term.to_lowercase()))
+            {
+                continue;
+            }
+        }
+        let result: Result<Vec<Candidate>> = async {
+            let repo = Arc::new(Repository::open(&head.payload, &home.join("cache"))?);
+            let mut releases = Vec::new();
+            for pointer in &head.releases {
+                let event: Event = match cached.get(&pointer.id) {
+                    Some(event) => event.clone(),
+                    None => repo.json(&pointer.cid).await?,
+                };
+                let release = head.verify_release(pointer, event, &author, &announcement.name)?;
+                releases.push(Candidate {
+                    repository: repo.clone(),
+                    package_card: Some(head.card.clone()),
+                    release,
+                });
+            }
+            Ok(releases)
+        }
+        .await;
+        match result {
+            Ok(releases) => found.extend(releases),
+            Err(error) => eprintln!(
+                "Package {identity} unavailable or invalid; results may be incomplete: {error:#}"
+            ),
+        }
+    }
+    Ok(found)
+}
+
 async fn candidates(
     home: &Path,
     config: &mut Config,
     query: Option<&str>,
+    package: Option<&str>,
 ) -> Result<Vec<Candidate>> {
-    let mut found = Vec::new();
-    let mut available = 0;
-    let mut seen = BTreeMap::new();
+    let mut found = direct_candidates(home, query, package).await?;
+    let mut available = usize::from(!found.is_empty());
+    let mut seen: BTreeMap<_, _> = found
+        .iter()
+        .map(|c| (c.release.coordinate(), c.release.event.id))
+        .collect();
+    let direct_authors: BTreeSet<_> = found.iter().map(|c| c.release.author()).collect();
     for (name, source) in &mut config.sources {
+        if package.is_some() && direct_authors.contains(&source.author) {
+            continue;
+        }
         let repo = match Repository::open(&source.location, &home.join("cache")) {
             Ok(repo) => Arc::new(repo),
             Err(error) => {
@@ -552,7 +686,7 @@ async fn candidates(
             }
             found.push(Candidate {
                 repository: repo.clone(),
-                snapshot: snapshot.clone(),
+                package_card: snapshot.catalog.packages.get(&release.identity()).cloned(),
                 release,
             });
         }
@@ -981,7 +1115,15 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 .split_once('/')
                 .map(|(key, _)| nostr::PublicKey::parse(key))
                 .transpose()?;
-            refresh_discovery(&home, &mut config, publisher, None).await?;
+            refresh_discovery(
+                &home,
+                &mut config,
+                &mut trust,
+                publisher,
+                Some(package.rsplit('/').next().unwrap()),
+                None,
+            )
+            .await?;
         }
         _ => {}
     }
@@ -989,6 +1131,176 @@ async fn execute(mut cli: Cli) -> Result<u8> {
     let is_warning = matches!(&cli.command, Command::Warn(_));
     match cli.command {
         Command::Target | Command::Init(_) => unreachable!(),
+        Command::Add {
+            package,
+            payload,
+            catalog,
+        } => {
+            let directory = haps::event_catalog::directory(&home, &catalog)?;
+            if let Some(payload) = payload {
+                let spec: PackageSpec = toml::from_str(&fs::read_to_string(&package)?)?;
+                let keys = publishing_keys(&home, &mut config)?;
+                let repo = Repository::local(directory.join("packages"))?;
+                let release = repo.publish(&keys, spec, &payload).await?;
+                Discovery::open(&directory)?.ingest([release.event]).await?;
+            } else {
+                let package = resolve_package(&config, &package)?;
+                let publisher = package
+                    .split_once('/')
+                    .map(|(key, _)| nostr::PublicKey::parse(key))
+                    .transpose()?;
+                refresh_discovery(
+                    &home,
+                    &mut config,
+                    &mut trust,
+                    publisher,
+                    Some(package.rsplit('/').next().unwrap()),
+                    None,
+                )
+                .await?;
+                haps::event_catalog::add_package(&home, &catalog, &package).await?;
+            }
+            println!("Added to catalog {catalog}. Publish with: haps catalog publish {catalog}");
+        }
+        Command::Catalog { action } => {
+            use haps::event_catalog::{IndexAnnouncement, directory};
+            match action {
+                CatalogAction::Discover => {
+                    refresh_discovery(&home, &mut config, &mut trust, None, None, None).await?;
+                    println!("{}", serde_json::to_string_pretty(&config.indexes)?);
+                }
+                CatalogAction::List => {
+                    let path = home.join("catalogs");
+                    let mut own = Vec::new();
+                    if path.exists() {
+                        for entry in fs::read_dir(path)? {
+                            let entry = entry?;
+                            if entry.file_type()?.is_dir() {
+                                own.push(entry.file_name().to_string_lossy().into_owned());
+                            }
+                        }
+                    }
+                    own.sort();
+                    println!(
+                        "{}",
+                        serde_json::json!({"own": own, "indexes": config.indexes})
+                    );
+                }
+                CatalogAction::Show { name } => {
+                    let path = directory(&home, &name)?;
+                    ensure!(path.exists(), "catalog does not exist");
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &Discovery::open(&path)?
+                                .events(vec![nostr::Filter::new()])
+                                .await?
+                        )?
+                    );
+                }
+                CatalogAction::Remove { package, catalog } => {
+                    let package = resolve_package(&config, &package)?;
+                    let path = directory(&home, &catalog)?;
+                    ensure!(path.exists(), "catalog does not exist");
+                    let selected = Discovery::open(&path)?;
+                    let events = selected.events(vec![nostr::Filter::new()]).await?;
+                    let identity = |event: &Event| -> Option<String> {
+                        if let Ok(a) = Announcement::verify(event.clone()) {
+                            Some(format!("{}/{}", a.author(), a.name))
+                        } else {
+                            Release::verify(event.clone()).ok().map(|r| r.identity())
+                        }
+                    };
+                    let matches: BTreeSet<_> = events
+                        .iter()
+                        .filter_map(identity)
+                        .filter(|id| {
+                            *id == package || id.rsplit('/').next() == Some(package.as_str())
+                        })
+                        .collect();
+                    ensure!(
+                        matches.len() == 1,
+                        "package is missing or ambiguous; use publisher/name"
+                    );
+                    selected
+                        .replace_events(events.into_iter().filter(|event| {
+                            !identity(event).is_some_and(|id| matches.contains(&id))
+                        }))
+                        .await?;
+                    println!("Removed from catalog {catalog}");
+                }
+                CatalogAction::Add {
+                    name,
+                    location,
+                    author,
+                } => {
+                    safe_name(&name)?;
+                    ensure!(!config.indexes.contains_key(&name), "index already exists");
+                    let author = resolve_key(&config, &author)?;
+                    Discovery::open(&home)?
+                        .import_index(&location, &author)
+                        .await?;
+                    config.indexes.insert(
+                        name,
+                        Source {
+                            location,
+                            author,
+                            sequence: 0,
+                            event_id: String::new(),
+                        },
+                    );
+                    save_config(&home, &config)?;
+                }
+                CatalogAction::Publish { name } => {
+                    let path = directory(&home, &name)?;
+                    ensure!(path.exists(), "catalog does not exist; add a package first");
+                    let keys = publishing_keys(&home, &mut config)?;
+                    let selected = Discovery::open(&path)?;
+                    // Local package records are built once; public indexes retain
+                    // original signatures for packages curated from elsewhere.
+                    let selected_events = selected.events(vec![nostr::Filter::new()]).await?;
+                    let selected_ids: BTreeSet<_> = selected_events
+                        .iter()
+                        .filter_map(|e| Release::verify(e.clone()).ok().map(|r| r.identity()))
+                        .collect();
+                    let mut package_events = Vec::new();
+                    if path.join("packages/catalog.json").exists() {
+                        package_events = haps::event_catalog::package_events(
+                            &home,
+                            &path.join("packages"),
+                            &keys,
+                            None,
+                        )
+                        .await?;
+                        package_events.retain(|event| {
+                            if let Ok(a) = Announcement::verify(event.clone()) {
+                                selected_ids.contains(&format!("{}/{}", a.author(), a.name))
+                            } else {
+                                Release::verify(event.clone())
+                                    .is_ok_and(|r| selected_ids.contains(&r.identity()))
+                            }
+                        });
+                        selected.ingest(package_events.clone()).await?;
+                    }
+                    let location = haps::event_catalog::upload_index(
+                        &selected.events(vec![nostr::Filter::new()]).await?,
+                    )?;
+                    drop(selected);
+                    let discovery = Discovery::open(&home)?;
+                    let previous = discovery.events(vec![nostr::Filter::new()]).await?;
+                    let announcement = haps::event_catalog::advance(
+                        &keys,
+                        IndexAnnouncement::sign(&keys, &name, &location)?,
+                        &previous,
+                    )?;
+                    package_events.push(announcement);
+                    discovery.queue(&package_events)?;
+                    discovery.ingest(package_events).await?;
+                    flush_discovery(&home, &discovery).await;
+                    println!("Published catalog {name}: {location}");
+                }
+            }
+        }
         Command::StartingPoint { public_key, clear } => {
             if clear {
                 config.starting_point = None;
@@ -1063,56 +1375,9 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             let path = catalog
                 .canonicalize()
                 .context("catalog directory is missing")?;
-            let event: nostr::Event = read_json(&path.join("catalog.json"))?;
-            let repository = Repository::local(path.clone())?;
-            let snapshot = repository.catalog(&event.pubkey.to_hex()).await?;
             let keys = load_keys(&key_file.unwrap_or_else(|| home.join("identity.key")))?;
-            ensure!(
-                keys.public_key() == event.pubkey,
-                "announcement key must match catalog publisher"
-            );
-            let releases = repository.releases(&snapshot).await?;
-            let htree = haps::helpers::find("htree").context(
-                "Publishing needs htree. Install the Haps bundle or run `cargo install hashtree-cli --locked`."
-            )?;
-            ensure!(
-                !name.is_empty() && !name.starts_with('-'),
-                "invalid catalog name"
-            );
-            let output = std::process::Command::new(htree)
-                .arg("add")
-                .arg(&path)
-                .arg("--publish")
-                .arg(name)
-                .output()?;
-            print!("{}", String::from_utf8_lossy(&output.stdout));
-            eprint!("{}", String::from_utf8_lossy(&output.stderr));
-            ensure!(
-                output.status.success(),
-                "Hashtree catalog publication failed"
-            );
-            let stdout = String::from_utf8(output.stdout)?;
-            let published = stdout
-                .lines()
-                .find_map(|line| line.trim().strip_prefix("published: "))
-                .context("htree did not return a published catalog location")?;
-            let location = format!("htree://{published}");
-            let mut events = Vec::new();
-            let mut packages = BTreeMap::new();
-            for release in releases {
-                // A catalog may carry other publishers' releases. Only their keys
-                // can announce those packages; never impersonate them.
-                if release.event.pubkey == keys.public_key() {
-                    packages.insert(
-                        release.data.package.name.clone(),
-                        release.data.package.clone(),
-                    );
-                }
-                events.push(release.event);
-            }
-            for package in packages.into_values() {
-                events.push(Announcement::sign(&keys, &package, &location)?);
-            }
+            let events =
+                haps::event_catalog::package_events(&home, &path, &keys, Some(&name)).await?;
             let discovery = Discovery::open(&home)?;
             discovery.queue(&events)?;
             discovery.ingest(events).await?;
@@ -1122,7 +1387,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             let discovery = Discovery::open(&home)?;
             flush_discovery(&home, &discovery).await;
             drop(discovery);
-            refresh_discovery(&home, &mut config, None, None).await?;
+            refresh_discovery(&home, &mut config, &mut trust, None, None, None).await?;
         }
         Command::Index { action } => match action {
             IndexAction::Add {
@@ -1152,7 +1417,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             }
             IndexAction::List => println!("{}", serde_json::to_string_pretty(&config.indexes)?),
             IndexAction::Build { out, key_file } => {
-                refresh_discovery(&home, &mut config, None, None).await?;
+                refresh_discovery(&home, &mut config, &mut trust, None, None, None).await?;
                 let keys = load_keys(&key_file.unwrap_or_else(|| home.join("identity.key")))?;
                 Discovery::open(&home)?.export_index(&out, &keys).await?;
                 println!(
@@ -1239,8 +1504,8 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             }
         },
         Command::Search { query, json } => {
-            refresh_discovery(&home, &mut config, None, Some(&query)).await?;
-            let mut results = candidates(&home, &mut config, Some(&query)).await?;
+            refresh_discovery(&home, &mut config, &mut trust, None, None, Some(&query)).await?;
+            let mut results = candidates(&home, &mut config, Some(&query), None).await?;
             let releases: Vec<_> = results
                 .iter()
                 .take(128)
@@ -1271,7 +1536,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             package, version, ..
         } => {
             let candidate = select(
-                candidates(&home, &mut config, None).await?,
+                candidates(&home, &mut config, None, Some(&package)).await?,
                 &package,
                 version.as_ref(),
                 &config.aliases,
@@ -1297,7 +1562,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             json,
         } => {
             let candidate = select(
-                candidates(&home, &mut config, None).await?,
+                candidates(&home, &mut config, None, Some(&package)).await?,
                 &package,
                 version.as_ref(),
                 &config.aliases,
@@ -1345,7 +1610,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             let receipt = installation.receipt(&package)?;
             let current = Release::verify(receipt.current)?;
             let candidate = select(
-                candidates(&home, &mut config, None).await?,
+                candidates(&home, &mut config, None, Some(&current.identity())).await?,
                 &current.identity(),
                 None,
                 &config.aliases,
@@ -1543,7 +1808,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 )?;
                 let package = resolve_package(&config, &release)?;
                 let candidate = select(
-                    candidates(&home, &mut config, None).await?,
+                    candidates(&home, &mut config, None, Some(&package)).await?,
                     &package,
                     Some(&version),
                     &config.aliases,
@@ -1631,7 +1896,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             out,
         } => {
             let candidate = select_discussion(
-                candidates(&home, &mut config, None).await?,
+                candidates(&home, &mut config, None, Some(&package)).await?,
                 &package,
                 release.as_deref(),
             )?;
@@ -1655,10 +1920,8 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 candidate.release.event.clone()
             } else {
                 let cid = candidate
-                    .snapshot
-                    .catalog
-                    .packages
-                    .get(&candidate.release.identity())
+                    .package_card
+                    .as_ref()
                     .context("package card is missing")?;
                 let event: Event = candidate.repository.json(cid).await?;
                 ensure!(
@@ -1686,7 +1949,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         }
         Command::Comments { package, release } => {
             let candidate = select_discussion(
-                candidates(&home, &mut config, None).await?,
+                candidates(&home, &mut config, None, Some(&package)).await?,
                 &package,
                 release.as_deref(),
             )?;
@@ -1785,38 +2048,128 @@ async fn flush_discovery(home: &Path, discovery: &Discovery) {
     }
 }
 
+async fn discover_social_indexes(
+    home: &Path,
+    config: &mut Config,
+    trust: &mut Trust,
+    discovery: &Discovery,
+    relay: Option<&Arc<nostr_pubsub_relay::RelayEventBus>>,
+) -> Result<()> {
+    use haps::event_catalog::{INDEX_KIND, IndexAnnouncement};
+    let indexes: Vec<_> = config
+        .indexes
+        .values()
+        .map(|source| (source.location.clone(), source.author.clone()))
+        .collect();
+    let lookup = discovery
+        .event_lookup(relay.cloned(), &indexes, std::time::Duration::from_secs(2))
+        .await?;
+    let authors = trust.discovery_authors(1);
+    if !authors.is_empty() {
+        let events = lookup
+            .query(vec![
+                nostr::Filter::new()
+                    .kinds([Kind::ContactList, Kind::MuteList])
+                    .authors(authors)
+                    .limit(512),
+            ])
+            .await?;
+        for event in events {
+            if let Err(error) = trust.ingest(event) {
+                eprintln!("Invalid social event: {error:#}");
+            }
+        }
+        save_trust(home, trust)?;
+    }
+    let authors = trust.discovery_authors(2);
+    if !authors.is_empty() {
+        let events = lookup
+            .query(vec![
+                nostr::Filter::new()
+                    .kinds([INDEX_KIND, APP_KIND])
+                    .custom_tag(
+                        nostr::SingleLetterTag::lowercase(nostr::Alphabet::L),
+                        "hashtree",
+                    )
+                    .authors(authors)
+                    .limit(256),
+            ])
+            .await?;
+        discovery.ingest(events).await?;
+    }
+    config.indexes.retain(|name, source| {
+        !name.starts_with("social-")
+            || (!trust.muted(&source.author)
+                && trust.distance(&source.author).is_some_and(|d| d <= 2))
+    });
+    for event in discovery
+        .events(vec![nostr::Filter::new().kinds([INDEX_KIND, APP_KIND])])
+        .await?
+    {
+        let Ok(announcement) = IndexAnnouncement::verify(event) else {
+            continue;
+        };
+        let author = announcement.event.pubkey.to_hex();
+        if trust.muted(&author) || !trust.distance(&author).is_some_and(|d| d <= 2) {
+            continue;
+        }
+        let name = format!(
+            "social-{author}-{}",
+            hex::encode(tag_value(&announcement.event, "d")?)
+        );
+        config.indexes.insert(
+            name,
+            Source {
+                location: announcement.location,
+                author,
+                sequence: 0,
+                event_id: String::new(),
+            },
+        );
+    }
+    Ok(())
+}
+
 async fn refresh_discovery(
     home: &Path,
     config: &mut Config,
+    trust: &mut Trust,
     publisher: Option<nostr::PublicKey>,
+    package: Option<&str>,
     query: Option<&str>,
 ) -> Result<()> {
     let discovery = Discovery::open(home)?;
-    for (name, source) in &config.indexes {
-        if let Err(error) = discovery
-            .lookup_index(&source.location, &source.author, query, publisher)
-            .await
-        {
-            eprintln!(
-                "Discovery index {name} unavailable or invalid; results may be incomplete: {error:#}"
-            );
+    let relay = if networking_enabled(config) {
+        match haps::discovery::relay_bus(home).await {
+            Ok(bus) => Some(Arc::new(bus)),
+            Err(error) => {
+                eprintln!("Relay discovery unavailable; using indexes: {error:#}");
+                None
+            }
         }
-    }
-    // Explicit no-defaults configurations remain offline unless relays are
-    // configured. The normal configuration uses shared Hashtree networking.
-    if config.starting_point.is_some() || std::env::var_os("NOSTR_RELAYS").is_some() {
-        let result = async {
-            let bus = haps::discovery::relay_bus(home).await?;
-            discovery
-                .refresh(&bus, publisher, std::time::Duration::from_secs(3))
-                .await
-        }
-        .await;
-        if let Err(error) = result {
-            eprintln!("Relay discovery unavailable; using cached announcements: {error:#}");
-        }
-    }
+    } else {
+        None
+    };
+    discover_social_indexes(home, config, trust, &discovery, relay.as_ref()).await?;
+    let indexes: Vec<_> = config
+        .indexes
+        .values()
+        .map(|source| (source.location.clone(), source.author.clone()))
+        .collect();
+    discovery
+        .lookup_sources(
+            relay,
+            &indexes,
+            publisher,
+            package,
+            query,
+            std::time::Duration::from_secs(3),
+        )
+        .await?;
     for announcement in discovery.announcements(publisher).await? {
+        if announcement.head.is_some() {
+            continue;
+        }
         if let Some(query) = query {
             let text =
                 format!("{} {}", announcement.name, announcement.event.content).to_lowercase();
