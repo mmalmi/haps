@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Verify and mirror completed GitHub binary assets to the maintainer's Hashtree."""
+"""Mirror verified GitHub assets while preserving a previously verified release root.
+
+Requires htree release publish with --expected-root support. A failed network
+lookup must never turn an existing release directory into a new empty tree.
+"""
 import argparse
 import hashlib
 import json
@@ -13,10 +17,16 @@ from release import TARGETS
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--tag', required=True)
+parser.add_argument('--expected-root', required=True,
+                    help='Previously verified immutable releases/haps directory CID; preserves release history')
 args = parser.parse_args()
 tag = args.tag
 if not re.fullmatch(r'v\d+\.\d+\.\d+', tag):
     parser.error('expected a stable vX.Y.Z tag')
+help_text = subprocess.check_output(['htree', 'release', 'publish', '--help'], text=True)
+if '--expected-root' not in help_text:
+    raise SystemExit('Update htree to a build supporting release publish --expected-root. '
+                     'Publication stopped before upload to protect existing releases.')
 commit = subprocess.check_output(['git', 'rev-parse', f'{tag}^{{commit}}'], text=True).strip()
 with tempfile.TemporaryDirectory(prefix='haps-release-') as temp:
     root = Path(temp)
@@ -49,4 +59,5 @@ with tempfile.TemporaryDirectory(prefix='haps-release-') as temp:
     if not match:
         raise SystemExit('htree did not return a release directory hash')
     print('Verified all five platform archives; publishing the same bytes to Hashtree.', flush=True)
-    subprocess.run(['htree', 'release', 'publish', 'releases/haps', tag, match[1]], check=True)
+    subprocess.run(['htree', 'release', 'publish', 'releases/haps', tag, match[1],
+                    '--expected-root', args.expected_root], check=True)
