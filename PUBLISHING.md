@@ -2,7 +2,7 @@
 
 Haps publishes software under your Nostr public key. There is no registry account,
 submission queue, or globally reserved package name. This guide uses an
-already-built program called `my-app` and Haps 0.1.10 or later.
+already-built program called `my-app` and Haps 0.1.11 or later.
 
 ## 1. Stage the files
 

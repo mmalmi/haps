@@ -61,7 +61,7 @@ To inspect first or pin a version:
 ```sh
 curl -fsSL https://haps.hashtree.cc/install.sh -o install-haps.sh
 less install-haps.sh
-sh install-haps.sh --version v0.1.10 --bin-dir "$HOME/.local/bin"
+sh install-haps.sh --version v0.1.11 --bin-dir "$HOME/.local/bin"
 ```
 
 [Windows x64 zip and all release downloads](#downloads) are also available. Extract the entire zip, keeping `haps.exe`, `bundle.json`, and `libexec/` together,
@@ -96,6 +96,13 @@ Inspect the starting point with `haps starting-point`, replace it with
 It is a local trust preference, not a published follow event. Explicit local mutes
 still block a publisher. Use `--no-defaults` on the first invocation to start with
 no discovery presets or starting point. Discovery and trust remain separate preferences.
+
+The bundled discovery preset is a signed, immutable native Nostr event index.
+It contains publisher-signed package heads and release references, so a fresh
+installation does not need a relay to return the old mutable `haps-packages`
+directory root. Relay announcements and social indexes supply newer records.
+Version 0.1.11 replaces the exact old automatic preset once; custom sources and
+publisher pins are retained.
 
 ```sh
 cargo build --locked
@@ -182,17 +189,17 @@ Cargo-managed installs back to Cargo.
 
 ### Downloads
 
-Prebuilt Haps 0.1.10 archives, hosted on Hashtree:
+Prebuilt Haps 0.1.11 archives, hosted on Hashtree:
 
 | Platform | Archive |
 | --- | --- |
-| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.10/assets/haps-v0.1.10-aarch64-apple-darwin.tar.gz) |
-| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.10/assets/haps-v0.1.10-x86_64-apple-darwin.tar.gz) |
-| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.10/assets/haps-v0.1.10-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.10/assets/haps-v0.1.10-aarch64-unknown-linux-gnu.tar.gz) |
-| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.10/assets/haps-v0.1.10-x86_64-pc-windows-msvc.zip) |
+| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.11/assets/haps-v0.1.11-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.11/assets/haps-v0.1.11-x86_64-apple-darwin.tar.gz) |
+| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.11/assets/haps-v0.1.11-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.11/assets/haps-v0.1.11-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.11/assets/haps-v0.1.11-x86_64-pc-windows-msvc.zip) |
 
-The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.10/release.json) records archive sizes and SHA-256 checksums.
+The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.11/release.json) records archive sizes and SHA-256 checksums.
 
 ### Publish your package
 

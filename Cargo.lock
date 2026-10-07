@@ -1063,9 +1063,9 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fs"
-version = "0.2.82"
+version = "0.2.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ada6ac7157bc9c200092001496474d73c13a345f7631586079b21844b9aebd45"
+checksum = "fabc8edf8e6fe37914fcbea0a1a8dca6c7642c6ad00c4459b58fb617ba246914"
 dependencies = [
  "async-trait",
  "hashtree-core",

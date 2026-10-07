@@ -100,27 +100,31 @@ def main():
             proof = json.load(sys.stdin)
             assert identity != proof['publisher']
             found = json.loads(run('search', proof['name'], '--json').stdout)
-            matching = [r for r in found if r['publisher'] == proof['publisher']
-                        and r['package']['name'] == proof['name']]
-            assert len(matching) == 1, 'fresh reader did not discover the publisher'
-            package = matching[0]
+            assert not found, 'default search exposed an unknown publisher'
+            explicit = proof['publisher'] + '/' + proof['name']
+            package = json.loads(run('info', explicit, '--json').stdout)
             assert package['release_id'] == proof['release_id']
             assert package['label'].startswith('npub1')
             # Discovery alone must not silently authorize a stranger's code.
-            denied = run('install', package['label'], '--json', check=False)
-            assert denied.returncode != 0 and 'untrusted' in denied.stdout.lower(), denied.stdout
+            denied = run('install', proof['name'], '--json', check=False)
+            assert denied.returncode != 0 and 'social graph' in denied.stdout.lower(), denied.stdout
+            explicit_install = run('install', explicit, '--json')
+            assert 'not authored or vouched for by your social graph' in explicit_install.stderr
             run('follow', proof['publisher'])
-            installed = json.loads(run('install', package['label'], '--json').stdout)
+            found = json.loads(run('search', proof['name'], '--json').stdout)
+            assert len(found) == 1 and found[0]['publisher'] == proof['publisher']
+            installed = json.loads(run('install', proof['name'], '--json').stdout)
             assert installed['release']['release_id'] == proof['release_id']
             assert run('run', proof['name']).stdout.strip() == proof['message']
             directory = Path(run('path', proof['name']).stdout.strip())
             assert hashlib.sha256((directory / proof['name']).read_bytes()).hexdigest() == proof['payload_sha256']
             config = json.loads((home / 'config.json').read_text())
-            assert config['sources'] and all(k.startswith('discovered-') for k in config['sources'])
+            assert all(k.startswith('discovered-') for k in config['sources'])
             print(json.dumps({'status': 'passed', 'reader': identity, 'publisher': proof['publisher'],
                               'name': proof['name'], 'release_id': proof['release_id'],
                               'manual_sources': 0, 'found_by': 'name search',
-                              'unknown_publisher_blocked': True, 'installed_and_executed': True}))
+                              'unknown_publisher_hidden': True, 'bare_untrusted_install_blocked': True,
+                              'explicit_install_warned': True, 'installed_and_executed': True}))
 
 
 if __name__ == '__main__':

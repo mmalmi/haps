@@ -60,7 +60,12 @@ fn main() {
     std::fs::write(std::env::var_os("PUBLISH_MARKER").unwrap(), std::env::current_exe().unwrap().to_string_lossy().as_bytes()).unwrap();
     if std::env::var_os("PUBLISH_FAIL").is_some() { std::process::exit(1); }
     println!("  published: {}/my-packages", std::env::var("TEST_HOST").unwrap());
-    println!("  url: {}", std::env::var("TEST_ROOT").unwrap());
+    if args[2] == "--publish" {
+        println!("  url:   {}/my-packages", std::env::var("TEST_HOST").unwrap());
+        println!("  permalink: https://drive.iris.to/#/{}", std::env::var("TEST_ROOT").unwrap());
+    } else {
+        println!("  url:   {}", std::env::var("TEST_ROOT").unwrap());
+    }
 }
 "#,
     )?;

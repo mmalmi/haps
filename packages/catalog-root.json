@@ -1,0 +1,30 @@
+{
+  "id": "863d2ca8c54344e02528c8330f98c84dcebaeac71fb2e4d52c749fc3d09812e0",
+  "pubkey": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b",
+  "created_at": 1791378925,
+  "kind": 30064,
+  "tags": [
+    [
+      "d",
+      "nostr-event-index/default"
+    ],
+    [
+      "l",
+      "hashtree"
+    ],
+    [
+      "l",
+      "nostr-event-index"
+    ],
+    [
+      "hash",
+      "50d4d3e5d29c3af30bbad02826dbd160ad649c7a0353dcb5aa678b2065dcf90a"
+    ],
+    [
+      "key",
+      "9574d55fabf7ad8c238c48ee4dea69fb43a75ea1ba35b2ac0c1ea6a7e1ee0cf6"
+    ]
+  ],
+  "content": "",
+  "sig": "705c8e58a7d313e84db9c387501063845751fabe6a85c7491cd297882615f23b572216d86ea40ddb899ccc4b856b2cdd13e37ed237cc99012cd7b9823d3a7acb"
+}

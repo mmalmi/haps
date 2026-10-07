@@ -471,19 +471,19 @@ fn fresh_install_has_a_visible_replaceable_maintainer_starting_point() {
     assert!(String::from_utf8_lossy(&first.stderr).contains("Sirius Business Ltd"));
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(home.join("config.json")).unwrap()).unwrap();
-    assert!(
-        config["sources"]["iris"]["location"]
-            .as_str()
-            .unwrap()
-            .starts_with("htree://")
-    );
+    assert!(config["sources"].as_object().unwrap().is_empty());
     assert!(
         config["indexes"]["haps"]["location"]
             .as_str()
             .unwrap()
-            .starts_with("htree://")
+            .starts_with("htree://nhash")
     );
-    assert_eq!(config["discovery_defaults_version"], 1);
+    let root: nostr::Event =
+        serde_json::from_str(include_str!("../packages/catalog-root.json")).unwrap();
+    root.verify().unwrap();
+    assert_eq!(config["indexes"]["haps"]["author"], root.pubkey.to_hex());
+    assert_eq!(config["indexes"]["haps"]["event_id"], root.id.to_hex());
+    assert_eq!(config["discovery_defaults_version"], 2);
     // Existing network profiles migrate once; later explicit changes survive.
     let mut legacy = config;
     legacy
@@ -500,6 +500,32 @@ fn fresh_install_has_a_visible_replaceable_maintainer_starting_point() {
     let mut migrated: serde_json::Value =
         serde_json::from_slice(&fs::read(home.join("config.json")).unwrap()).unwrap();
     assert!(migrated["indexes"]["haps"].is_object());
+    // Upgrade the exact retired preset and mutable default source together.
+    migrated["discovery_defaults_version"] = 1.into();
+    migrated["indexes"]["haps"]["location"] =
+        "htree://npub1q6g6t3yk0m2ppp5mrqsze4xg6uqhw5p29kjutet5m3uk637xjfaqac3p2a/package-index"
+            .into();
+    migrated["indexes"]["haps"]["author"] =
+        "731fd6f74667cac0e86b7b4f7cd2c828996db866c3044368a2f26d87cb571ad0".into();
+    migrated["sources"]["iris"] = serde_json::json!({
+        "location": format!("htree://{}/haps-packages", hashtree_config::DEFAULT_SOCIALGRAPH_ENTRYPOINT_NPUB),
+        "author": root.pubkey.to_hex(), "sequence": 6, "event_id": "previous"
+    });
+    migrated["sources"]["custom"] = serde_json::json!({
+        "location": "https://example.test/catalog", "author": root.pubkey.to_hex(),
+        "sequence": 3, "event_id": "custom-pin"
+    });
+    fs::write(
+        home.join("config.json"),
+        serde_json::to_vec(&migrated).unwrap(),
+    )
+    .unwrap();
+    assert!(run(&["starting-point"]).status.success());
+    migrated = serde_json::from_slice(&fs::read(home.join("config.json")).unwrap()).unwrap();
+    assert_eq!(migrated["discovery_defaults_version"], 2);
+    assert_eq!(migrated["indexes"]["haps"]["event_id"], root.id.to_hex());
+    assert!(migrated["sources"].get("iris").is_none());
+    assert_eq!(migrated["sources"]["custom"]["event_id"], "custom-pin");
     migrated["indexes"] = serde_json::json!({});
     fs::write(
         home.join("config.json"),

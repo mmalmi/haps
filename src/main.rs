@@ -354,34 +354,39 @@ struct Config {
     discovery_defaults_version: u32,
 }
 
-fn discovery_presets(config: &mut Config) {
-    config.indexes.entry("haps".into()).or_insert_with(|| Source {
-        location: "htree://npub1q6g6t3yk0m2ppp5mrqsze4xg6uqhw5p29kjutet5m3uk637xjfaqac3p2a/package-index".into(),
-        author: "731fd6f74667cac0e86b7b4f7cd2c828996db866c3044368a2f26d87cb571ad0".into(),
-        sequence: 0,
-        event_id: String::new(),
-    });
+const DISCOVERY_DEFAULTS_VERSION: u32 = 2;
+const LEGACY_INDEX_LOCATION: &str =
+    "htree://npub1q6g6t3yk0m2ppp5mrqsze4xg6uqhw5p29kjutet5m3uk637xjfaqac3p2a/package-index";
+const LEGACY_INDEX_AUTHOR: &str =
+    "731fd6f74667cac0e86b7b4f7cd2c828996db866c3044368a2f26d87cb571ad0";
+
+fn discovery_presets(config: &mut Config) -> Result<()> {
+    // A signed immutable bootstrap makes a cold install independent of mutable
+    // root availability. Social root announcements can add newer indexes later.
+    let event: Event = serde_json::from_str(include_str!("../packages/catalog-root.json"))?;
+    let announcement = haps::event_catalog::IndexAnnouncement::verify(event)?;
+    config
+        .indexes
+        .entry("haps".into())
+        .or_insert_with(|| Source {
+            location: announcement.location,
+            author: announcement.event.pubkey.to_hex(),
+            sequence: 0,
+            event_id: announcement.event.id.to_hex(),
+        });
+    Ok(())
 }
 
 fn fresh_config(no_defaults: bool) -> Result<Config> {
     let mut config = Config {
-        discovery_defaults_version: 1,
+        discovery_defaults_version: DISCOVERY_DEFAULTS_VERSION,
         ..Default::default()
     };
     if !no_defaults {
-        discovery_presets(&mut config);
+        discovery_presets(&mut config)?;
         let npub = hashtree_config::DEFAULT_SOCIALGRAPH_ENTRYPOINT_NPUB;
         let key = ensure_public_key(npub)?;
         config.starting_point = Some(key.clone());
-        config.sources.insert(
-            "iris".into(),
-            Source {
-                location: format!("htree://{npub}/haps-packages"),
-                author: key,
-                sequence: 0,
-                event_id: String::new(),
-            },
-        );
     }
     Ok(config)
 }
@@ -1086,13 +1091,29 @@ async fn execute(mut cli: Cli) -> Result<u8> {
     } else {
         fresh_config(cli.no_defaults)?
     };
-    if config.discovery_defaults_version == 0 {
-        if !cli.no_defaults
-            && (config.starting_point.is_some() || config.sources.contains_key("iris"))
-        {
-            discovery_presets(&mut config);
+    if config.discovery_defaults_version < DISCOVERY_DEFAULTS_VERSION {
+        let legacy_index = config.indexes.get("haps").is_some_and(|source| {
+            source.location == LEGACY_INDEX_LOCATION && source.author == LEGACY_INDEX_AUTHOR
+        });
+        let original_defaults = config.discovery_defaults_version == 0
+            && (config.starting_point.is_some() || config.sources.contains_key("iris"));
+        if !cli.no_defaults && (legacy_index || original_defaults) {
+            if legacy_index {
+                config.indexes.remove("haps");
+            }
+            discovery_presets(&mut config)?;
+            let npub = hashtree_config::DEFAULT_SOCIALGRAPH_ENTRYPOINT_NPUB;
+            let author = ensure_public_key(npub)?;
+            // Replace only the exact old automatic source, retaining custom
+            // source locations, publisher pins, and explicitly removed presets.
+            if config.sources.get("iris").is_some_and(|source| {
+                source.location == format!("htree://{npub}/haps-packages")
+                    && source.author == author
+            }) {
+                config.sources.remove("iris");
+            }
         }
-        config.discovery_defaults_version = 1;
+        config.discovery_defaults_version = DISCOVERY_DEFAULTS_VERSION;
         save_config(&home, &config)?;
     }
     config.aliases = haps::aliases::read()?;

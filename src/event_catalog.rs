@@ -236,9 +236,16 @@ pub fn upload(path: &Path, legacy_name: Option<&str>) -> Result<String> {
     let hash = text
         .lines()
         .find_map(|line| {
-            line.trim()
-                .strip_prefix("url: ")
-                .filter(|value| value.starts_with("nhash"))
+            let (label, value) = line.trim().split_once(':')?;
+            if !matches!(label, "url" | "permalink") {
+                return None;
+            }
+            let value = value.trim();
+            let hash = value
+                .strip_prefix("htree://")
+                .or_else(|| value.strip_prefix("https://drive.iris.to/#/"))
+                .unwrap_or(value);
+            hash.starts_with("nhash").then_some(hash)
         })
         .context("htree did not return an immutable nhash; update hashtree-cli")?;
     hashtree_core::nhash_decode(hash)?;
