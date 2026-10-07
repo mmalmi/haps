@@ -28,7 +28,7 @@ Implemented:
 - Author ranking using the actual `nostr-social-graph` library, imported signed
   follow/mute events, and explicit handling of ambiguous package names.
 - Release-specific signed attestations, trusted warnings, revocation, and an optional minimum
-  number of attesters from your direct follows. The requirement persists on updates.
+  number of attesters from your social graph. The requirement persists on updates.
 - Staged installation, target checks, publisher-preserving updates, previous-version
   rollback, and local removal. Downloads must finish before activation changes.
 - Signed [NIP-22](https://github.com/nostr-protocol/nips/blob/master/22.md) comments
@@ -230,7 +230,7 @@ Aliases use the existing public `~/.hashtree/aliases` file and parser from
 shared configuration directory. Haps does not copy aliases into its own settings
 or read signing keys to resolve public aliases. Aliases do not imply trust.
 
-When a bare name matches multiple publishers, a terminal offers an arrow-key chooser
+When a bare name matches multiple socially trusted publishers, a terminal offers an arrow-key chooser
 ordered by social distance, then trusted attestations of each publisher's newest
 matching release. Enter selects; Escape cancels. Each choice shows a local alias
 (or full public key), the version, social distance, and attesters. Selection does
@@ -299,10 +299,20 @@ A public-only identity can search and install but cannot sign. With a local sign
 identity, `haps follow PUBLIC_KEY --export follow.json` updates its local follow
 list and exports a signed kind-3 event. It is not automatically sent to relays.
 
-By default installation accepts your own releases or publishers you directly
-follow, excluding muted publishers. Other publishers require either explicit
-`--allow-untrusted` or a positive `--require-attestations N` policy satisfied by
-you/your direct follows. A publisher's self-attestation does not count.
+Search and bare-name installation only include releases authored or vouched for by
+your social graph. Authors and vouchers must be reachable and not overmuted. Haps
+uses `nostr-social-graph`'s nearest-distance mute rule with threshold `3`, matching
+Iris feeds and recommendations: at the nearest distance with opinions, hide when
+`muters * 3 > followers`. Your own follow takes precedence over more distant
+opinions; your direct mute always blocks installation.
+
+An explicit `haps install npub.../package` (or public key/alias plus package)
+can install outside that filter, with a warning. It does not add trust or change
+future bare-name updates. `--allow-untrusted` remains an explicit override. Neither
+form bypasses direct mutes, release warnings, or `--require-attestations N`.
+A vouch approves only the exact signed release; a publisher's self-attestation does
+not count. A new version needs its own vouches if its publisher is outside the
+eligible graph. Haps never silently chooses an older vouched-for version instead.
 
 ```sh
 haps attest alice/hello --version 1.0.0 --note "Built from source; tests pass" --out attestation.json
@@ -320,7 +330,7 @@ searching, inspecting or installing that release.
 
 Install output shows **Attested by** and the signed notes. `info --json` includes
 the full signed events and signer keys. Only current positive attestations from
-you or your direct follows count; publisher self-attestations, muted signers,
+reachable, non-overmuted members of your graph count; publisher self-attestations, muted signers,
 revocations, and attestations of a different release do not count. A future version
 or another platform needs its own attestations.
 
@@ -330,9 +340,10 @@ or another platform needs its own attestations.
 accepts the same exact-release selector, `--target`, `--out`, and `--json` options
 as `attest`. It requires Haps 0.1.6 or later.
 
-Only **your key and unmuted keys you directly follow** contribute endorsements or
-warnings. Distant connections and strangers do not appear as trusted findings or
-affect installation. The configured starting point counts as a direct connection.
+Only **your key and reachable, non-overmuted graph members** contribute endorsements
+or warnings. Strangers do not appear as trusted findings or affect installation.
+Findings are retrieved from configured Nostr event indexes and relays before
+filtering results or choosing a publisher. The configured starting point counts as a direct connection.
 A publisher cannot endorse its own release for your approval threshold, but a
 followed publisher can warn about its own release, for example to recall a build.
 
@@ -656,8 +667,8 @@ wrapper is required. Haps can query mixed Nostr indexes maintained by existing
 Hashtree indexers; it filters for package events itself. Root announcements and
 signed follow/mute records are queried through the same `nostr-pubsub` router,
 using known indexes and relays. Catalogs from known people up to two follow hops
-away are discovered with bounded author queries. Muted owners are excluded. The social graph
-ranks package publishers; an index owner's signature does not grant installation
+away are discovered with bounded author queries. Muted and overmuted owners are excluded. The social graph
+filters and ranks package publishers; an index owner's signature does not grant installation
 trust to the packages they collect.
 
 ```sh

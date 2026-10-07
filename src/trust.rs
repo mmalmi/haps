@@ -5,9 +5,12 @@ use nostr_identity::{
     FACT_SNAPSHOT_KIND, build_fact_snapshot_event_with_created_at_ms, compare_fact_snapshots, fact,
     parse_fact_snapshot_event,
 };
-use nostr_social_graph::{NostrEvent, SocialGraph};
+use nostr_social_graph::SocialGraph;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+
+// Match Iris feed/recommendation visibility; the algorithm lives in the shared graph.
+const SOCIAL_GRAPH_OVERMUTE_THRESHOLD: f64 = 3.0;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -244,19 +247,24 @@ impl Trust {
             .values()
             .filter(|e| e.kind == Kind::ContactList || e.kind == Kind::MuteList)
         {
-            self.graph.handle_event(
-                &NostrEvent {
-                    created_at: event.created_at.as_secs(),
-                    content: event.content.clone(),
-                    tags: event.tags.iter().map(|t| t.as_slice().to_vec()).collect(),
-                    kind: event.kind.as_u16() as u32,
-                    pubkey: event.pubkey.to_hex(),
-                    id: event.id.to_hex(),
-                    sig: event.sig.to_string(),
-                },
-                true,
-                1.0,
-            );
+            // Reconstruct all verified latest records before applying visibility.
+            // handle_event's admission filter depends on a partially built graph
+            // and can otherwise discard lists based on public-key iteration order.
+            for key in event.tags.public_keys() {
+                if event.kind == Kind::ContactList {
+                    self.graph.add_positive_relation(
+                        &event.pubkey.to_hex(),
+                        &key.to_hex(),
+                        event.created_at.as_secs(),
+                    )?;
+                } else {
+                    self.graph.add_negative_relation(
+                        &event.pubkey.to_hex(),
+                        &key.to_hex(),
+                        event.created_at.as_secs(),
+                    )?;
+                }
+            }
         }
         self.apply_starting_point()
     }
@@ -290,7 +298,7 @@ impl Trust {
         let mut authors: Vec<_> = self
             .reachable
             .iter()
-            .filter(|key| !self.muted(key))
+            .filter(|key| self.relevant_signer(key))
             .filter_map(|key| Some((self.distance(key)?, nostr::PublicKey::parse(key).ok()?)))
             .filter(|(d, _)| *d <= distance)
             .collect();
@@ -303,6 +311,15 @@ impl Trust {
             .iter()
             .any(|p| p == author)
     }
+    pub fn overmuted(&self, author: &str) -> bool {
+        self.graph
+            .is_overmuted(author, SOCIAL_GRAPH_OVERMUTE_THRESHOLD)
+    }
+    /// Shared default for discovery and installation. Curation alone is not a vouch.
+    pub fn socially_trusted(&self, release: &Release) -> bool {
+        !self.muted(&release.author())
+            && (self.relevant_signer(&release.author()) || !self.attestations(release).is_empty())
+    }
     /// Unmuted direct connections that follow this publisher, as in Iris Contacts.
     pub fn followed_by_friends(&self, author: &str) -> Vec<String> {
         let mut friends: Vec<_> = self
@@ -310,7 +327,9 @@ impl Trust {
             .get_followed_by_user(&self.root)
             .into_iter()
             .filter(|key| {
-                key != &self.root && !self.muted(key) && self.graph.is_following(key, author)
+                key != &self.root
+                    && self.relevant_signer(key)
+                    && self.graph.is_following(key, author)
             })
             .collect();
         friends.sort();
@@ -344,9 +363,9 @@ impl Trust {
         attestations
     }
     fn relevant_signer(&self, author: &str) -> bool {
-        !self.muted(author) && self.distance(author).is_some_and(|d| d <= 1)
+        !self.muted(author) && !self.overmuted(author) && self.distance(author).is_some()
     }
-    /// Current warnings from the reader and unmuted direct connections only.
+    /// Current warnings from reachable, non-overmuted graph members.
     /// A followed publisher may warn about its own release (a recall).
     pub fn warnings(&self, release: &Release) -> Vec<&Event> {
         self.events
@@ -393,13 +412,11 @@ impl Trust {
         let attestations = self.attesters(release).len();
         ensure!(
             attestations >= minimum_attestations,
-            "release requires {minimum_attestations} attestations from you or keys you follow; found {attestations}"
+            "release requires {minimum_attestations} attestations from non-overmuted members of your social graph; found {attestations}"
         );
         ensure!(
-            allow_untrusted
-                || self.distance(&release.author()).is_some_and(|d| d <= 1)
-                || (minimum_attestations > 0 && attestations >= minimum_attestations),
-            "publisher is outside your direct follows; inspect the public key, follow them, require trusted attestations, or explicitly use --allow-untrusted"
+            allow_untrusted || self.socially_trusted(release),
+            "release is not authored or vouched for by your social graph; inspect the public key and use npub/package explicitly, or --allow-untrusted"
         );
         Ok(())
     }

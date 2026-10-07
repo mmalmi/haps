@@ -141,9 +141,9 @@ class ChooserTest(unittest.TestCase):
 
     def test_arrow_selection_and_signed_notes(self):
         term = self.terminal('install', 'hello', '--require-attestations', '2', columns=48)
-        menu = term.read_until(b'outside your graph').decode()
+        menu = term.read_until(b'No trusted attestations').decode()
         self.assertLess(menu.index('alice/hello'), menu.index('buildbot/hello'))
-        self.assertLess(menu.index('buildbot/hello'), menu.index('other/hello'))
+        self.assertNotIn('other/hello', menu)
         self.assertIn('Attested by bob, carol', menu)
         self.assertIn('Followed by alice, bob, carol and 1 other you follow', menu)
         self.assertNotIn('hops away', menu)
@@ -159,21 +159,22 @@ class ChooserTest(unittest.TestCase):
         self.assertEqual({p['label'] for p in info['followed_by']}, {'alice', 'bob', 'carol', 'dave'})
         self.assertEqual({p['pubkey'] for p in info['followed_by']}, {self.catalog.keys[n] for n in ['alice', 'bob', 'carol', 'dave']})
 
-    def test_cancel_and_untrusted_choice_do_not_install(self):
+    def test_cancel_and_extended_graph_choice(self):
         term = self.terminal('install', 'hello')
-        term.read_until(b'outside your graph')
+        term.read_until(b'No trusted attestations')
         term.send(b'\x1b')
         code, output = term.finish()
         self.assertNotEqual(code, 0)
         self.assertIn('cancelled', output)
         self.assertEqual(self.catalog.run('reader', 'list', '--json').stdout.strip(), '[]')
         term = self.terminal('install', 'hello')
-        term.read_until(b'outside your graph')
+        term.read_until(b'No trusted attestations')
         term.send(b'\x1b[B\r')
         code, output = term.finish()
-        self.assertNotEqual(code, 0)
-        self.assertIn('outside your direct follows', output)
-        self.assertEqual(self.catalog.run('reader', 'list', '--json').stdout.strip(), '[]')
+        self.assertEqual(code, 0, output)
+        self.assertIn('Installed buildbot/hello 1.0.0', output)
+        installed = json.loads(self.catalog.run('reader', 'list', '--json').stdout)
+        self.assertEqual(installed[0]['publisher'], self.catalog.keys['buildbot'])
 
     def test_agents_never_prompt_even_in_a_terminal(self):
         for flags, env in [(['--non-interactive'], {}), ([], {'HAPS_NON_INTERACTIVE': 'true'}), (['--json'], {})]:
@@ -187,6 +188,7 @@ class ChooserTest(unittest.TestCase):
                 self.assertEqual(value['code'], 'ambiguous_package')
                 self.assertEqual(value['candidates'][0]['publisher'], self.catalog.keys['alice'])
                 self.assertEqual(len(value['candidates'][0]['attestations']), 2)
+                self.assertEqual(len(value['candidates']), 2)
         installed = json.loads(self.catalog.run('reader', 'install', f'{self.catalog.keys["alice"]}/hello', '--version', '1.0.0', '--require-attestations', '2', '--json').stdout)
         self.assertEqual(installed['status'], 'installed')
         self.assertEqual(installed['release']['release_id'], self.catalog.releases['alice']['id'])

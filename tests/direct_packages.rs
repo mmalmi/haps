@@ -146,13 +146,7 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
             );
         }
         let package = format!("{}/hello", publisher.public_key().to_bech32()?);
-        let result = run(&[
-            "--non-interactive",
-            "install",
-            &package,
-            "--allow-untrusted",
-            "--json",
-        ]);
+        let result = run(&["--non-interactive", "install", &package, "--json"]);
         anyhow::ensure!(
             result.status.success(),
             "{} {}",
@@ -211,14 +205,22 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
         String::from_utf8_lossy(&search.stdout)
     );
     let results: serde_json::Value = serde_json::from_slice(&search.stdout)?;
-    assert_eq!(results.as_array().unwrap().len(), 1);
-    assert_eq!(results[0]["publisher"], publisher.public_key().to_hex());
+    assert!(results.as_array().unwrap().is_empty());
     let denied = run(&["--non-interactive", "install", "hello", "--json"]);
     assert!(
         !denied.status.success(),
         "following the curator must not grant publisher trust"
     );
-    assert!(String::from_utf8_lossy(&denied.stdout).contains("outside your direct follows"));
+    assert!(String::from_utf8_lossy(&denied.stdout).contains("outside your social graph"));
+    let endorsement = haps::trust::attest(&operator, release.event.id, true, "Checked".into())?;
+    state.events.lock().await.push(endorsement.clone());
+    let approved = run(&["install", "hello", "--json"]);
+    anyhow::ensure!(
+        approved.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&approved.stderr),
+        String::from_utf8_lossy(&approved.stdout)
+    );
     let config: serde_json::Value = serde_json::from_slice(&fs::read(home.join("config.json"))?)?;
     assert_eq!(config["indexes"].as_object().unwrap().len(), 1);
     // Root discovery uses the same router: the root advertisement and follow
@@ -226,7 +228,7 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
     let bootstrap = native
         .build(
             None,
-            [follow, advertised]
+            [follow, advertised, endorsement]
                 .iter()
                 .map(hashtree_nostr::stored_event_from_nostr_sdk_event),
         )
@@ -271,6 +273,14 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
     );
     let results: serde_json::Value = serde_json::from_slice(&search.stdout)?;
     assert_eq!(results.as_array().unwrap().len(), 1);
+    assert_eq!(results[0]["attesters"][0], operator.public_key().to_hex());
+    let installed = run(&["install", "hello", "--json"]);
+    anyhow::ensure!(
+        installed.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&installed.stderr),
+        String::from_utf8_lossy(&installed.stdout)
+    );
     let config: serde_json::Value =
         serde_json::from_slice(&fs::read(offline.join("config.json"))?)?;
     assert_eq!(config["indexes"].as_object().unwrap().len(), 2);

@@ -416,7 +416,7 @@ fn duplicate_names_require_a_publisher_and_updates_keep_that_publisher() {
             .status
             .success()
     );
-    // A direct follow must sort before an unknown author regardless of alias order.
+    // Bare names exclude unknown publishers; explicit opt-in still ranks direct follows first.
     let keys =
         nostr::Keys::parse(&fs::read_to_string(reader.join("identity.key")).unwrap()).unwrap();
     let follows = nostr::EventBuilder::new(nostr::Kind::ContactList, "")
@@ -431,12 +431,15 @@ fn duplicate_names_require_a_publisher_and_updates_keep_that_publisher() {
     let follow_file = tmp.path().join("follows.json");
     fs::write(&follow_file, serde_json::to_vec(&follows).unwrap()).unwrap();
     ok(&reader, &["import", follow_file.to_str().unwrap()]);
-    let result = cli(&reader, &["install", "same"]);
+    ok(&reader, &["install", "same"]);
+    assert!(ok(&reader, &["list"]).contains(&authors[1]));
+    let result = cli(&reader, &["install", "same", "--allow-untrusted"]);
     assert!(!result.status.success());
     let choices = String::from_utf8_lossy(&result.stderr);
     assert!(choices.contains("multiple publishers"));
     assert!(choices.find("bob/same").unwrap() < choices.find("alice/same").unwrap());
-    ok(&reader, &["install", "alice/same", "--allow-untrusted"]);
+    ok(&reader, &["remove", "bob/same"]);
+    ok(&reader, &["install", "alice/same"]);
     ok(&reader, &["update", "alice/same", "--allow-untrusted"]);
     use nostr::nips::nip19::ToBech32;
     let npub = nostr::PublicKey::parse(&authors[0])
@@ -868,7 +871,9 @@ fn attestation_shortcut_pins_version_platform_and_exports_signed_claims() {
     );
     let search: serde_json::Value =
         serde_json::from_str(&ok(&reader, &["search", "hello", "--json"])).unwrap();
-    assert_eq!(search.as_array().unwrap().len(), 3);
+    // Only the foreign build still has a current vouch from the reader.
+    assert_eq!(search.as_array().unwrap().len(), 1);
+    assert_eq!(search[0]["release_id"], releases[1].id.to_hex());
     let list: serde_json::Value = serde_json::from_str(&ok(&reader, &["list", "--json"])).unwrap();
     assert_eq!(list[0]["release_id"], releases[0].id.to_hex());
 }

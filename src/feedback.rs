@@ -3,9 +3,6 @@ use crate::{comments, model::Release, trust::parse_attestation};
 use anyhow::Result;
 use nostr::{Alphabet, Event, Filter, Kind, SingleLetterTag};
 use nostr_identity::FACT_SNAPSHOT_KIND;
-use nostr_pubsub::NostrEventSubscriber;
-use nostr_pubsub_relay::RelayEventBus;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 const LIMIT: usize = 512;
 
@@ -15,8 +12,8 @@ pub fn valid(event: &Event) -> bool {
         && (parse_attestation(event).is_ok() || comments::verify(event).is_ok())
 }
 
-/// Keep listening past EOSE; a bounded observation cannot establish absence.
-pub async fn refresh(bus: &RelayEventBus, releases: &[Release]) -> Result<Vec<Event>> {
+/// Query indexes and relays through the shared router for exact-release findings.
+pub async fn refresh(lookup: &crate::lookup::Lookup, releases: &[Release]) -> Result<Vec<Event>> {
     let releases: Vec<_> = releases.iter().take(128).collect();
     if releases.is_empty() {
         return Ok(Vec::new());
@@ -32,6 +29,10 @@ pub async fn refresh(bus: &RelayEventBus, releases: &[Release]) -> Result<Vec<Ev
             .identifiers(ids.clone())
             .limit(LIMIT),
         Filter::new()
+            .kind(crate::model::APP_KIND)
+            .identifiers(ids.iter().map(|id| format!("haps/attestation/{id}")))
+            .limit(LIMIT),
+        Filter::new()
             .kind(Kind::Comment)
             .custom_tags(SingleLetterTag::uppercase(Alphabet::E), ids)
             .limit(LIMIT),
@@ -40,32 +41,10 @@ pub async fn refresh(bus: &RelayEventBus, releases: &[Release]) -> Result<Vec<Ev
             .custom_tags(SingleLetterTag::uppercase(Alphabet::A), packages)
             .limit(LIMIT),
     ];
-    let (sender, mut receiver) = tokio::sync::mpsc::channel(LIMIT);
-    let subscription = bus
-        .subscribe(
-            filters.clone(),
-            Arc::new(move |event| {
-                let _ = sender.try_send(event.event.into_event());
-            }),
-        )
-        .await?;
-    let deadline = tokio::time::sleep(Duration::from_secs(3));
-    tokio::pin!(deadline);
-    let mut events = BTreeMap::new();
-    loop {
-        tokio::select! {
-            () = &mut deadline => break,
-            event = receiver.recv() => match event {
-                Some(event) => {
-                    if valid(&event) && filters.iter().any(|f| f.match_event(&event, Default::default())) {
-                        events.insert(event.id, event);
-                        if events.len() >= LIMIT { break; }
-                    }
-                }
-                None => break,
-            }
-        }
-    }
-    drop(subscription);
-    Ok(events.into_values().collect())
+    Ok(lookup
+        .query(filters)
+        .await?
+        .into_iter()
+        .filter(valid)
+        .collect())
 }

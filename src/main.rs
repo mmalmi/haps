@@ -140,7 +140,7 @@ enum Command {
         #[command(subcommand)]
         action: SourceAction,
     },
-    /// Search signed hashtree indexes, ranked by your social graph.
+    /// Search packages authored or vouched for by your social graph.
     Search {
         query: String,
         /// Emit one JSON array and never prompt.
@@ -156,7 +156,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Install a package. Use publisher/name when a name is ambiguous.
+    /// Install a package. An explicit publisher/name can bypass the social filter.
     Install {
         package: String,
         #[arg(long)]
@@ -699,6 +699,11 @@ async fn candidates(
     Ok(found)
 }
 
+struct Selection {
+    non_interactive: bool,
+    include_untrusted: bool,
+}
+
 fn select(
     mut candidates: Vec<Candidate>,
     package: &str,
@@ -706,7 +711,7 @@ fn select(
     aliases: &BTreeMap<String, String>,
     trust: &Trust,
     target_filter: &str,
-    non_interactive: bool,
+    selection: Selection,
 ) -> Result<Candidate> {
     let package = if let Some((key, name)) = package.split_once('/') {
         format!("{}/{}", ensure_public_key(key)?, name)
@@ -719,10 +724,23 @@ fn select(
             && version.is_none_or(|v| &c.release.data.package.version == v)
             && (version.is_some() || c.release.data.package.version.pre.is_empty())
     });
+    // Choose the newest matching version before trust filtering. An endorsement
+    // of an older release must never silently pin or downgrade a bare install.
+    let mut latest = BTreeMap::new();
+    for candidate in &candidates {
+        let version = &candidate.release.data.package.version;
+        let current = latest.entry(candidate.release.author()).or_insert(version);
+        *current = (*current).max(version);
+    }
+    let latest: BTreeMap<_, _> = latest.into_iter().map(|(k, v)| (k, v.clone())).collect();
+    candidates.retain(|c| latest[&c.release.author()] == c.release.data.package.version);
+    if !selection.include_untrusted && !package.contains('/') {
+        candidates.retain(|c| trust.socially_trusted(&c.release));
+    }
     let authors: BTreeSet<_> = candidates.iter().map(|c| c.release.author()).collect();
     ensure!(
         !candidates.is_empty(),
-        "no matching release for {}",
+        "no matching release for {} in the selected scope; packages outside your social graph require an explicit npub/package",
         target_filter
     );
     if authors.len() > 1 {
@@ -778,7 +796,7 @@ fn select(
                 )
             })
             .collect();
-        if non_interactive
+        if selection.non_interactive
             || !std::io::stdin().is_terminal()
             || !std::io::stdout().is_terminal()
             || !std::io::stderr().is_terminal()
@@ -920,6 +938,7 @@ fn release_json(
         "package": release.data.package, "publisher": release.author(),
         "release_id": release.event.id.to_hex(), "manifest": release.data.manifest,
         "follow_distance": trust.distance(&release.author()), "muted": trust.muted(&release.author()),
+        "overmuted": trust.overmuted(&release.author()), "socially_trusted": trust.socially_trusted(release),
         "followed_by": trust.followed_by_friends(&release.author()).iter().map(|key| serde_json::json!({"pubkey": key, "label": publisher_label(aliases, key)})).collect::<Vec<_>>(),
         "attesters": trust.attesters(release), "attestations": attestations,
         "warnings": warnings,
@@ -1506,14 +1525,10 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         Command::Search { query, json } => {
             refresh_discovery(&home, &mut config, &mut trust, None, None, Some(&query)).await?;
             let mut results = candidates(&home, &mut config, Some(&query), None).await?;
-            let releases: Vec<_> = results
-                .iter()
-                .take(128)
-                .map(|c| c.release.clone())
-                .collect();
+            let releases: Vec<_> = results.iter().map(|c| c.release.clone()).collect();
             refresh_feedback(&home, &config, &mut trust, &releases).await?;
-            results.retain(|c| !trust.muted(&c.release.author()));
-            // Unknown authors sort after known authors; fewer hops first.
+            results.retain(|c| trust.socially_trusted(&c.release));
+            // Known authors sort before publishers vouched for by the graph; fewer hops first.
             results.sort_by_key(|c| {
                 (
                     trust.distance(&c.release.author()).unwrap_or(u32::MAX),
@@ -1535,22 +1550,21 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         Command::Info {
             package, version, ..
         } => {
+            let choices = candidates(&home, &mut config, None, Some(&package)).await?;
+            let releases: Vec<_> = choices.iter().map(|c| c.release.clone()).collect();
+            refresh_feedback(&home, &config, &mut trust, &releases).await?;
             let candidate = select(
-                candidates(&home, &mut config, None, Some(&package)).await?,
+                choices,
                 &package,
                 version.as_ref(),
                 &config.aliases,
                 &trust,
                 target(),
-                non_interactive,
+                Selection {
+                    non_interactive,
+                    include_untrusted: false,
+                },
             )?;
-            refresh_feedback(
-                &home,
-                &config,
-                &mut trust,
-                std::slice::from_ref(&candidate.release),
-            )
-            .await?;
             print_release(&candidate.release, &trust, &config.aliases)?;
         }
         Command::Install {
@@ -1561,22 +1575,21 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             require_attestations,
             json,
         } => {
+            let choices = candidates(&home, &mut config, None, Some(&package)).await?;
+            let releases: Vec<_> = choices.iter().map(|c| c.release.clone()).collect();
+            refresh_feedback(&home, &config, &mut trust, &releases).await?;
             let candidate = select(
-                candidates(&home, &mut config, None, Some(&package)).await?,
+                choices,
                 &package,
                 version.as_ref(),
                 &config.aliases,
                 &trust,
                 target(),
-                non_interactive,
+                Selection {
+                    non_interactive,
+                    include_untrusted: allow_untrusted,
+                },
             )?;
-            refresh_feedback(
-                &home,
-                &config,
-                &mut trust,
-                std::slice::from_ref(&candidate.release),
-            )
-            .await?;
             let require_attestations = require_attestations.max(
                 installation
                     .receipts()?
@@ -1585,10 +1598,16 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             );
             trust.authorize_with_policy(
                 &candidate.release,
-                allow_untrusted,
+                allow_untrusted || package.contains('/'),
                 require_attestations,
                 allow_warnings,
             )?;
+            if !trust.socially_trusted(&candidate.release) {
+                eprintln!(
+                    "Warning: {} is not authored or vouched for by your social graph (or its author/vouchers are overmuted); proceeding with your explicit choice.",
+                    release_label(&candidate.release, &config.aliases)
+                );
+            }
             if !json {
                 print_install_start(&candidate.release, &trust, &config.aliases);
             }
@@ -1609,28 +1628,33 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         } => {
             let receipt = installation.receipt(&package)?;
             let current = Release::verify(receipt.current)?;
+            let choices = candidates(&home, &mut config, None, Some(&current.identity())).await?;
+            let releases: Vec<_> = choices.iter().map(|c| c.release.clone()).collect();
+            refresh_feedback(&home, &config, &mut trust, &releases).await?;
             let candidate = select(
-                candidates(&home, &mut config, None, Some(&current.identity())).await?,
+                choices,
                 &current.identity(),
                 None,
                 &config.aliases,
                 &trust,
                 target(),
-                non_interactive,
+                Selection {
+                    non_interactive,
+                    include_untrusted: true,
+                },
             )?;
-            refresh_feedback(
-                &home,
-                &config,
-                &mut trust,
-                std::slice::from_ref(&candidate.release),
-            )
-            .await?;
             trust.authorize_with_policy(
                 &candidate.release,
-                allow_untrusted,
+                allow_untrusted || package.contains('/'),
                 receipt.minimum_attestations,
                 allow_warnings,
             )?;
+            if !trust.socially_trusted(&candidate.release) {
+                eprintln!(
+                    "Warning: {} is not authored or vouched for by your social graph (or its author/vouchers are overmuted); proceeding with your explicit choice.",
+                    release_label(&candidate.release, &config.aliases)
+                );
+            }
             if !json {
                 print_install_start(&candidate.release, &trust, &config.aliases);
             }
@@ -1814,7 +1838,10 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     &config.aliases,
                     &trust,
                     requested_target.as_deref().unwrap_or(target()),
-                    non_interactive,
+                    Selection {
+                        non_interactive,
+                        include_untrusted: false,
+                    },
                 )?;
                 if !json {
                     eprintln!(
@@ -2010,12 +2037,34 @@ async fn refresh_feedback(
     trust: &mut Trust,
     releases: &[Release],
 ) -> Result<()> {
-    if !networking_enabled(config) || releases.is_empty() {
+    if releases.is_empty() {
         return Ok(());
     }
     let result = async {
-        let bus = haps::discovery::relay_bus(home).await?;
-        haps::feedback::refresh(&bus, releases).await
+        let relay = if networking_enabled(config) {
+            match haps::discovery::relay_bus(home).await {
+                Ok(bus) => Some(Arc::new(bus)),
+                Err(error) => {
+                    eprintln!("Relay feedback unavailable; using indexes: {error:#}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let indexes: Vec<_> = config
+            .indexes
+            .values()
+            .map(|source| (source.location.clone(), source.author.clone()))
+            .collect();
+        let lookup = Discovery::open(home)?
+            .event_lookup(relay, &indexes, std::time::Duration::from_secs(3))
+            .await?;
+        let mut events = Vec::new();
+        for batch in releases.chunks(128) {
+            events.extend(haps::feedback::refresh(&lookup, batch).await?);
+        }
+        Ok::<_, anyhow::Error>(events)
     }
     .await;
     let events = match result {
@@ -2064,8 +2113,16 @@ async fn discover_social_indexes(
     let lookup = discovery
         .event_lookup(relay.cloned(), &indexes, std::time::Duration::from_secs(2))
         .await?;
-    let authors = trust.discovery_authors(1);
-    if !authors.is_empty() {
+    let mut queried = BTreeSet::new();
+    for _ in 0..2 {
+        let authors: Vec<_> = trust
+            .discovery_authors(1)
+            .into_iter()
+            .filter(|key| queried.insert(*key))
+            .collect();
+        if authors.is_empty() {
+            break;
+        }
         let events = lookup
             .query(vec![
                 nostr::Filter::new()
@@ -2099,7 +2156,7 @@ async fn discover_social_indexes(
     }
     config.indexes.retain(|name, source| {
         !name.starts_with("social-")
-            || (!trust.muted(&source.author)
+            || (!trust.overmuted(&source.author)
                 && trust.distance(&source.author).is_some_and(|d| d <= 2))
     });
     for event in discovery
@@ -2110,7 +2167,7 @@ async fn discover_social_indexes(
             continue;
         };
         let author = announcement.event.pubkey.to_hex();
-        if trust.muted(&author) || !trust.distance(&author).is_some_and(|d| d <= 2) {
+        if trust.overmuted(&author) || !trust.distance(&author).is_some_and(|d| d <= 2) {
             continue;
         }
         let name = format!(

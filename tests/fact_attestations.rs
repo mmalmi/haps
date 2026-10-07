@@ -126,7 +126,7 @@ async fn fact_snapshots_migrate_legacy_claims_without_double_counting_or_replay(
         assert!(trust.warnings(&release).is_empty());
         assert!(trust.attesters(&release).is_empty());
         trust.authorize(&release, true, 0)?;
-        // Strangers and second-degree connections have no warning authority.
+        // Strangers have no authority until reachable through the social graph.
         let stranger = Keys::generate();
         trust.ingest(warn_at(
             &stranger,
@@ -135,14 +135,15 @@ async fn fact_snapshots_migrate_legacy_claims_without_double_counting_or_replay(
             "Stranger claim".into(),
             at + 6,
         )?)?;
+        assert!(trust.warnings(&release).is_empty());
         trust.ingest(
             EventBuilder::new(Kind::ContactList, "")
                 .tags([Tag::public_key(stranger.public_key())])
                 .sign_with_keys(&friend)?,
         )?;
         assert_eq!(trust.distance(&stranger.public_key().to_hex()), Some(2));
-        assert!(trust.warnings(&release).is_empty());
-        trust.authorize(&release, true, 0)?;
+        assert_eq!(trust.warnings(&release).len(), 1);
+        assert!(trust.authorize(&release, true, 0).is_err());
         // Muting a direct connection excludes both its approval and its warning.
         trust.ingest(warn_at(
             &friend,
@@ -153,7 +154,10 @@ async fn fact_snapshots_migrate_legacy_claims_without_double_counting_or_replay(
         )?)?;
         trust.ingest(
             EventBuilder::new(Kind::MuteList, "")
-                .tags([Tag::public_key(friend.public_key())])
+                .tags([
+                    Tag::public_key(friend.public_key()),
+                    Tag::public_key(stranger.public_key()),
+                ])
                 .sign_with_keys(&me)?,
         )?;
         assert!(trust.warnings(&release).is_empty());
