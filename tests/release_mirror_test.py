@@ -34,6 +34,7 @@ class ReleaseHistoryGuard(unittest.TestCase):
         commit = 'c' * 40
         installer = b'#!/bin/sh\n'
         published = []
+        haps = []
 
         def read(args, **kwargs):
             if args == ['htree', 'release', 'publish', '--help']:
@@ -65,6 +66,14 @@ class ReleaseHistoryGuard(unittest.TestCase):
                 (directory / 'SHA256SUMS').write_text(''.join(
                     f'{asset["sha256"]}  {asset["name"]}\n' for asset in assets))
                 (directory / 'install.sh').write_bytes(installer)
+            elif args == ['haps', 'import-release', '--help']:
+                pass
+            elif args[:2] == ['haps', 'import-release']:
+                haps.append(args[-1])
+                if args[-1] == '--check':
+                    self.assertFalse(published)
+                else:
+                    self.assertTrue(published)
             elif args[:3] == ['htree', 'release', 'publish']:
                 published.append(args)
             else:
@@ -74,6 +83,7 @@ class ReleaseHistoryGuard(unittest.TestCase):
         with patch('subprocess.check_output', side_effect=read), \
                 patch('subprocess.run', side_effect=run):
             self.run_mirror()
+        self.assertEqual(haps, ['--check', '--publish'])
         self.assertEqual(published, [['htree', 'release', 'publish', 'releases/haps',
                                      'v0.1.11', 'nhash1verified', '--expected-root',
                                      'a' * 64 + ':' + 'b' * 64]])

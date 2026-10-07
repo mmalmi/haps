@@ -75,7 +75,7 @@ def index(tag, commit, output):
     for target in TARGETS:
         name = f'haps-{tag}-{target}{".zip" if "windows" in target else ".tar.gz"}'
         file = output / name
-        assets.append({'name': name, 'target': target, 'size': file.stat().st_size,
+        assets.append({'name': name, 'path': f'assets/{name}', 'target': target, 'size': file.stat().st_size,
                        'sha256': hashlib.sha256(file.read_bytes()).hexdigest()})
     (output / 'SHA256SUMS').write_text(''.join(f'{a["sha256"]}  {a["name"]}\n' for a in assets))
     (output / 'release.json').write_text(json.dumps({'schema': 'haps.binary-release.v1', 'tag': tag, 'version': tag[1:], 'commit': commit, 'companions': json.loads(Path('scripts/hashtree-bundle.json').read_text()), 'assets': assets}, indent=2) + '\n')

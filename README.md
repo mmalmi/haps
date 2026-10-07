@@ -179,13 +179,24 @@ curl -fsSL https://haps.hashtree.cc/install.sh | sh
 haps --version
 ```
 
-`haps update PACKAGE` updates a package managed by Haps, not the running manager.
-Installing or updating a package named `haps` in its internal store would not
-replace a separately installed executable on your PATH. There is no `self-update`
-command yet, and Haps does not currently depend on `hashtree-updater`.
-A future `haps self-update` should use that shared library's signed Hashtree
-release resolution and install helpers for prebuilt installs, while directing
-Cargo-managed installs back to Cargo.
+Haps can also manage its own signed package. Adopt it once, then put the printed
+command directory first on your PATH:
+
+```sh
+haps install haps
+haps link haps
+# Add the printed directory to PATH, then open a new terminal.
+haps update haps
+haps rollback haps
+```
+
+`haps link PACKAGE` creates owned command launchers in the Haps data directory's
+`bin/` (or an explicit `--bin-dir`). They follow updates and rollbacks and are
+removed when the package is removed. Haps refuses to overwrite unrelated or
+edited commands. Existing Cargo, Homebrew, or manually installed executables
+remain managed by their original installer until you select the Haps launcher
+on PATH. Windows launchers use `.cmd`; package executables remain in immutable
+version directories, so updates do not replace a running executable.
 
 ### Downloads
 

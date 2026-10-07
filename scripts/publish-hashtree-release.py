@@ -27,6 +27,7 @@ help_text = subprocess.check_output(['htree', 'release', 'publish', '--help'], t
 if '--expected-root' not in help_text:
     raise SystemExit('Update htree to a build supporting release publish --expected-root. '
                      'Publication stopped before upload to protect existing releases.')
+subprocess.run(['haps', 'import-release', '--help'], check=True, stdout=subprocess.DEVNULL)
 commit = subprocess.check_output(['git', 'rev-parse', f'{tag}^{{commit}}'], text=True).strip()
 with tempfile.TemporaryDirectory(prefix='haps-release-') as temp:
     root = Path(temp)
@@ -54,6 +55,8 @@ with tempfile.TemporaryDirectory(prefix='haps-release-') as temp:
         raise SystemExit('Unexpected release files')
     shutil.copyfile(assets / 'release.json', root / 'release.json')
     (root / 'version.txt').write_text(tag + '\n')
+    haps_args = ['haps', 'import-release', str(root), '--config', str(Path(__file__).resolve().parents[1] / 'haps-release.json'), '--tag', tag]
+    subprocess.run([*haps_args, '--check'], check=True)
     output = subprocess.check_output(['htree', 'add', str(root), '--no-ignore'], text=True)
     match = re.search(r'^\s*url:\s*(nhash1\w+)\s*$', output, re.M)
     if not match:
@@ -61,3 +64,4 @@ with tempfile.TemporaryDirectory(prefix='haps-release-') as temp:
     print('Verified all five platform archives; publishing the same bytes to Hashtree.', flush=True)
     subprocess.run(['htree', 'release', 'publish', 'releases/haps', tag, match[1],
                     '--expected-root', args.expected_root], check=True)
+    subprocess.run([*haps_args, '--publish'], check=True)

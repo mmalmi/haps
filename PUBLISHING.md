@@ -221,3 +221,53 @@ user's Local AppData directory; on macOS app bundles stay in their versioned slo
 and open through Launch Services. Haps does not add commands to PATH or copy apps
 into system application directories. Use `haps run`, `haps path`, and `haps list`
 to run and inspect installations.
+
+## Existing release flows: build once, publish through Haps
+
+Iris Git and `htree release publish` share the same release directory:
+`releases/<repo>/<tag>/release.json`, `notes.md`, and `assets/`. Keep that as a
+compatibility inventory for existing release pages and app updaters. Haps' signed
+`haps.release.v1` events and `haps.files.v1` manifests are the authoritative
+package format for installation. Hashtree stores those objects and the native
+Nostr event index; it does not define a second software-package format. `latest` selects the Hashtree release;
+Haps package-head events select signed package versions for each platform.
+
+New Haps publishers should use `haps add` / `haps pack` and `haps catalog publish`
+with the native package format described above; they do not need the older
+release inventory. `import-release` is the compatibility boundary for established
+build and distribution flows. It never changes Haps' package schema to match a
+Hashtree app updater.
+
+The repository's `haps-release.json` maps those existing assets to package
+names, targets, commands and app/desktop metadata. It pins the publishing key,
+source repository and catalog name. Each selected `release.json` asset needs
+its exact size and SHA-256. Asset paths are relative to that release directory;
+`{tag}` in mappings substitutes only the explicitly requested tag.
+
+```sh
+# Requires Haps with the import-release subcommand, Python 3.9+, and htree for upload.
+# HAPS_KEY_FILE may select an existing secret-key file; otherwise Haps uses
+# its existing identity.key. Never generate a new identity during a release.
+haps import-release stage --config haps-release.json --tag v1.2.3 --check
+# After the project's existing release gates and canonical publication:
+haps import-release stage --config haps-release.json --tag v1.2.3 --publish
+```
+
+`--check` validates the signer, stable tag, checksums and payload layout without
+signing or uploading; a draft can be checked but cannot be published. Preparation uses tar/zip/Debian payloads without executing
+install scripts. Symlinks and special files fail explicitly, matching Haps'
+current package format. The adapter retains regular-file bytes and executable
+permissions, including signed macOS bundles. Native installers, Android and iOS
+remain on their existing distribution channels; map their desktop/CLI archives
+only when those can be installed as ordinary files.
+
+Publication keeps original release events on a byte-identical retry, refuses
+changed bytes at an existing version, uploads immutable packages and a native
+Hashtree Nostr event index, and requires relay acknowledgement. Failed events
+remain queued for `haps sync`; a nonzero release result is not a completed
+release. Source commits and package publishers stay pinned during updates.
+
+For date tags, `version_scheme: "date-revision"` maps `v2026.10.5.2` to
+`2026.10.502`, retaining ordering and compatibility with existing Iris packages.
+Other repositories use stable SemVer tags. Haps' own release mirror runs this
+adapter on the same five checksum-verified binary bundles, including helpers.

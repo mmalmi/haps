@@ -17,3 +17,7 @@ pub mod repository;
 pub mod store;
 pub mod transport;
 pub mod trust;
+
+pub mod release;
+
+pub mod links;

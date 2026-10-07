@@ -101,6 +101,8 @@ enum Command {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Prepare or publish packages from a verified Hashtree/Iris Git release directory.
+    ImportRelease(haps::release::ReleaseArgs),
     /// Share signed packages through Hashtree and announce them on Nostr.
     Publish {
         #[arg(value_name = "DIRECTORY")]
@@ -183,6 +185,12 @@ enum Command {
         /// Emit JSON and never prompt.
         #[arg(long)]
         json: bool,
+    },
+    /// Link installed commands into a directory; links follow updates and rollback.
+    Link {
+        package: String,
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
     },
     /// Run an installed command without changing your system PATH.
     Run {
@@ -1406,6 +1414,40 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             let repo = Repository::local(out)?;
             let release = repo.publish(&keys, spec, &payload).await?;
             println!("{}", serde_json::to_string_pretty(&release.event)?);
+        }
+        Command::Link { package, bin_dir } => {
+            let package = resolve_package(&config, &package)?;
+            let directory = installation.link(&package, bin_dir.as_deref())?;
+            println!(
+                "Linked commands in {}. Add this directory to PATH before other installations.",
+                directory.display()
+            );
+        }
+        Command::ImportRelease(args) => {
+            if let Some((path, name, keys)) = haps::release::prepare(&args, &home).await? {
+                if args.publish {
+                    let mut events =
+                        haps::event_catalog::package_events(&home, &path, &keys, None).await?;
+                    let location = haps::event_catalog::upload_index(&events)?;
+                    let discovery = Discovery::open(&home)?;
+                    let previous = discovery.events(vec![nostr::Filter::new()]).await?;
+                    events.push(haps::event_catalog::advance(
+                        &keys,
+                        haps::event_catalog::IndexAnnouncement::sign(&keys, &name, &location)?,
+                        &previous,
+                    )?);
+                    discovery.queue(&events)?;
+                    discovery.ingest(events).await?;
+                    let bus = haps::discovery::relay_bus(&home).await?;
+                    ensure!(
+                        discovery.flush(&bus).await? == 0,
+                        "release announcements remain queued; run haps sync before considering publication complete"
+                    );
+                    println!("Release announcements acknowledged by a relay");
+                } else {
+                    println!("Prepared catalog {name}; publish with haps catalog publish {name}");
+                }
+            }
         }
         Command::Publish {
             catalog,

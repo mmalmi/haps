@@ -214,6 +214,26 @@ impl Repository {
     }
     /// Write a shareable repository. This does not upload or announce anything.
     pub async fn publish(&self, keys: &Keys, spec: PackageSpec, payload: &Path) -> Result<Release> {
+        self.publish_inner(keys, spec, payload, false).await
+    }
+
+    /// A release flow may retry only when the entire package is byte-identical.
+    pub async fn publish_reusable(
+        &self,
+        keys: &Keys,
+        spec: PackageSpec,
+        payload: &Path,
+    ) -> Result<Release> {
+        self.publish_inner(keys, spec, payload, true).await
+    }
+
+    async fn publish_inner(
+        &self,
+        keys: &Keys,
+        spec: PackageSpec,
+        payload: &Path,
+        reuse: bool,
+    ) -> Result<Release> {
         spec.validate()?;
         let path = self
             .path()
@@ -221,16 +241,18 @@ impl Repository {
         let _guard = lock(&path.join(".publish.lock"))?;
         let mut catalog = Catalog::default();
         let mut sequence = 1;
+        let mut existing = None;
         if path.join("catalog.json").exists() {
             let previous = self.catalog(&keys.public_key().to_hex()).await?;
             for release in self.releases(&previous).await? {
-                ensure!(
-                    release.author() != keys.public_key().to_hex()
-                        || release.data.package.name != spec.name
-                        || release.data.package.version != spec.version
-                        || release.data.package.target != spec.target,
-                    "release already exists; publish a new version"
-                );
+                if release.author() == keys.public_key().to_hex()
+                    && release.data.package.name == spec.name
+                    && release.data.package.version == spec.version
+                    && release.data.package.target == spec.target
+                {
+                    ensure!(reuse, "release already exists; publish a new version");
+                    existing = Some(release);
+                }
             }
             sequence = previous
                 .head
@@ -240,11 +262,70 @@ impl Repository {
             catalog = previous.catalog;
         }
         ensure!(catalog.releases.len() < 10_000, "catalog is full");
+        let manifest = self.pack_payload(&spec, payload).await?;
+        let data = ReleaseData {
+            schema: "haps.release.v1".into(),
+            package: spec.clone(),
+            manifest,
+        };
+        if let Some(existing) = existing {
+            ensure!(
+                existing.data.package == data.package && existing.data.manifest == data.manifest,
+                "immutable release differs from its existing package; publish a new version"
+            );
+            return Ok(existing);
+        }
+        let event = sign(keys, &release_tag(&spec), &data)?;
+        let release = Release::verify(event.clone())?;
+        let cid = self.put_json(&event).await?;
+        let card = sign(
+            keys,
+            &format!("haps/package/{}", spec.name),
+            &serde_json::json!({
+                "schema": "haps.package.v1", "name": spec.name, "description": spec.description,
+            }),
+        )?;
+        catalog
+            .packages
+            .insert(release.identity(), self.put_json(&card).await?);
+        let index = SearchIndex::new(self.store.clone(), SearchIndexOptions::default());
+        let terms = index.parse_keywords(&format!("{} {}", spec.name, spec.description));
+        let terms = if terms.is_empty() {
+            vec![spec.name.clone()]
+        } else {
+            terms
+        };
+        let previous = catalog.search.as_deref().map(Cid::parse).transpose()?;
+        catalog.search = Some(
+            index
+                .index(previous.as_ref(), "", &terms, &release.coordinate(), &cid)
+                .await?
+                .to_string(),
+        );
+        catalog.releases.push(cid);
+        let head = CatalogRoot {
+            schema: "haps.catalog.v1".into(),
+            sequence,
+            root: self.put_json(&catalog).await?,
+        };
+        let event = sign(keys, "haps/catalog/v1", &head)?;
+        atomic_write(
+            &path.join("catalog.json"),
+            &serde_json::to_vec_pretty(&event)?,
+        )?;
+        Ok(release)
+    }
+    /// Validate and address a payload without creating any signed event.
+    pub async fn pack_payload(&self, spec: &PackageSpec, payload: &Path) -> Result<String> {
+        spec.validate()?;
         let payload = payload
             .canonicalize()
             .context("payload directory is missing")?;
         ensure!(payload.is_dir(), "payload must be a directory");
-        let repo_path = path.canonicalize()?;
+        let repo_path = self
+            .path()
+            .context("packing requires a local directory")?
+            .canonicalize()?;
         ensure!(
             !repo_path.starts_with(&payload),
             "output repository must be outside payload"
@@ -340,51 +421,7 @@ impl Repository {
             schema: "haps.files.v1".into(),
             files,
         };
-        manifest.validate(&spec)?;
-        let manifest = self.put_json(&manifest).await?;
-        let data = ReleaseData {
-            schema: "haps.release.v1".into(),
-            package: spec.clone(),
-            manifest,
-        };
-        let event = sign(keys, &release_tag(&spec), &data)?;
-        let release = Release::verify(event.clone())?;
-        let cid = self.put_json(&event).await?;
-        let card = sign(
-            keys,
-            &format!("haps/package/{}", spec.name),
-            &serde_json::json!({
-                "schema": "haps.package.v1", "name": spec.name, "description": spec.description,
-            }),
-        )?;
-        catalog
-            .packages
-            .insert(release.identity(), self.put_json(&card).await?);
-        let index = SearchIndex::new(self.store.clone(), SearchIndexOptions::default());
-        let terms = index.parse_keywords(&format!("{} {}", spec.name, spec.description));
-        let terms = if terms.is_empty() {
-            vec![spec.name.clone()]
-        } else {
-            terms
-        };
-        let previous = catalog.search.as_deref().map(Cid::parse).transpose()?;
-        catalog.search = Some(
-            index
-                .index(previous.as_ref(), "", &terms, &release.coordinate(), &cid)
-                .await?
-                .to_string(),
-        );
-        catalog.releases.push(cid);
-        let head = CatalogRoot {
-            schema: "haps.catalog.v1".into(),
-            sequence,
-            root: self.put_json(&catalog).await?,
-        };
-        let event = sign(keys, "haps/catalog/v1", &head)?;
-        atomic_write(
-            &path.join("catalog.json"),
-            &serde_json::to_vec_pretty(&event)?,
-        )?;
-        Ok(release)
+        manifest.validate(spec)?;
+        self.put_json(&manifest).await
     }
 }

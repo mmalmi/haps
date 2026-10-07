@@ -1,0 +1,52 @@
+{
+  "catalog": "haps",
+  "publisher": "npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm",
+  "source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps",
+  "packages": [
+    {
+      "name": "haps",
+      "target": "x86_64-unknown-linux-gnu",
+      "asset": "haps-{tag}-x86_64-unknown-linux-gnu.tar.gz",
+      "description": "Hashtree Package System",
+      "commands": {
+        "haps": "haps"
+      }
+    },
+    {
+      "name": "haps",
+      "target": "aarch64-unknown-linux-gnu",
+      "asset": "haps-{tag}-aarch64-unknown-linux-gnu.tar.gz",
+      "description": "Hashtree Package System",
+      "commands": {
+        "haps": "haps"
+      }
+    },
+    {
+      "name": "haps",
+      "target": "x86_64-apple-darwin",
+      "asset": "haps-{tag}-x86_64-apple-darwin.tar.gz",
+      "description": "Hashtree Package System",
+      "commands": {
+        "haps": "haps"
+      }
+    },
+    {
+      "name": "haps",
+      "target": "aarch64-apple-darwin",
+      "asset": "haps-{tag}-aarch64-apple-darwin.tar.gz",
+      "description": "Hashtree Package System",
+      "commands": {
+        "haps": "haps"
+      }
+    },
+    {
+      "name": "haps",
+      "target": "x86_64-pc-windows-msvc",
+      "asset": "haps-{tag}-x86_64-pc-windows-msvc.zip",
+      "description": "Hashtree Package System",
+      "commands": {
+        "haps": "haps.exe"
+      }
+    }
+  ]
+}

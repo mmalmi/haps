@@ -48,6 +48,64 @@ impl Installation {
         after: Option<&Event>,
         receipts: &BTreeMap<String, Receipt>,
     ) -> Result<()> {
+        let old = before.cloned().map(Release::verify).transpose()?;
+        let new = after.cloned().map(Release::verify).transpose()?;
+        let release = new.as_ref().or(old.as_ref()).context("missing release")?;
+        if let Some(directory) = crate::links::bindings(&self.home)?.get(&release.identity()) {
+            return crate::links::transaction(
+                &self.home,
+                directory,
+                old.as_ref(),
+                new.as_ref(),
+                |r| self.version_dir(r),
+                || self.save_desktop_change(before, after, receipts),
+            );
+        }
+        self.save_desktop_change(before, after, receipts)
+    }
+    /// Put stable command launchers in an explicitly selected directory.
+    pub fn link(&self, name: &str, directory: Option<&Path>) -> Result<PathBuf> {
+        let _guard = lock(&self.home.join(".install.lock"))?;
+        let release = Release::verify(self.receipt(name)?.current)?;
+        ensure!(
+            !release.data.package.commands.is_empty(),
+            "package provides no commands"
+        );
+        let directory = directory
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.home.join("bin"));
+        fs::create_dir_all(&directory)?;
+        let directory = directory.canonicalize()?;
+        let mut bindings = crate::links::bindings(&self.home)?;
+        if let Some(old) = bindings.get(&release.identity()) {
+            ensure!(
+                old == &directory,
+                "package already linked in {}",
+                old.display()
+            );
+        }
+        crate::links::transaction(
+            &self.home,
+            &directory,
+            None,
+            Some(&release),
+            |r| self.version_dir(r),
+            || {
+                bindings.insert(release.identity(), directory.clone());
+                atomic_write(
+                    &self.home.join("linked.json"),
+                    &serde_json::to_vec_pretty(&bindings)?,
+                )
+            },
+        )?;
+        Ok(directory)
+    }
+    fn save_desktop_change(
+        &self,
+        before: Option<&Event>,
+        after: Option<&Event>,
+        receipts: &BTreeMap<String, Receipt>,
+    ) -> Result<()> {
         let Some(directory) = &self.desktop_dir else {
             return self.save(receipts);
         };
