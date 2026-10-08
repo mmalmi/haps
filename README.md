@@ -69,7 +69,7 @@ To inspect first or pin a version:
 ```sh
 curl -fsSL https://haps.hashtree.cc/install.sh -o install-haps.sh
 less install-haps.sh
-sh install-haps.sh --version v0.1.12 --bin-dir "$HOME/.local/bin"
+sh install-haps.sh --version v0.1.14 --bin-dir "$HOME/.local/bin"
 ```
 
 [Windows x64 zip and all release downloads](#downloads) are also available. Extract the entire zip, keeping `haps.exe`, `bundle.json`, and `libexec/` together,
@@ -213,17 +213,17 @@ version directories, so updates do not replace a running executable.
 
 ### Downloads
 
-Prebuilt Haps 0.1.12 archives, hosted on Hashtree:
+Prebuilt Haps 0.1.14 archives, hosted on Hashtree:
 
 | Platform | Archive |
 | --- | --- |
-| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.12/assets/haps-v0.1.12-aarch64-apple-darwin.tar.gz) |
-| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.12/assets/haps-v0.1.12-x86_64-apple-darwin.tar.gz) |
-| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.12/assets/haps-v0.1.12-x86_64-unknown-linux-gnu.tar.gz) |
-| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.12/assets/haps-v0.1.12-aarch64-unknown-linux-gnu.tar.gz) |
-| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.12/assets/haps-v0.1.12-x86_64-pc-windows-msvc.zip) |
+| macOS Apple silicon | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.14/assets/haps-v0.1.14-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.14/assets/haps-v0.1.14-x86_64-apple-darwin.tar.gz) |
+| Linux x86-64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.14/assets/haps-v0.1.14-x86_64-unknown-linux-gnu.tar.gz) |
+| Linux ARM64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.14/assets/haps-v0.1.14-aarch64-unknown-linux-gnu.tar.gz) |
+| Windows x64 | [Download](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.14/assets/haps-v0.1.14-x86_64-pc-windows-msvc.zip) |
 
-The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.12/release.json) records archive sizes and SHA-256 checksums.
+The [release manifest](https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhaps/v0.1.14/release.json) records archive sizes and SHA-256 checksums.
 
 ### Publish your package
 
@@ -261,7 +261,7 @@ Aliases use the existing public `~/.hashtree/aliases` file and parser from
 shared configuration directory. Haps does not copy aliases into its own settings
 or read signing keys to resolve public aliases. Aliases do not imply trust.
 
-When a bare name matches one socially trusted publisher, installation shows the
+From Haps 0.1.14, when a bare name matches one socially trusted publisher, installation shows the
 package, version, full publisher key, social relationship, and attestations, then asks
 for confirmation (default: no). This happens before any audit, build, or installation.
 An explicit `npub/package`, public-key/package, or local alias/package already selects
@@ -940,10 +940,12 @@ git tag vX.Y.Z
 git push github vX.Y.Z
 gh workflow run release.yml --repo mmalmi/haps -f tag=vX.Y.Z
 # Once the workflow succeeds, mirror its exact assets using the maintainer's htree identity:
-python3 scripts/publish-hashtree-release.py --tag vX.Y.Z
+python3 scripts/publish-hashtree-release.py --tag vX.Y.Z --expected-root VERIFIED_RELEASES_ROOT_CID
 ```
 
-The mirror command verifies asset sizes/checksums and the tag's source commit,
+Resolve and verify the current `releases/haps` root before mirroring; the
+`--expected-root` check protects existing release history. The mirror command
+verifies asset sizes/checksums and the tag's source commit,
 then uses `htree release publish` to retain previous versions and move `latest`.
 The publisher requires `gh`, `htree`, Python 3.11+, and the release identity already
 configured locally. Crates.io publication and website deployment remain separate
