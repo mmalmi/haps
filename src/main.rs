@@ -1390,7 +1390,9 @@ fn print_installed(
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let json = cli.command.json();
-    match execute(cli).await {
+    // The dispatcher contains every command's future. Keep it off the native
+    // entry-point stack, which is only 1 MiB by default on Windows.
+    match Box::pin(execute(cli)).await {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             if json {
