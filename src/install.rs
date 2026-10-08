@@ -81,7 +81,7 @@ impl Installation {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| self.home.join("bin"));
         fs::create_dir_all(&directory)?;
-        let directory = directory.canonicalize()?;
+        let directory = crate::links::shell_path(directory.canonicalize()?);
         let mut bindings = crate::links::bindings(&self.home)?;
         if let Some(old) = bindings.get(&release.identity()) {
             ensure!(

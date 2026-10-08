@@ -16,6 +16,22 @@ pub fn bindings(home: &Path) -> Result<BTreeMap<String, PathBuf>> {
     }
 }
 
+/// cmd.exe cannot execute batch files through canonical verbatim paths.
+pub(crate) fn shell_path(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(text) = path.to_str() {
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        if let Some(disk) = text.strip_prefix(r"\\?\")
+            && disk.as_bytes().get(1) == Some(&b':')
+        {
+            return PathBuf::from(disk);
+        }
+    }
+    path
+}
+
 fn scripts(
     home: &Path,
     release: Option<&Release>,
@@ -24,8 +40,9 @@ fn scripts(
     let mut scripts = BTreeMap::new();
     if let Some(release) = release {
         for (name, path) in &release.data.package.commands {
-            let executable = version_dir(release).join(path);
+            let executable = shell_path(version_dir(release).join(path));
             let executable = executable.to_str().context("command path is not UTF-8")?;
+            let home = shell_path(home.to_path_buf());
             let home = home.to_str().context("home path is not UTF-8")?;
             ensure!(
                 !executable.chars().chain(home.chars()).any(char::is_control),
