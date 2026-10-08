@@ -164,6 +164,10 @@ impl Checkout {
         Ok(Self { directory, recipe })
     }
 
+    pub fn root(&self) -> PathBuf {
+        self.directory.path().join("repo")
+    }
+
     pub fn execute(&self) -> Result<PathBuf> {
         let root = self.directory.path().join("repo");
         for args in &self.recipe.build.commands {

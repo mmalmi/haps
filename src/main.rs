@@ -135,6 +135,9 @@ enum Command {
         /// Install the locally signed build after it succeeds.
         #[arg(long, requires = "execute")]
         install: bool,
+        /// Share the passing source scan after a successful build and installation.
+        #[arg(long, requires = "install")]
+        attest_scan: bool,
     },
     /// Advanced compatibility controls for package sources.
     #[command(hide = true)]
@@ -191,6 +194,18 @@ enum Command {
         package: String,
         #[arg(long)]
         bin_dir: Option<PathBuf>,
+    },
+    /// Configure automatic local scans before executing source builds.
+    Security {
+        /// Enable scans using a local Semgrep rules file; its contents are pinned.
+        #[arg(long, conflicts_with = "disable")]
+        rules: Option<PathBuf>,
+        /// Semgrep executable (defaults to semgrep on PATH).
+        #[arg(long, requires = "rules")]
+        scanner: Option<PathBuf>,
+        /// Disable the scan requirement, retaining private reports.
+        #[arg(long)]
+        disable: bool,
     },
     /// Run an installed command without changing your system PATH.
     Run {
@@ -1423,6 +1438,13 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 directory.display()
             );
         }
+        Command::Security {
+            rules,
+            scanner,
+            disable,
+        } => {
+            haps::security::configure(&home, rules.as_deref(), scanner.as_deref(), disable)?;
+        }
         Command::ImportRelease(args) => {
             if let Some((path, name, keys)) = haps::release::prepare(&args, &home).await? {
                 if args.publish {
@@ -1514,6 +1536,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             recipe,
             execute,
             install,
+            attest_scan,
         } => {
             let checkout = haps::build::Checkout::fetch(
                 SourceInfo {
@@ -1526,6 +1549,24 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             println!("{}", serde_json::to_string_pretty(&checkout.recipe)?);
             if execute {
                 let keys = own_keys(&home, &config)?;
+                let scan = if haps::security::enabled(&home) {
+                    Some(haps::security::scan_source(
+                        &home,
+                        checkout
+                            .recipe
+                            .package
+                            .source
+                            .as_ref()
+                            .context("source is missing")?,
+                        &checkout.root(),
+                    )?)
+                } else {
+                    ensure!(
+                        !attest_scan,
+                        "enable source scans with haps security --rules FILE first"
+                    );
+                    None
+                };
                 let payload = checkout.execute()?;
                 let repo = Repository::local(home.join("built-packages"))?;
                 let release = repo
@@ -1533,6 +1574,17 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     .await?;
                 if install {
                     installation.install(&repo, &release).await?;
+                }
+                if let Some(report) = scan {
+                    let report = haps::security::bind_report(&home, &release, report)?;
+                    if attest_scan {
+                        publish_scan(
+                            &home,
+                            &config,
+                            haps::security::attestation(&keys, &release, &report)?,
+                        )
+                        .await?;
+                    }
                 }
                 println!("Built {} {}", release.identity(), release.event.id);
             } else {
@@ -2074,6 +2126,18 @@ async fn execute(mut cli: Cli) -> Result<u8> {
 
 fn networking_enabled(config: &Config) -> bool {
     config.starting_point.is_some() || std::env::var_os("NOSTR_RELAYS").is_some()
+}
+
+async fn publish_scan(home: &Path, config: &Config, event: Event) -> Result<()> {
+    let mut comments = load_comments(home)?;
+    comments.ingest(event.clone())?;
+    save_comments(home, &comments)?;
+    publish_feedback(home, config, &event).await?;
+    eprintln!(
+        "Signed source scan: {} (evidence only; no release endorsement)",
+        event.id
+    );
+    Ok(())
 }
 
 async fn publish_feedback(home: &Path, config: &Config, event: &Event) -> Result<()> {

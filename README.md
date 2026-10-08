@@ -313,6 +313,36 @@ Discovered package locations can be `htree://` directories, resolved from signed
 Hashtree roots and read as verified content. This is separate from Git source builds. Catalog signatures, publisher pins, content hashes, and
 rollback checks remain enforced.
 
+### Automatic checks for source builds
+
+On Omarchy, other Linux distributions, or macOS, install Semgrep and enable a local rules
+file once for your Haps home:
+
+```sh
+haps security --rules /path/to/reviewed-security-rules.yaml
+# Optionally select the Semgrep executable with --scanner /path/to/semgrep.
+haps build REPOSITORY --rev FULL_COMMIT_HASH --execute --install
+# Explicitly share the passing scan after the build and installation succeed:
+haps build REPOSITORY --rev FULL_COMMIT_HASH --execute --install --attest-scan
+haps security             # Show the policy.
+haps security --disable   # Retain reports, but stop requiring scans.
+```
+
+Haps copies and hash-pins the selected rules, then scans the pinned source before
+any build command runs. Findings, scanner errors, timeouts, empty scans, and
+unsupported source symlinks/submodules stop the build. Package ignore files and
+`nosemgrep` comments cannot suppress the review. Prebuilt binary installs and
+updates are unaffected. Python 3.9+ is required; `HAPS_PYTHON` can select it.
+
+Reports stay private under `HAPS_HOME/security`. `--attest-scan` shares a signed
+NIP-22 release comment containing the source commit, release/manifest identifiers,
+scanner version, rules/report hashes, time, and coverage counts. It shares no
+source excerpts or local paths. This evidence does **not** count as an endorsement
+or satisfy `--require-attestations`; a scan reports no findings under its selected
+rules, not a safety guarantee. Scanner telemetry and version checks are disabled.
+Scans do not audit unvendored dependencies, sandbox builds, or establish binary
+provenance. AI review and binary analysis are not implemented.
+
 ### Social discovery and release attestations
 
 ```sh
