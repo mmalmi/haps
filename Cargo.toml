@@ -1,6 +1,6 @@
 [package]
 name = "haps"
-version = "0.1.11"
+version = "0.1.12"
 edition = "2024"
 description = "Hashtree Package System: signed packages, content-addressed distribution, social discovery"
 license = "MIT"
