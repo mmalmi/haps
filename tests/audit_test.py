@@ -79,16 +79,18 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         self.assertEqual(out.returncode == 0, success, (args, out.stdout, out.stderr))
         return out
 
-    def publish(self, matches=True):
+    def publish(self, matches=True, version='1.0.0', runnable=False):
         def git(*args):
             return subprocess.check_output(['git', '-C', str(self.source), *args], stderr=subprocess.DEVNULL, text=True).strip()
         git('init')
         git('config', 'user.name', 'Test')
         git('config', 'user.email', 'test@example.invalid')
         target = self.run_cli('target').stdout.strip()
-        spec = f'name="hello"\nversion="1.0.0"\ntarget={json.dumps(target)}\ndescription="Audit fixture"\n[commands]\nhello="hello"\n'
+        spec = f'name="hello"\nversion="{version}"\ntarget={json.dumps(target)}\ndescription="Audit fixture"\n[commands]\nhello="hello"\n'
         marker = self.root / 'build-called'
-        (self.source / 'build.py').write_text(f'from pathlib import Path\nPath({str(marker)!r}).write_text("built")\nPath("hello").write_bytes(b"expected")\n')
+        content = b'#!/usr/bin/env python3\nprint("Haps audit test passed")\n' if runnable else b'expected'
+        marker_command = '' if runnable else f'Path({str(marker)!r}).write_text("built")\n'
+        (self.source / 'build.py').write_text(f'from pathlib import Path\n{marker_command}Path("hello").write_bytes({content!r})\n')
         recipe = '[package]\n' + spec.replace('[commands]', '[package.commands]')
         recipe += '\n[build]\ncommands = [[' + json.dumps(sys.executable) + ', "build.py"]]\n[build.artifacts]\nhello="hello"\n'
         (self.source / 'haps-build.toml').write_text(recipe)
@@ -99,11 +101,57 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         manifest = self.root / 'haps.toml'
         manifest.write_text(spec)
         payload = self.root / 'payload'
-        payload.mkdir()
-        (payload / 'hello').write_bytes(b'expected' if matches else b'publisher mismatch')
+        payload.mkdir(exist_ok=True)
+        (payload / 'hello').write_bytes(content if matches else b'publisher mismatch')
         repository = self.root / 'repo'
         self.release = json.loads(self.run_cli('pack', str(manifest), '--payload', str(payload), '--out', str(repository), home=self.publisher).stdout)
-        self.run_cli('source', 'add', 'fixture', str(repository), '--author', self.author)
+        if not getattr(self, 'source_added', False):
+            self.run_cli('source', 'add', 'fixture', str(repository), '--author', self.author)
+            self.source_added = True
+
+    def test_audit_bypass_is_per_operation_and_preserves_the_threshold(self):
+        self.publish()
+        self.run_cli('install', 'hello', '--require-attestations', '2', success=False)
+        out = self.run_cli('install', 'hello', '--require-attestations', '2', '--allow-unaudited', '--json')
+        self.assertEqual(json.loads(out.stdout)['status'], 'installed')
+        self.assertIn('audit requirement', out.stderr)
+        self.assertFalse((self.root / 'agent-called').exists())
+        self.assertFalse((self.root / 'build-called').exists())
+        self.assertEqual(json.loads(self.run_cli('info', 'hello', '--json').stdout)['audits'], [])
+        self.publish(version='1.1.0')
+        self.run_cli('update', 'hello', success=False)
+        self.run_cli('update', 'hello', '--allow-unaudited')
+        receipts = json.loads((self.home / 'installed.json').read_text())
+        self.assertEqual(next(iter(receipts.values()))['minimum_attestations'], 2)
+        self.run_cli('rollback', 'hello', success=False)
+        self.run_cli('rollback', 'hello', '--allow-unaudited')
+        self.run_cli('install', 'hello', '--version', '1.0.0', success=False)
+        self.assertFalse((self.home / 'audits').exists())
+
+    def test_audit_bypass_keeps_warnings_and_explicit_review_separate(self):
+        self.publish()
+        self.run_cli('install', 'hello', '--audit', '--allow-unaudited', success=False)
+        self.run_cli('install', 'hello', '--audit-agent', 'codex', '--allow-unaudited', success=False)
+        self.run_cli('warn', self.release['id'], '--note', 'Fixture warning')
+        self.run_cli('install', 'hello', '--allow-unaudited', success=False)
+        self.run_cli('install', 'hello', '--allow-unaudited', '--allow-warnings')
+
+    def test_one_local_review_only_fills_one_missing_audit(self):
+        self.publish()
+        denied = self.run_cli('install', 'hello', '--require-attestations', '2', '--audit-agent', 'codex', success=False)
+        self.assertIn('more independent audits', denied.stderr)
+        self.assertFalse((self.root / 'agent-called').exists())
+        reviewer = self.root / 'independent-reviewer'
+        key = self.run_cli('identity', 'init', home=reviewer).stdout.strip()
+        self.run_cli('follow', key)
+        claim = self.root / 'independent-audit.json'
+        self.run_cli('attest', self.release['id'], '--audited', '--provenance', 'Reviewed fixture payload',
+                     '--note', 'Independent fixture review', '--out', str(claim), home=reviewer)
+        self.run_cli('import', str(claim))
+        self.run_cli('install', 'hello', '--require-attestations', '2', '--audit-agent', 'codex')
+        self.assertTrue((self.root / 'agent-called').exists())
+        info = json.loads(self.run_cli('info', 'hello', '--json').stdout)
+        self.assertEqual(len(info['audits']), 2)
 
     def test_default_gate_and_explicit_audit_with_unverified_provenance(self):
         self.publish()

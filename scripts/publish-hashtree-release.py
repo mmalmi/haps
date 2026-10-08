@@ -7,6 +7,7 @@ lookup must never turn an existing release directory into a new empty tree.
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -64,4 +65,7 @@ with tempfile.TemporaryDirectory(prefix='haps-release-') as temp:
     print('Verified all five platform archives; publishing the same bytes to Hashtree.', flush=True)
     subprocess.run(['htree', 'release', 'publish', 'releases/haps', tag, match[1],
                     '--expected-root', args.expected_root], check=True)
-    subprocess.run([*haps_args, '--publish'], check=True)
+    # Local storage acknowledgements do not establish public discovery.
+    public_env = dict(os.environ, HTREE_PREFER_LOCAL_DAEMON='false', HTREE_LOCAL_DAEMON_ONLY='false')
+    public_env.pop('NOSTR_RELAYS', None)
+    subprocess.run([*haps_args, '--publish'], check=True, env=public_env)

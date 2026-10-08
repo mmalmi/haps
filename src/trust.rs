@@ -433,8 +433,8 @@ impl Trust {
             .collect()
     }
 
-    /// Mandatory installation policy. Neither trust overrides nor a zero legacy
-    /// attestation threshold can remove the requirement for an explicit audit.
+    /// Default installation policy. Trust overrides and a zero legacy threshold
+    /// do not remove the audit requirement; a CLI audit bypass is separate.
     pub fn authorize_install(
         &self,
         release: &Release,
@@ -447,7 +447,7 @@ impl Trust {
         let count = self.audits(release).len();
         ensure!(
             count >= minimum_audits,
-            "release requires {minimum_audits} audit(s) from your social graph; found {count}. Use Audit and install, or record an explicit audit with haps attest --audited --provenance TEXT --note TEXT"
+            "release requires {minimum_audits} audit(s) from your social graph; found {count}. Use Audit and install, record an explicit audit with haps attest --audited --provenance TEXT --note TEXT, or bypass for this operation with --allow-unaudited"
         );
         Ok(())
     }

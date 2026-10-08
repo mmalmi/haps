@@ -28,7 +28,7 @@ Implemented:
 - Author ranking using the actual `nostr-social-graph` library, imported signed
   follow/mute events, and explicit handling of ambiguous package names.
 - Release-specific signed audits, vouches, trusted warnings, and revocation. At least
-  one audit from your social graph is required; higher thresholds persist on updates.
+  one audit from your social graph is required by default; higher thresholds persist on updates.
 - Staged installation, target checks, publisher-preserving updates, previous-version
   rollback, and local removal. Downloads must finish before activation changes.
 - Signed [NIP-22](https://github.com/nostr-protocol/nips/blob/master/22.md) comments
@@ -348,15 +348,26 @@ rules, not a safety guarantee. Scanner telemetry and version checks are disabled
 Scans do not audit unvendored dependencies, sandbox builds, or establish binary
 provenance. Agent source review and rebuild comparison are described below. A scan alone does not satisfy the audit requirement.
 
-### Release audits (development version)
+### Release audits
 
-Every install, update, and rollback requires at least one **explicit audit of the
+By default, every install, update, and rollback requires at least one **explicit audit of the
 exact signed release** from your social graph. Ordinary vouches and clean scanner
 reports do not count. Your own completed review counts for you; a publisher's own
 audit does not count for other readers. Muted reviewers, withdrawals, and audits
 of another version or platform do not count. Existing installations keep working,
-but their next update or rollback needs an audit. These commands are in the
-development version after 0.1.12; they are not in the current download yet.
+but their next update or rollback needs an audit. These commands are available from Haps 0.1.13.
+
+To bypass the audit threshold for one operation, use `--allow-unaudited`:
+
+```sh
+haps install alice/hello --allow-unaudited
+haps update alice/hello --allow-unaudited
+haps rollback alice/hello --allow-unaudited
+```
+
+This records no audit and preserves your configured threshold for future operations.
+Signatures, payload integrity, social filtering, direct mutes, and release warnings
+still apply. It cannot be combined with audit-review options.
 
 When an interactive install lacks an audit, Haps offers **Audit and install**:
 
@@ -458,7 +469,7 @@ opinions; your direct mute always blocks installation.
 An explicit `haps install npub.../package` (or public key/alias plus package)
 can install outside that filter, with a warning. It does not add trust or change
 future bare-name updates. `--allow-untrusted` remains an explicit override. Neither
-form bypasses direct mutes, release warnings, or the mandatory audit requirement. `--require-attestations N` can raise the audit threshold; zero never disables it.
+form bypasses direct mutes, release warnings, or the audit requirement. `--require-attestations N` can raise the audit threshold; zero never disables it.
 A vouch approves only the exact signed release; a publisher's self-attestation does
 not count. A new version needs its own vouches if its publisher is outside the
 eligible graph. Haps never silently chooses an older vouched-for version instead.
@@ -568,7 +579,7 @@ esac
 
 The signing command publishes its event through the same durable outbox as
 package announcements. Readers follow the agent and inspect its exact-release
-findings with `haps info`. These scanner vouches do not satisfy the mandatory audit
+findings with `haps info`. These scanner vouches do not satisfy the default audit
 requirement; only a completed explicit audit with provenance does.
 Exports remain useful for offline transfer, but are not required for discovery.
 Keep prior findings unless new evidence changes them; use `--revoke` to withdraw
@@ -930,5 +941,7 @@ Installer checks can be run without downloading or executing public binaries:
 
 ```sh
 python3 -m unittest discover -s tests -p '*_test.py'
+# Optional full terminal audit/rebuild/install with an installed, signed-in agent:
+HAPS_LIVE_AUDIT=1 python3 -m unittest discover -s tests -p audit_live_test.py
 actionlint .github/workflows/release.yml .github/workflows/ci.yml
 ```

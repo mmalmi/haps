@@ -89,11 +89,11 @@ Try the staged app's basic functionality inside a VM or container before sharing
 After publishing, test discovery and installation from a separate Haps profile as
 shown below. A successful install alone does not prove the app works.
 
-In the development version after 0.1.12, installation also requires an explicit
-audit of the exact release. Another reader needs an audit from their social graph;
+From 0.1.13, installation also requires an explicit
+audit of the exact release by default (`--allow-unaudited` bypasses it for one operation). Another reader needs an audit from their social graph;
 your publisher self-audit only counts for your own installation. Provide pinned
 source and a matching `haps-build.toml` to support Audit and install. See the
-[audit workflow](README.md#release-audits-development-version) for source review,
+[audit workflow](README.md#release-audits) for source review,
 rebuild comparison, and approvals with unverified reproducibility stated.
 
 ## Managed event catalogs

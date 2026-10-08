@@ -230,9 +230,12 @@ enum Command {
         /// Override trusted release warnings for this operation only.
         #[arg(long)]
         allow_warnings: bool,
-        /// Require this many explicit audits (at least one is always required).
+        /// Require this many explicit audits (at least one unless explicitly bypassed).
         #[arg(long, default_value_t = 1)]
         require_attestations: usize,
+        /// Bypass the audit threshold for this operation only; preserve the saved policy.
+        #[arg(long, conflicts_with_all = ["audit", "audit_agent", "audit_model", "publish_audit"])]
+        allow_unaudited: bool,
         /// Review source, run its build with your user permissions, and require a matching payload.
         #[arg(long)]
         audit: bool,
@@ -250,6 +253,9 @@ enum Command {
         /// Override trusted release warnings for this operation only.
         #[arg(long)]
         allow_warnings: bool,
+        /// Bypass the audit threshold for this operation only; preserve the saved policy.
+        #[arg(long, conflicts_with_all = ["audit", "audit_agent", "audit_model", "publish_audit"])]
+        allow_unaudited: bool,
         #[arg(long)]
         audit: bool,
         #[command(flatten)]
@@ -298,7 +304,12 @@ enum Command {
         json: bool,
     },
     /// Activate the previous installed version.
-    Rollback { package: String },
+    Rollback {
+        package: String,
+        /// Bypass the audit threshold for this operation only; preserve the saved policy.
+        #[arg(long)]
+        allow_unaudited: bool,
+    },
     /// Remove from the installed set. Retain cached files for recovery.
     Remove { package: String },
     /// Follow a publisher locally; optionally export the signed Nostr follow event.
@@ -678,6 +689,7 @@ struct AuditOptions<'a> {
     non_interactive: bool,
     allow_untrusted: bool,
     allow_warnings: bool,
+    allow_unaudited: bool,
     minimum: usize,
 }
 
@@ -691,6 +703,10 @@ async fn ensure_audited(
     use std::io::IsTerminal;
     let release = &candidate.release;
     trust.authorize_with_policy(release, options.allow_untrusted, 0, options.allow_warnings)?;
+    if options.allow_unaudited {
+        eprintln!("Warning: bypassing the audit requirement for this operation only.");
+        return Ok(());
+    }
     let enough = trust.audits(release).len() >= options.minimum.max(1);
     let requested = options.requested
         || options.review.audit_agent.is_some()
@@ -1496,7 +1512,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         | Command::Update { package, .. }
         | Command::Run { package, .. }
         | Command::Path { package }
-        | Command::Rollback { package }
+        | Command::Rollback { package, .. }
         | Command::Remove { package }
         | Command::Comment { package, .. }
         | Command::Comments { package, .. } => {
@@ -2179,6 +2195,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             allow_untrusted,
             allow_warnings,
             require_attestations,
+            allow_unaudited,
             audit,
             audit_review,
             json,
@@ -2218,16 +2235,11 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     non_interactive,
                     allow_untrusted: allow_untrusted || package.contains('/'),
                     allow_warnings,
+                    allow_unaudited,
                     minimum: require_attestations,
                 },
             )
             .await?;
-            trust.authorize_install(
-                &candidate.release,
-                allow_untrusted || package.contains('/'),
-                require_attestations,
-                allow_warnings,
-            )?;
             if !trust.socially_trusted(&candidate.release) {
                 eprintln!(
                     "Warning: {} is not authored or vouched for by your social graph (or its author/vouchers are overmuted); proceeding with your explicit choice.",
@@ -2251,6 +2263,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             package,
             allow_untrusted,
             allow_warnings,
+            allow_unaudited,
             audit,
             audit_review,
             json,
@@ -2286,16 +2299,11 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     non_interactive,
                     allow_untrusted: allow_untrusted || package.contains('/'),
                     allow_warnings,
+                    allow_unaudited,
                     minimum: receipt.minimum_attestations.max(1),
                 },
             )
             .await?;
-            trust.authorize_install(
-                &candidate.release,
-                allow_untrusted || package.contains('/'),
-                receipt.minimum_attestations,
-                allow_warnings,
-            )?;
             if !trust.socially_trusted(&candidate.release) {
                 eprintln!(
                     "Warning: {} is not authored or vouched for by your social graph (or its author/vouchers are overmuted); proceeding with your explicit choice.",
@@ -2386,12 +2394,20 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 println!("{}", serde_json::to_string(&releases)?);
             }
         }
-        Command::Rollback { package } => {
+        Command::Rollback {
+            package,
+            allow_unaudited,
+        } => {
             let receipt = installation.receipt(&package)?;
             let release =
                 Release::verify(receipt.previous.context("no previous version retained")?)?;
             refresh_feedback(&home, &config, &mut trust, std::slice::from_ref(&release)).await?;
-            trust.authorize_install(&release, true, receipt.minimum_attestations, false)?;
+            if allow_unaudited {
+                trust.authorize_with_policy(&release, true, 0, false)?;
+                eprintln!("Warning: bypassing the audit requirement for this operation only.");
+            } else {
+                trust.authorize_install(&release, true, receipt.minimum_attestations, false)?;
+            }
             installation.rollback(&package)?;
             println!("Rolled back {package}");
         }

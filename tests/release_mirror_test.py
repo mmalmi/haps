@@ -2,6 +2,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import runpy
 import subprocess
@@ -74,6 +75,9 @@ class ReleaseHistoryGuard(unittest.TestCase):
                     self.assertFalse(published)
                 else:
                     self.assertTrue(published)
+                    self.assertEqual(kwargs['env']['HTREE_PREFER_LOCAL_DAEMON'], 'false')
+                    self.assertEqual(kwargs['env']['HTREE_LOCAL_DAEMON_ONLY'], 'false')
+                    self.assertNotIn('NOSTR_RELAYS', kwargs['env'])
             elif args[:3] == ['htree', 'release', 'publish']:
                 published.append(args)
             else:
@@ -81,7 +85,9 @@ class ReleaseHistoryGuard(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0)
 
         with patch('subprocess.check_output', side_effect=read), \
-                patch('subprocess.run', side_effect=run):
+                patch('subprocess.run', side_effect=run), \
+                patch.dict(os.environ, HTREE_LOCAL_DAEMON_ONLY='true',
+                           HTREE_PREFER_LOCAL_DAEMON='true', NOSTR_RELAYS='ws://127.0.0.1:9999'):
             self.run_mirror()
         self.assertEqual(haps, ['--check', '--publish'])
         self.assertEqual(published, [['htree', 'release', 'publish', 'releases/haps',
