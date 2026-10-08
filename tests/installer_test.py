@@ -18,8 +18,8 @@ class InstallerTests(unittest.TestCase):
         self.stub.mkdir()
         self.bin = self.root / 'bin with spaces'
         self.bin.mkdir()
-        (self.bin / 'haps').write_text('old executable')
-        self.env = dict(os.environ, PATH=str(self.stub) + os.pathsep + os.environ['PATH'],
+        self.managed(self.bin)
+        self.env = dict(os.environ, PATH=os.pathsep.join([str(self.stub), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin']),
                         HOME=str(self.root), HAPS_INSTALL_DIR=str(self.bin),
                         HAPS_RELEASE_BASE_URL='https://releases.example/haps',
                         FIXTURES=str(self.root), HAPS_TEST_OS='Linux', HAPS_TEST_ARCH='x86_64')
@@ -38,6 +38,23 @@ if not source.exists(): sys.exit(22)
 shutil.copyfile(source, output)
 ''')
         (self.root / 'version.txt').write_text('v0.1.3\n')
+
+    def managed(self, directory, version='0.1.2'):
+        payload = directory / '.haps' / f'v{version}.fixture'
+        payload.mkdir(parents=True, exist_ok=True)
+        (payload / 'haps').write_text(f'#!/bin/sh\necho haps {version}\n')
+        (payload / 'haps').chmod(0o755)
+        link = directory / 'haps'
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(f'.haps/v{version}.fixture/haps')
+
+    def foreign(self, directory):
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / 'haps'
+        path.write_text('#!/bin/sh\necho haps 0.1.1\n')
+        path.chmod(0o755)
+        return path
 
     def tool(self, name, content):
         p = self.stub / name
@@ -75,7 +92,7 @@ shutil.copyfile(source, output)
             with self.subTest(target=target):
                 self.env.update(HAPS_TEST_OS=system, HAPS_TEST_ARCH=machine)
                 self.archive(target)
-                result = self.run_installer()
+                result = self.run_installer('--force')
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(subprocess.check_output([str(self.bin/'haps'), '--version'], text=True).strip(), 'haps 0.1.3')
                 self.assertFalse(list(self.bin.glob('.haps.*')))
@@ -88,7 +105,7 @@ shutil.copyfile(source, output)
                 if failure == 'checksum': archive.write_bytes(b'corrupt')
                 result = self.run_installer()
                 self.assertNotEqual(result.returncode, 0)
-                self.assertEqual((self.bin/'haps').read_text(), 'old executable')
+                self.assertEqual(os.readlink(self.bin/'haps'), '.haps/v0.1.2.fixture/haps')
                 self.assertFalse(list(self.bin.glob('.haps.*')))
 
     def test_pinned_version_and_invalid_input(self):
@@ -108,7 +125,7 @@ shutil.copyfile(source, output)
         first = (self.bin / 'haps').resolve()
         self.assertTrue((first.parent / 'libexec/git-remote-htree').exists())
         self.assertEqual((self.bin / 'htree').read_text(), 'separately managed htree')
-        result = self.run_installer()
+        result = self.run_installer('--force')
         self.assertEqual(result.returncode, 0, result.stderr)
         second = (self.bin / 'haps').resolve()
         self.assertNotEqual(first, second)
@@ -118,7 +135,107 @@ shutil.copyfile(source, output)
     def test_broken_bundled_helper_preserves_existing_install(self):
         self.archive(bundled=True, broken_helper=True)
         self.assertNotEqual(self.run_installer().returncode, 0)
-        self.assertEqual((self.bin / 'haps').read_text(), 'old executable')
+        self.assertEqual(os.readlink(self.bin/'haps'), '.haps/v0.1.2.fixture/haps')
+
+    def test_current_managed_version_skips_download_and_explains_force(self):
+        self.managed(self.bin, '0.1.3')
+        original = os.readlink(self.bin / 'haps')
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('already installed', result.stdout)
+        self.assertIn('--force', result.stdout)
+        self.assertEqual(os.readlink(self.bin / 'haps'), original)
+        self.assertEqual((self.root / 'requests').read_text().splitlines(), ['https://releases.example/haps/latest/version.txt'])
+
+    def test_fresh_install_explains_path_setup(self):
+        (self.bin / 'haps').unlink()
+        self.archive(bundled=True)
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Installing Haps 0.1.3', result.stdout)
+        self.assertIn('to your PATH', result.stdout)
+        self.assertTrue((self.bin / 'haps').is_symlink())
+
+    def test_default_reuses_managed_installation_on_path(self):
+        self.env.pop('HAPS_INSTALL_DIR')
+        self.env['PATH'] = str(self.bin) + os.pathsep + self.env['PATH']
+        self.archive()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'Found Haps 0.1.2 at {self.bin}/haps', result.stdout)
+        self.assertIn('Updating Haps 0.1.2 to 0.1.3', result.stdout)
+        self.assertFalse((self.root / '.local/bin').exists())
+
+    def test_default_preserves_cargo_and_explains_its_update_route(self):
+        self.env.pop('HAPS_INSTALL_DIR')
+        cargo = self.root / '.cargo/bin'
+        existing = self.foreign(cargo)
+        self.env['PATH'] = str(cargo) + os.pathsep + self.env['PATH']
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('cargo install haps --locked', result.stdout)
+        self.assertIn('No changes made', result.stdout)
+        self.assertIn('--bin-dir', result.stdout)
+        self.assertTrue(existing.is_file())
+        self.assertFalse((self.root / 'requests').exists())
+
+    def test_haps_managed_launcher_uses_self_update(self):
+        self.env.pop('HAPS_INSTALL_DIR')
+        directory = self.root / 'haps-home/bin'
+        path = self.foreign(directory)
+        path.write_text('#!/bin/sh\n# Managed by Haps\necho haps 0.1.3\n')
+        self.env['PATH'] = str(directory) + os.pathsep + self.env['PATH']
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('haps update haps', result.stdout)
+        self.assertFalse((self.root / 'requests').exists())
+
+    def test_broken_version_probe_does_not_skip_repair(self):
+        self.managed(self.bin, '0.1.3')
+        (self.bin / 'haps').write_text('#!/bin/sh\necho haps 0.1.3\nexit 1\n')
+        self.archive()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Downloading', result.stdout)
+        self.assertEqual(subprocess.check_output([str(self.bin / 'haps'), '--version'], text=True).strip(), 'haps 0.1.3')
+
+    def test_explicit_separate_install_explains_path_shadowing(self):
+        other = self.root / 'other'
+        existing = self.foreign(other)
+        original = existing.read_bytes()
+        self.env['PATH'] = str(other) + os.pathsep + str(self.bin) + os.pathsep + self.env['PATH']
+        self.archive()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(f'PATH still selects {existing}', result.stdout)
+        self.assertIn('before', result.stdout)
+        self.assertEqual(existing.read_bytes(), original)
+
+    def test_foreign_destination_needs_force_and_keeps_symlink_target(self):
+        existing = self.foreign(self.root / 'foreign')
+        original = existing.read_bytes()
+        (self.bin / 'haps').unlink()
+        (self.bin / 'haps').symlink_to(existing)
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--force', result.stderr)
+        self.assertFalse((self.root / 'requests').exists())
+        self.archive()
+        result = self.run_installer('--force')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(existing.read_bytes(), original)
+        self.assertIn('Replacing', result.stdout)
+
+    def test_latest_cannot_downgrade_but_explicit_version_can(self):
+        self.managed(self.bin, '0.1.12')
+        self.archive()
+        result = self.run_installer()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('newer', result.stdout)
+        self.assertEqual(os.readlink(self.bin / 'haps'), '.haps/v0.1.12.fixture/haps')
+        result = self.run_installer('--version', 'v0.1.3')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('Downgrading', result.stdout)
 
 if __name__ == '__main__':
     unittest.main()

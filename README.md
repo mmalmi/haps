@@ -56,6 +56,14 @@ that directory to your `PATH` if needed. It does not use sudo or edit shell star
 files. The checksum verifies the download against the release manifest; it is
 served by the same publisher, not a separate trust authority.
 
+Rerunning the installer reports the existing Haps version and location. It reuses
+a script-managed installation found on `PATH`, skips the same version, and keeps
+a newer version unless you explicitly pin an older release or use `--force`.
+Cargo and other installations keep their original update method by default;
+choose `--bin-dir DIR` to install a separate copy. Replacing an unmanaged command
+at the destination requires `--force`. The installer explains when another copy
+still takes precedence on `PATH`. Use `--force` to repair a script-managed install.
+
 To inspect first or pin a version:
 
 ```sh
