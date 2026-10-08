@@ -33,13 +33,8 @@ async fn manager_launcher_tracks_update_rollback_and_removal() -> anyhow::Result
     let bin = installation.link("haps", None)?;
     let launcher = bin.join(if cfg!(windows) { "haps.cmd" } else { "haps" });
     let invoke = |args: &[&str]| -> anyhow::Result<String> {
-        #[cfg(windows)]
-        let mut command = {
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(&launcher);
-            c
-        };
-        #[cfg(not(windows))]
+        // Let Rust apply Windows batch-file quoting; cmd /C with ordinary
+        // arguments strips the launcher's quotes when its path contains spaces.
         let mut command = Command::new(&launcher);
         let output = command
             .args(args)
