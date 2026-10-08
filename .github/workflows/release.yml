@@ -35,7 +35,11 @@ jobs:
           python3 - <<'PY'
           import os, tomllib
           with open('Cargo.toml', 'rb') as file:
-              assert 'v' + tomllib.load(file)['package']['version'] == os.environ['TAG']
+              package = tomllib.load(file)['package']
+          with open('haps-build.toml', 'rb') as file:
+              recipe = tomllib.load(file)['package']
+          assert 'v' + package['version'] == os.environ['TAG']
+          assert recipe['name'] == package['name'] and recipe['version'] == package['version']
           PY
       - name: Check pinned companions are publicly available
         run: python3 scripts/bundle.py
