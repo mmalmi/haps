@@ -20,7 +20,8 @@ class InstallerTests(unittest.TestCase):
         self.bin.mkdir()
         self.managed(self.bin)
         self.env = dict(os.environ, PATH=os.pathsep.join([str(self.stub), '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin', '/bin']),
-                        HOME=str(self.root), HAPS_INSTALL_DIR=str(self.bin),
+                        HOME=str(self.root), CARGO_HOME=str(self.root / '.cargo'),
+                        HAPS_INSTALL_DIR=str(self.bin),
                         HAPS_RELEASE_BASE_URL='https://releases.example/haps',
                         FIXTURES=str(self.root), HAPS_TEST_OS='Linux', HAPS_TEST_ARCH='x86_64')
         self.tool('uname', '#!/bin/sh\ncase "$1" in -s) echo "$HAPS_TEST_OS";; -m) echo "$HAPS_TEST_ARCH";; esac\n')
