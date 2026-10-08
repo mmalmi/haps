@@ -117,6 +117,7 @@ class ReleaseAdapter(unittest.TestCase):
             run(reader, 'identity', 'init')
             run(reader, 'follow', publisher)
             run(reader, 'source', 'add', 'tools', catalog, '--author', publisher)
+            run(reader, 'attest', f'{publisher}/haps', '--version', '1.0.0', '--audited', '--provenance', 'Test fixture', '--note', 'Reviewed fixture')
             run(reader, 'install', 'haps')
             run(reader, 'link', 'haps')
             launcher = reader / 'bin/haps'
@@ -124,6 +125,7 @@ class ReleaseAdapter(unittest.TestCase):
                 return subprocess.check_output([str(launcher), '--version'], env=env, text=True).strip()
             self.assertEqual(linked_version(), 'haps 1.0.0')
             prepare('1.1.0')
+            run(reader, 'attest', f'{publisher}/haps', '--version', '1.1.0', '--audited', '--provenance', 'Test fixture', '--note', 'Reviewed updated fixture')
             run(reader, 'update', 'haps', binary=launcher)
             self.assertEqual(linked_version(), 'haps 1.1.0')
             run(reader, 'rollback', 'haps', binary=launcher)

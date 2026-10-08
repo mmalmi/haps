@@ -1,3 +1,5 @@
+#[path = "support/audit.rs"]
+mod audit;
 use haps::{
     install::Installation,
     model::{PackageSpec, target},
@@ -71,6 +73,8 @@ async fn manager_launcher_tracks_update_rollback_and_removal() -> anyhow::Result
         "--author",
         &keys.public_key().to_hex(),
     ])?;
+    audit::local(&home, first.event.id)?;
+    audit::local(&home, second.event.id)?;
     // Update through the running manager's launcher, including Windows .cmd.
     invoke(&["update", "haps"])?;
     assert_eq!(installation.receipt("haps")?.current.id, second.event.id);

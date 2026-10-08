@@ -27,8 +27,8 @@ Implemented:
 - Directory and static HTTP(S) sources. Any mirror can serve the signed data.
 - Author ranking using the actual `nostr-social-graph` library, imported signed
   follow/mute events, and explicit handling of ambiguous package names.
-- Release-specific signed attestations, trusted warnings, revocation, and an optional minimum
-  number of attesters from your social graph. The requirement persists on updates.
+- Release-specific signed audits, vouches, trusted warnings, and revocation. At least
+  one audit from your social graph is required; higher thresholds persist on updates.
 - Staged installation, target checks, publisher-preserving updates, previous-version
   rollback, and local removal. Downloads must finish before activation changes.
 - Signed [NIP-22](https://github.com/nostr-protocol/nips/blob/master/22.md) comments
@@ -343,10 +343,98 @@ Reports stay private under `HAPS_HOME/security`. `--attest-scan` shares a signed
 NIP-22 release comment containing the source commit, release/manifest identifiers,
 scanner version, rules/report hashes, time, and coverage counts. It shares no
 source excerpts or local paths. This evidence does **not** count as an endorsement
-or satisfy `--require-attestations`; a scan reports no findings under its selected
+or satisfy the audit requirement; a scan reports no findings under its selected
 rules, not a safety guarantee. Scanner telemetry and version checks are disabled.
 Scans do not audit unvendored dependencies, sandbox builds, or establish binary
-provenance. AI review and binary analysis are not implemented.
+provenance. Agent source review and rebuild comparison are described below. A scan alone does not satisfy the audit requirement.
+
+### Release audits (development version)
+
+Every install, update, and rollback requires at least one **explicit audit of the
+exact signed release** from your social graph. Ordinary vouches and clean scanner
+reports do not count. Your own completed review counts for you; a publisher's own
+audit does not count for other readers. Muted reviewers, withdrawals, and audits
+of another version or platform do not count. Existing installations keep working,
+but their next update or rollback needs an audit. These commands are in the
+development version after 0.1.12; they are not in the current download yet.
+
+When an interactive install lacks an audit, Haps offers **Audit and install**:
+
+1. Choose an installed Codex or Claude Code agent, or review the source yourself.
+   On Omarchy, its supported default agent is shown first. Lazy mise launchers are
+   resolved to an already-installed executable without installing or updating it. Haps does not install
+   agents or sign you in. Python 3 and Git are required.
+2. Haps clones the exact source commit into a private temporary directory and
+   prints its location and committed `haps-build.toml`. Source preparation does
+   not run build commands. Agent review uses a restricted invocation and sends
+   the supplied source snapshot to the agent's configured service.
+3. After a passing review, Haps runs the recipe **with your user permissions**.
+   Builds are not sandboxed. It compares every packaged file, its bytes, and its
+   executable metadata with the signed published payload. Mismatches, failed
+   builds, unavailable agents, or incomplete reviews stop without approval or
+   installation. Temporary checkouts are cleaned up.
+4. Haps signs the result and installs only after the audit policy is satisfied.
+   On first interactive completion, it asks whether to publish this and future
+   audits. It remembers the answer. Without a saved choice, non-interactive
+   audits stay local.
+
+```sh
+haps install alice/hello --audit --audit-agent codex
+haps install alice/hello --audit --audit-agent claude --audit-model MODEL
+haps audit settings --agent codex --model MODEL --publish true
+haps audit settings --model default       # Use the agent's default model.
+haps audit settings --publish false       # Keep subsequent audits local.
+haps install alice/hello --audit --publish-audit false  # Override once.
+```
+
+Audit evidence records the agent, requested model, and model reported by the CLI
+when available. Missing model information stays unspecified; the requested model
+is not presented as independently verified. Model identity and a passing LLM
+review are claims, not guarantees of safety. Reports and signed events are saved
+under `HAPS_HOME/audits`. Publication shares the signed review note, provenance,
+and agent/model metadata through the existing relay outbox; it does not upload
+the source checkout. Inspect what the note contains before sharing it.
+
+For a separate person or agent to review at their own pace:
+
+```sh
+haps audit prepare alice/hello --version 1.0.0
+# Inspect the printed checkout location, source, and haps-build.toml.
+# Use the printed session name and the same Haps home:
+haps audit finish SESSION --note "What I reviewed" --publish false
+haps install alice/hello --version 1.0.0
+```
+
+Prepared checkouts remain in `HAPS_HOME/audits/pending` until you remove them.
+They are private directories, **not execution sandboxes**. Keep the source
+unchanged. `finish` compares it with a fresh checkout of the pinned commit,
+rebuilds from that fresh checkout, and requires the published payload to match.
+External agents can use `--reviewer NAME --model MODEL`; these are recorded as
+user-supplied metadata. They cannot set `binary_match` without Haps doing the
+comparison. Haps does not automatically install after `finish`.
+
+For an exact binary release that cannot be reproduced, a completed review may
+still be explicitly approved with its limits stated:
+
+```sh
+haps attest RELEASE_EVENT_ID --audited \
+  --provenance "Inspected this binary; source-to-binary relationship unverified" \
+  --note "What was reviewed, findings, and limitations"
+```
+
+This explicit `attest` command publishes the signed claim and records
+`binary_match: false`. It does not claim a rebuild succeeded. In contrast,
+**Audit and install always requires a match**. Recipes must describe the exact
+published package. Timestamps, signatures, dependencies, or toolchain differences
+can prevent identical output; Haps does not strip differences to manufacture a
+match. A match connects the reviewed source and build inputs to the payload; it
+does not prove the code safe or independently verify the compiler and dependencies.
+
+The built-in agent adapter currently reviews at most 512 KiB and 2,000 tracked
+UTF-8 source files. Binary inputs, symlinks, submodules, and larger trees require
+manual or external review. It stops rather than silently reviewing a subset.
+`haps build ... --execute --install` also requires a selected source reviewer;
+its result is marked as a local build with no publisher-binary comparison.
 
 ### Social discovery and release attestations
 
@@ -370,13 +458,15 @@ opinions; your direct mute always blocks installation.
 An explicit `haps install npub.../package` (or public key/alias plus package)
 can install outside that filter, with a warning. It does not add trust or change
 future bare-name updates. `--allow-untrusted` remains an explicit override. Neither
-form bypasses direct mutes, release warnings, or `--require-attestations N`.
+form bypasses direct mutes, release warnings, or the mandatory audit requirement. `--require-attestations N` can raise the audit threshold; zero never disables it.
 A vouch approves only the exact signed release; a publisher's self-attestation does
 not count. A new version needs its own vouches if its publisher is outside the
 eligible graph. Haps never silently chooses an older vouched-for version instead.
 
 ```sh
-haps attest alice/hello --version 1.0.0 --note "Built from source; tests pass" --out attestation.json
+haps attest alice/hello --version 1.0.0 --audited \
+  --provenance "Reviewed source and payload; reproducibility unverified" \
+  --note "Describe the completed review" --out attestation.json
 haps install PUBLIC_KEY/hello --require-attestations 1
 haps warn alice/hello --version 1.0.0 --note "Unexpected outbound connection; report: https://example.org/report" --out warning.json
 haps attest RELEASE_EVENT_ID --revoke --note "Withdrawing my earlier endorsement" --out revoked.json
@@ -389,7 +479,7 @@ release event ID directly. Without `--out`, the signed event is saved under
 queued until acknowledged; retry with `haps sync`. Readers fetch findings when
 searching, inspecting or installing that release.
 
-Install output shows **Attested by** and the signed notes. `info --json` includes
+Install output shows **Attested by**, the number of trusted audits, signed notes, and audit provenance. `info --json` includes
 the full signed events and signer keys. Only current positive attestations from
 reachable, non-overmuted members of your graph count; publisher self-attestations, muted signers,
 revocations, and attestations of a different release do not count. A future version
@@ -422,8 +512,7 @@ Withdrawing leaves a neutral claim: it does not endorse the release. For each
 signer and release, the latest signed claim wins across `attest`, `warn`, and
 withdrawals. A new endorsement replaces that signer's earlier warning; an old
 replayed event cannot restore it. Other signers' findings are unaffected. Warnings
-never silently remove or stop an installed app. `rollback` retains its existing
-explicit recovery behavior and does not re-evaluate social policy.
+never silently remove or stop an installed app. `rollback` also checks the retained release against the current audit and warning policy.
 
 For discussion applying to a package across versions, use `haps comment`.
 Endorsements and install-blocking warnings remain tied to exact release hashes.
@@ -479,7 +568,8 @@ esac
 
 The signing command publishes its event through the same durable outbox as
 package announcements. Readers follow the agent and inspect its exact-release
-findings with `haps info`; `--require-attestations 1` can enforce the local policy.
+findings with `haps info`. These scanner vouches do not satisfy the mandatory audit
+requirement; only a completed explicit audit with provenance does.
 Exports remain useful for offline transfer, but are not required for discovery.
 Keep prior findings unless new evidence changes them; use `--revoke` to withdraw
 your claim. Include scanner versions, checks and evidence in the note.
@@ -633,7 +723,10 @@ kind `37368`, empty content, and the exact release event hash in both
 `["i", "<hash>", "subject"]` and `["d", "<hash>"]`. Required facts are
 `type=haps_release_attestation`, `schema=1`, `approved=true|false`, and a `note`.
 An optional `warning=true|false` defaults to false for older events; approval and
-a warning cannot both be true.
+a warning cannot both be true. An explicit audit also carries one `audit` fact
+containing JSON evidence with `schema="haps.audit.v1"`, `method`, `provenance`,
+`binary_match`, and optional `reviewer` metadata. Only valid explicit audit
+evidence satisfies the install threshold; legacy approvals remain vouches.
 New snapshots include millisecond metadata; Haps compares timestamp, milliseconds,
 then event ID as defined by the shared helpers. `warn` writes `approved=false` and
 `warning=true`; `--revoke` writes both false.
@@ -670,9 +763,7 @@ attributes, and installer packages are rejected or unsupported. OS integration
 is currently limited to Linux desktop launchers and the optional Omarchy menu.
 Only bundles whose required files and metadata fit this format can be published;
 verify each installed macOS bundle with `codesign --verify --deep --strict`.
-Native code is not sandboxed. No build or install hooks
-run during installation. `rollback` explicitly restores a retained local version;
-it does not re-evaluate current social approval of that older version.
+Native code and build recipes are not sandboxed. Ordinary binary installation runs no build or install hooks. `rollback` restores a retained local version only after checking its current audit and warning policy.
 
 ## Package discovery and event catalogs
 
@@ -802,8 +893,9 @@ HAPS_TEST_ISOLATED=1 cargo test --locked --test published_apps -- --ignored --no
 HAPS_TEST_ISOLATED=1 HAPS_TEST_APPS=iris-chat,iris-drive,nostr-vpn cargo test --locked --test published_apps -- --ignored --nocapture
 ```
 
-Public catalog or transport outages fail this acceptance check; they are not
-silently skipped. Ordinary `cargo test` remains independent of public services.
+Public catalog or transport outages fail this acceptance check. A signed release
+without a trusted audit must be blocked; native payload checks run only for
+audited releases. Ordinary `cargo test` remains independent of public services.
 
 The static website lives in `website/public` and deploys with the adjacent Wrangler
 configuration. Publish that directory separately as `haps-site` on hashtree; the

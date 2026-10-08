@@ -1,3 +1,5 @@
+#[path = "support/audit.rs"]
+mod audit;
 use axum::{
     Router,
     extract::{Path, State, WebSocketUpgrade, ws::Message},
@@ -217,6 +219,8 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(run(&["identity", "init"])?.status.success());
+    audit::local(&cli_home, release.event.id)?;
     // Once discovery authenticates the root, installation must keep using it.
     // The relay stops answering subsequent requests, while content stays available.
     delay_ms.store(0, Ordering::Relaxed);

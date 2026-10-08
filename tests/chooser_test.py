@@ -43,7 +43,7 @@ class Catalog:
             self.run(name, 'source', 'add', 'alice', str(self.root / 'alice-repo'), '--author', self.keys['alice'])
             self.run(name, 'alias', 'add', 'alice', self.keys['alice'])
             note = 'Built from source; tests pass.' if name == 'bob' else 'Ran hello on this platform.'
-            event = json.loads(self.run(name, 'attest', 'alice/hello', '--version', '1.0.0', '--note', note, '--json').stdout)
+            event = json.loads(self.run(name, 'attest', 'alice/hello', '--version', '1.0.0', '--note', note, '--audited', '--provenance', 'Test fixture', '--json').stdout)
             saved = self.home(name) / 'attestations' / f'{event["id"]}.json'
             assert json.loads(saved.read_text()) == event
             self.run('reader', 'import', str(saved))
@@ -171,10 +171,9 @@ class ChooserTest(unittest.TestCase):
         term.read_until(b'No trusted attestations')
         term.send(b'\x1b[B\r')
         code, output = term.finish()
-        self.assertEqual(code, 0, output)
-        self.assertIn('Installed buildbot/hello 1.0.0', output)
-        installed = json.loads(self.catalog.run('reader', 'list', '--json').stdout)
-        self.assertEqual(installed[0]['publisher'], self.catalog.keys['buildbot'])
+        self.assertNotEqual(code, 0, output)
+        self.assertIn('audit(s)', output)
+        self.assertEqual(json.loads(self.catalog.run('reader', 'list', '--json').stdout), [])
 
     def test_agents_never_prompt_even_in_a_terminal(self):
         for flags, env in [(['--non-interactive'], {}), ([], {'HAPS_NON_INTERACTIVE': 'true'}), (['--json'], {})]:

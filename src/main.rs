@@ -45,6 +45,12 @@ struct ClaimArgs {
     target: Option<String>,
     #[arg(long)]
     note: String,
+    /// Explicitly record a completed audit of this exact release.
+    #[arg(long, requires = "provenance", conflicts_with = "revoke")]
+    audited: bool,
+    /// State how the binary relates to reviewed source, including unverified claims.
+    #[arg(long, requires = "audited")]
+    provenance: Option<String>,
     /// Withdraw your previous claim without endorsing or warning.
     #[arg(long)]
     revoke: bool,
@@ -55,8 +61,59 @@ struct ClaimArgs {
     json: bool,
 }
 
+#[derive(Args, Default)]
+struct AuditReviewArgs {
+    /// Reviewer: codex, claude, or manual (defaults to your audit settings).
+    #[arg(long)]
+    audit_agent: Option<String>,
+    /// Request a model and record it in the signed audit evidence.
+    #[arg(long)]
+    audit_model: Option<String>,
+    /// Publish this audit, overriding the saved preference for this operation.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    publish_audit: Option<bool>,
+}
+
+#[derive(Subcommand)]
+enum AuditAction {
+    /// Clone pinned source to a private directory for a person or external agent.
+    Prepare {
+        package: String,
+        #[arg(long)]
+        version: Option<semver::Version>,
+    },
+    /// Approve your completed source review, rebuild, and require a binary match.
+    Finish {
+        session: String,
+        #[arg(long)]
+        note: String,
+        /// Name of the external reviewer, recorded as user-supplied metadata.
+        #[arg(long, default_value = "manual")]
+        reviewer: String,
+        /// Model used by the external reviewer (user-supplied, not verified).
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        publish: Option<bool>,
+    },
+    /// Show or set review and publication defaults. Use --model default to clear it.
+    Settings {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        publish: Option<bool>,
+    },
+}
+
 #[derive(Subcommand)]
 enum Command {
+    /// Prepare an external audit, complete it, or configure audit defaults.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+    },
     /// Show, replace, or disable the local social-graph starting point.
     StartingPoint {
         public_key: Option<String>,
@@ -135,6 +192,8 @@ enum Command {
         /// Install the locally signed build after it succeeds.
         #[arg(long, requires = "execute")]
         install: bool,
+        #[command(flatten)]
+        audit_review: AuditReviewArgs,
         /// Share the passing source scan after a successful build and installation.
         #[arg(long, requires = "install")]
         attest_scan: bool,
@@ -171,8 +230,14 @@ enum Command {
         /// Override trusted release warnings for this operation only.
         #[arg(long)]
         allow_warnings: bool,
-        #[arg(long, default_value_t = 0)]
+        /// Require this many explicit audits (at least one is always required).
+        #[arg(long, default_value_t = 1)]
         require_attestations: usize,
+        /// Review source, run its build with your user permissions, and require a matching payload.
+        #[arg(long)]
+        audit: bool,
+        #[command(flatten)]
+        audit_review: AuditReviewArgs,
         /// Emit JSON and never prompt.
         #[arg(long)]
         json: bool,
@@ -185,6 +250,10 @@ enum Command {
         /// Override trusted release warnings for this operation only.
         #[arg(long)]
         allow_warnings: bool,
+        #[arg(long)]
+        audit: bool,
+        #[command(flatten)]
+        audit_review: AuditReviewArgs,
         /// Emit JSON and never prompt.
         #[arg(long)]
         json: bool,
@@ -375,6 +444,15 @@ struct Config {
     starting_point: Option<String>,
     #[serde(default)]
     discovery_defaults_version: u32,
+    #[serde(default)]
+    audit: AuditSettings,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct AuditSettings {
+    agent: Option<String>,
+    model: Option<String>,
+    publish: Option<bool>,
 }
 
 const DISCOVERY_DEFAULTS_VERSION: u32 = 2;
@@ -485,6 +563,210 @@ fn save_trust(home: &Path, trust: &Trust) -> Result<()> {
     atomic_write(
         &home.join("social.json"),
         &serde_json::to_vec_pretty(&trust.events())?,
+    )
+}
+
+fn audit_agent(selected: Option<&str>, interactive: bool) -> Result<String> {
+    if let Some(agent) = selected {
+        ensure!(
+            matches!(agent, "codex" | "claude" | "manual"),
+            "supported audit agents: codex, claude, manual"
+        );
+        return Ok(agent.into());
+    }
+    ensure!(
+        interactive,
+        "choose --audit-agent codex or claude for a non-interactive audit; install and sign in to the chosen agent first"
+    );
+    let agents = haps::audit::agents().unwrap_or_else(|_| {
+        eprintln!("Agent detection needs Python 3; manual review is still available.");
+        vec!["manual".into()]
+    });
+    let labels: Vec<_> = agents
+        .iter()
+        .map(|agent| {
+            if agent == "manual" {
+                "Review it myself".to_owned()
+            } else {
+                format!("Review with {agent}")
+            }
+        })
+        .collect();
+    let choice = dialoguer::Select::new()
+        .with_prompt("Choose how to audit")
+        .items(&labels)
+        .default(0)
+        .interact_opt()?
+        .context("audit cancelled")?;
+    Ok(agents[choice].clone())
+}
+
+async fn record_audit(
+    home: &Path,
+    config: &mut Config,
+    trust: &mut Trust,
+    keys: &Keys,
+    release: &Release,
+    report: (&haps::audit::Evidence, String),
+    publication: (Option<bool>, bool),
+) -> Result<()> {
+    let (evidence, note) = report;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    let mut at = u64::try_from(now)?;
+    for event in trust.events().iter().filter(|event| {
+        event.pubkey == keys.public_key()
+            && parse_attestation(event)
+                .is_ok_and(|claim| claim.release == release.event.id.to_hex())
+    }) {
+        at = at.max(
+            (attestation_time_ms(event)? / 1000)
+                .checked_add(1)
+                .and_then(|t| t.checked_mul(1000))
+                .context("audit timestamp overflow")?,
+        );
+    }
+    let event = haps::trust::attest_audit_at(keys, release.event.id, note, evidence, at)?;
+    trust.ingest(event.clone())?;
+    save_trust(home, trust)?;
+    atomic_write(
+        &home.join("audits").join(format!("{}.json", event.id)),
+        &serde_json::to_vec_pretty(&event)?,
+    )?;
+    eprintln!("Audit: {}", terminal_text(&parse_attestation(&event)?.note));
+    eprintln!("Provenance: {}", terminal_text(&evidence.provenance));
+    if let Some(reviewer) = &evidence.reviewer {
+        eprintln!(
+            "Reviewer: {} | requested model: {} | reported model: {}",
+            terminal_text(&reviewer.agent),
+            terminal_text(
+                reviewer
+                    .requested_model
+                    .as_deref()
+                    .unwrap_or("agent default")
+            ),
+            terminal_text(reviewer.reported_model.as_deref().unwrap_or("not reported"))
+        );
+    }
+    let publish = if let Some(value) = publication.0.or(config.audit.publish) {
+        value
+    } else if publication.1 {
+        let value = dialoguer::Confirm::new()
+            .with_prompt("Publish this and future audits (signed note, provenance, agent/model) to your configured relays?")
+            .default(false).interact()?;
+        config.audit.publish = Some(value);
+        save_config(home, config)?;
+        value
+    } else {
+        false
+    };
+    if publish {
+        publish_feedback(home, config, &event).await?;
+        eprintln!("Audit saved and queued for publication.");
+    } else {
+        eprintln!(
+            "Audit saved locally. Change the default with haps audit settings --publish true."
+        );
+    }
+    Ok(())
+}
+
+struct AuditOptions<'a> {
+    requested: bool,
+    review: &'a AuditReviewArgs,
+    non_interactive: bool,
+    allow_untrusted: bool,
+    allow_warnings: bool,
+    minimum: usize,
+}
+
+async fn ensure_audited(
+    home: &Path,
+    config: &mut Config,
+    trust: &mut Trust,
+    candidate: &Candidate,
+    options: AuditOptions<'_>,
+) -> Result<()> {
+    use std::io::IsTerminal;
+    let release = &candidate.release;
+    trust.authorize_with_policy(release, options.allow_untrusted, 0, options.allow_warnings)?;
+    let enough = trust.audits(release).len() >= options.minimum.max(1);
+    let requested = options.requested
+        || options.review.audit_agent.is_some()
+        || options.review.audit_model.is_some();
+    ensure!(
+        requested || options.review.publish_audit.is_none(),
+        "--publish-audit requires --audit or --audit-agent"
+    );
+    if enough && !requested {
+        return Ok(());
+    }
+    if release.data.package.source.is_none() {
+        ensure!(
+            !requested,
+            "Audit and install requires pinned source. A completed manual audit can be recorded with its provenance"
+        );
+        return trust.authorize_install(release, options.allow_untrusted, options.minimum, options.allow_warnings)
+            .context("Audit and install requires pinned source. A completed manual audit can be recorded with its provenance");
+    }
+    let interactive = !options.non_interactive
+        && std::io::stdin().is_terminal()
+        && std::io::stderr().is_terminal();
+    if !requested && (!interactive || !dialoguer::Confirm::new()
+            .with_prompt("This release needs an audit. Audit and install (review source, run the build recipe, and require a binary match)?")
+            .default(false).interact()?) {
+            return trust.authorize_install(release, options.allow_untrusted, options.minimum, options.allow_warnings);
+    }
+    let agent = audit_agent(
+        options
+            .review
+            .audit_agent
+            .as_deref()
+            .or(config.audit.agent.as_deref()),
+        interactive,
+    )?;
+    let model = options.review.audit_model.clone().or_else(|| {
+        (agent != "manual")
+            .then(|| config.audit.model.clone())
+            .flatten()
+    });
+    // An explicit choice to audit locally also creates an identity if needed.
+    let keys = publishing_keys(home, config)?;
+    *trust = load_trust(home, config)?;
+    let other_audits = trust
+        .audits(release)
+        .iter()
+        .filter(|e| e.pubkey != keys.public_key())
+        .count();
+    ensure!(
+        other_audits + 1 >= options.minimum.max(1),
+        "a self-audit adds one reviewer; more independent audits are required by this installation's policy"
+    );
+    let (evidence, note) = haps::audit::review_and_rebuild(
+        home,
+        release,
+        &candidate.repository,
+        &agent,
+        model.as_deref(),
+        interactive,
+    )
+    .await?;
+    record_audit(
+        home,
+        config,
+        trust,
+        &keys,
+        release,
+        (&evidence, note),
+        (options.review.publish_audit, interactive),
+    )
+    .await?;
+    trust.authorize_install(
+        release,
+        options.allow_untrusted,
+        options.minimum,
+        options.allow_warnings,
     )
 }
 
@@ -927,6 +1209,10 @@ fn attestation_summary(
     } else {
         format!("Attested by {}", names.join(", "))
     };
+    summary.push_str(&format!(
+        "; {} trusted audit(s)",
+        trust.audits(release).len()
+    ));
     let mut warning_names: Vec<_> = trust
         .warnings(release)
         .iter()
@@ -960,6 +1246,15 @@ fn release_json(
             "label": publisher_label(aliases, &event.pubkey.to_hex()), "event": event})
         })
         .collect();
+    let audits: Vec<_> = trust
+        .audits(release)
+        .iter()
+        .map(|event| {
+            serde_json::json!({"signer": event.pubkey.to_hex(),
+            "label": publisher_label(aliases, &event.pubkey.to_hex()),
+            "evidence": haps::trust::parse_audit(event).expect("validated audit"), "event": event})
+        })
+        .collect();
     serde_json::json!({
         "identity": release.identity(),
         "label": release_label(release, aliases),
@@ -969,7 +1264,7 @@ fn release_json(
         "overmuted": trust.overmuted(&release.author()), "socially_trusted": trust.socially_trusted(release),
         "followed_by": trust.followed_by_friends(&release.author()).iter().map(|key| serde_json::json!({"pubkey": key, "label": publisher_label(aliases, key)})).collect::<Vec<_>>(),
         "attesters": trust.attesters(release), "attestations": attestations,
-        "warnings": warnings,
+        "warnings": warnings, "audits": audits, "minimum_audits": 1,
     })
 }
 
@@ -1028,6 +1323,25 @@ fn print_install_start(release: &Release, trust: &Trust, aliases: &BTreeMap<Stri
                 terminal_text(&publisher_label(aliases, &event.pubkey.to_hex())),
                 terminal_text(&claim.note)
             );
+            if let Ok(evidence) = haps::trust::parse_audit(event) {
+                eprintln!(
+                    "      Binary match: {}. {}",
+                    if evidence.binary_match {
+                        "verified by auditor"
+                    } else {
+                        "unverified"
+                    },
+                    terminal_text(&evidence.provenance)
+                );
+                if let Some(reviewer) = evidence.reviewer {
+                    eprintln!(
+                        "      {} · requested model: {} · reported model: {}",
+                        terminal_text(&reviewer.agent),
+                        terminal_text(reviewer.requested_model.as_deref().unwrap_or("default")),
+                        terminal_text(reviewer.reported_model.as_deref().unwrap_or("not reported"))
+                    );
+                }
+            }
         }
     }
 }
@@ -1216,6 +1530,110 @@ async fn execute(mut cli: Cli) -> Result<u8> {
     let installation = Installation::new(home.clone())?.with_progress(progress.clone());
     let is_warning = matches!(&cli.command, Command::Warn(_));
     match cli.command {
+        Command::Audit { action } => match action {
+            AuditAction::Settings {
+                agent,
+                model,
+                publish,
+            } => {
+                if let Some(agent) = agent {
+                    config.audit.agent = Some(audit_agent(Some(&agent), false)?);
+                }
+                if let Some(model) = model {
+                    ensure!(
+                        !model.trim().is_empty()
+                            && model.len() <= 200
+                            && !model.chars().any(char::is_control),
+                        "invalid audit model"
+                    );
+                    config.audit.model = (model != "default").then_some(model);
+                }
+                if publish.is_some() {
+                    config.audit.publish = publish;
+                }
+                save_config(&home, &config)?;
+                println!("{}", serde_json::to_string_pretty(&config.audit)?);
+            }
+            AuditAction::Prepare { package, version } => {
+                let package = resolve_package(&config, &package)?;
+                let choices = candidates(&home, &mut config, None, Some(&package)).await?;
+                let releases = choices
+                    .iter()
+                    .map(|c| c.release.clone())
+                    .collect::<Vec<_>>();
+                refresh_feedback(&home, &config, &mut trust, &releases).await?;
+                let candidate = select(
+                    choices,
+                    &package,
+                    version.as_ref(),
+                    &config.aliases,
+                    &trust,
+                    target(),
+                    Selection {
+                        non_interactive,
+                        include_untrusted: package.contains('/'),
+                    },
+                )?;
+                let directory = haps::audit::prepare(&home, &candidate.release)?;
+                println!("Source to review: {}", directory.join("repo").display());
+                println!("Pinned release: {}", candidate.release.event.id);
+                println!(
+                    "This checkout is private, but it is not a sandbox. Preparation has not executed build commands. Review haps-build.toml and all source; keep the checkout unchanged."
+                );
+                println!(
+                    "After review, run with the same Haps home: haps audit finish {} --note \"What you checked\"",
+                    directory
+                        .file_name()
+                        .context("session name missing")?
+                        .to_string_lossy()
+                );
+                println!(
+                    "Finishing runs the recipe with your user permissions and requires the rebuilt payload to match. Then run haps install {} --version {}.",
+                    release_label(&candidate.release, &config.aliases),
+                    candidate.release.data.package.version
+                );
+            }
+            AuditAction::Finish {
+                session,
+                note,
+                reviewer,
+                model,
+                publish,
+            } => {
+                use std::io::IsTerminal;
+                let interactive = !non_interactive
+                    && std::io::stdin().is_terminal()
+                    && std::io::stderr().is_terminal();
+                let reviewer = haps::audit::Reviewer {
+                    agent: reviewer,
+                    requested_model: model,
+                    reported_model: None,
+                };
+                // Validate metadata and signing capability before running a build.
+                let mut validation = haps::audit::Evidence::manual("External review".into())?;
+                validation.reviewer = Some(reviewer.clone());
+                validation.validate()?;
+                let keys = publishing_keys(&home, &mut config)?;
+                trust = load_trust(&home, &config)?;
+                let (release, evidence) =
+                    haps::audit::finish(&home, &session, &note, reviewer).await?;
+                record_audit(
+                    &home,
+                    &mut config,
+                    &mut trust,
+                    &keys,
+                    &release,
+                    (&evidence, note),
+                    (publish, interactive),
+                )
+                .await?;
+                println!(
+                    "Audited {} ({}) with a matching rebuild. Ready to install.",
+                    release_label(&release, &config.aliases),
+                    release.event.id
+                );
+            }
+        },
         Command::Target | Command::Init(_) => unreachable!(),
         Command::Add {
             package,
@@ -1559,8 +1977,16 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             recipe,
             execute,
             install,
+            audit_review,
             attest_scan,
         } => {
+            ensure!(
+                install
+                    || (audit_review.audit_agent.is_none()
+                        && audit_review.audit_model.is_none()
+                        && audit_review.publish_audit.is_none()),
+                "audit options for build require --install"
+            );
             let checkout = haps::build::Checkout::fetch(
                 SourceInfo {
                     git: repository,
@@ -1572,6 +1998,30 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             println!("{}", serde_json::to_string_pretty(&checkout.recipe)?);
             if execute {
                 let keys = own_keys(&home, &config)?;
+                let reviewed = if install {
+                    use std::io::IsTerminal;
+                    let interactive = !non_interactive
+                        && std::io::stdin().is_terminal()
+                        && std::io::stderr().is_terminal();
+                    let agent = audit_agent(
+                        audit_review
+                            .audit_agent
+                            .as_deref()
+                            .or(config.audit.agent.as_deref()),
+                        interactive,
+                    )?;
+                    let model = audit_review.audit_model.as_deref().or_else(|| {
+                        (agent != "manual")
+                            .then_some(config.audit.model.as_deref())
+                            .flatten()
+                    });
+                    Some((
+                        haps::audit::review(&checkout, &agent, model, interactive)?,
+                        interactive,
+                    ))
+                } else {
+                    None
+                };
                 let scan = if haps::security::enabled(&home) {
                     Some(haps::security::scan_source(
                         &home,
@@ -1596,7 +2046,25 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     .publish(&keys, checkout.recipe.package.clone(), &payload)
                     .await?;
                 if install {
-                    installation.install(&repo, &release).await?;
+                    let (review, interactive) = reviewed.context("source review missing")?;
+                    let evidence = haps::audit::Evidence {
+                        schema: "haps.audit.v1".into(), method: format!("{}-review-local-build", review.reviewer.agent),
+                        provenance: "Built locally from reviewed pinned source and recipe. No publisher binary was compared; dependencies and toolchain are not independently verified.".into(),
+                        binary_match: false,
+                        reviewer: Some(review.reviewer),
+                    };
+                    record_audit(
+                        &home,
+                        &mut config,
+                        &mut trust,
+                        &keys,
+                        &release,
+                        (&evidence, review.note),
+                        (audit_review.publish_audit, interactive),
+                    )
+                    .await?;
+                    trust.authorize_install(&release, true, 1, false)?;
+                    installation.install_with_policy(&repo, &release, 1).await?;
                 }
                 if let Some(report) = scan {
                     let report = haps::security::bind_report(&home, &release, report)?;
@@ -1711,6 +2179,8 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             allow_untrusted,
             allow_warnings,
             require_attestations,
+            audit,
+            audit_review,
             json,
         } => {
             progress.stage("Reading package catalogs");
@@ -1731,13 +2201,28 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     include_untrusted: allow_untrusted,
                 },
             )?;
-            let require_attestations = require_attestations.max(
+            let require_attestations = require_attestations.max(1).max(
                 installation
                     .receipts()?
                     .get(&candidate.release.identity())
                     .map_or(0, |r| r.minimum_attestations),
             );
-            trust.authorize_with_policy(
+            ensure_audited(
+                &home,
+                &mut config,
+                &mut trust,
+                &candidate,
+                AuditOptions {
+                    requested: audit,
+                    review: &audit_review,
+                    non_interactive,
+                    allow_untrusted: allow_untrusted || package.contains('/'),
+                    allow_warnings,
+                    minimum: require_attestations,
+                },
+            )
+            .await?;
+            trust.authorize_install(
                 &candidate.release,
                 allow_untrusted || package.contains('/'),
                 require_attestations,
@@ -1766,6 +2251,8 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             package,
             allow_untrusted,
             allow_warnings,
+            audit,
+            audit_review,
             json,
         } => {
             let receipt = installation.receipt(&package)?;
@@ -1788,7 +2275,22 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     include_untrusted: true,
                 },
             )?;
-            trust.authorize_with_policy(
+            ensure_audited(
+                &home,
+                &mut config,
+                &mut trust,
+                &candidate,
+                AuditOptions {
+                    requested: audit,
+                    review: &audit_review,
+                    non_interactive,
+                    allow_untrusted: allow_untrusted || package.contains('/'),
+                    allow_warnings,
+                    minimum: receipt.minimum_attestations.max(1),
+                },
+            )
+            .await?;
+            trust.authorize_install(
                 &candidate.release,
                 allow_untrusted || package.contains('/'),
                 receipt.minimum_attestations,
@@ -1807,7 +2309,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 .install_with_policy(
                     &candidate.repository,
                     &candidate.release,
-                    receipt.minimum_attestations,
+                    receipt.minimum_attestations.max(1),
                 )
                 .await?;
             progress.clear();
@@ -1885,6 +2387,11 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             }
         }
         Command::Rollback { package } => {
+            let receipt = installation.receipt(&package)?;
+            let release =
+                Release::verify(receipt.previous.context("no previous version retained")?)?;
+            refresh_feedback(&home, &config, &mut trust, std::slice::from_ref(&release)).await?;
+            trust.authorize_install(&release, true, receipt.minimum_attestations, false)?;
             installation.rollback(&package)?;
             println!("Rolled back {package}");
         }
@@ -1957,11 +2464,18 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 version,
                 target: requested_target,
                 note,
+                audited,
+                provenance,
                 revoke,
                 out,
                 json,
             } = args;
             let keys = own_keys(&home, &config)?;
+            ensure!(
+                !is_warning || !audited,
+                "--audited is only valid for an approval"
+            );
+            let audit_evidence = provenance.map(haps::audit::Evidence::manual).transpose()?;
             ensure!(
                 !note.trim().is_empty(),
                 "describe your finding or checked work with --note"
@@ -2046,6 +2560,15 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                         .checked_add(1)
                         .and_then(|seconds| seconds.checked_mul(1000))
                         .context("attestation timestamp overflow")?,
+                )?;
+            }
+            if let Some(evidence) = audit_evidence {
+                event = haps::trust::attest_audit_at(
+                    &keys,
+                    release_id,
+                    parse_attestation(&event)?.note,
+                    &evidence,
+                    attestation_time_ms(&event)?,
                 )?;
             }
             trust.ingest(event.clone())?;

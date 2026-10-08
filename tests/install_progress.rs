@@ -1,3 +1,5 @@
+#[path = "support/audit.rs"]
+mod audit;
 use haps::{
     model::{Manifest, PackageSpec, target},
     repository::Repository,
@@ -169,6 +171,7 @@ async fn install_reports_waits_and_verified_download_before_completion() -> anyh
             "discovery_defaults_version": 2
         }))?,
     )?;
+    audit::record(&home, &author, release.event.id)?;
     let lock = haps::model::lock(&home.join(".cli.lock"))?;
     let mut cli = Running::start(&home, &["install", "hello"]);
     // Even another Haps process holding the home lock must not hide startup.

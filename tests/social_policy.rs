@@ -147,24 +147,23 @@ async fn cli_hides_unknown_packages_but_explicit_publisher_installs_warn() -> an
     let explicit = format!("{}/hello", author.public_key().to_bech32()?);
     let installed = run(&["install", &explicit, "--json"]);
     assert!(
-        installed.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&installed.stderr),
-        String::from_utf8_lossy(&installed.stdout)
+        !installed.status.success(),
+        "an explicit publisher cannot bypass the audit gate"
     );
-    assert!(
-        String::from_utf8_lossy(&installed.stderr)
-            .contains("not authored or vouched for by your social graph")
-    );
-    // An explicit install does not change the graph or make later bare-name updates trusted.
-    assert!(!run(&["update", "hello", "--json"]).status.success());
+    assert!(String::from_utf8_lossy(&installed.stdout).contains("audit(s)"));
     let at = Timestamp::now().as_secs();
     let import = tmp.path().join("events.json");
     fs::write(
         &import,
         serde_json::to_vec(&[
             relations(&me, Kind::ContactList, &[&friend], at),
-            attest_at(&friend, release.event.id, true, "Checked".into(), at * 1000)?,
+            haps::trust::attest_audit_at(
+                &friend,
+                release.event.id,
+                "Checked".into(),
+                &haps::audit::Evidence::manual("Test fixture".into())?,
+                at * 1000,
+            )?,
         ])?,
     )?;
     assert!(run(&["import", import.to_str().unwrap()]).status.success());

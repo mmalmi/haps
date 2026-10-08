@@ -134,7 +134,16 @@ async fn three_users_discover_comments_endorsements_warnings_and_revocations() -
         root,
         "reviewer",
         &relay,
-        &["attest", &id, "--note", "Installer verified", "--json"],
+        &[
+            "attest",
+            &id,
+            "--audited",
+            "--provenance",
+            "Test fixture",
+            "--note",
+            "Installer verified",
+            "--json",
+        ],
     );
     let before: serde_json::Value =
         serde_json::from_str(&ok(root, "reader", &relay, &["info", &package, "--json"]))?;

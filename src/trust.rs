@@ -45,6 +45,58 @@ pub fn attest_at(
     claim_at(keys, release, approved, false, note, at_ms)
 }
 
+/// Explicit audit approval, replacing the signer's previous claim for this release.
+pub fn attest_audit_at(
+    keys: &Keys,
+    release: EventId,
+    note: String,
+    evidence: &crate::audit::Evidence,
+    at_ms: u64,
+) -> Result<Event> {
+    evidence.validate()?;
+    ensure!(
+        !note.trim().is_empty() && note.len() <= 4096,
+        "describe the audit with --note"
+    );
+    let audit = serde_json::to_string(evidence)?;
+    build_fact_snapshot_event_with_created_at_ms(
+        keys,
+        release.to_hex(),
+        [
+            fact("type", &["haps_release_attestation"]),
+            fact("schema", &["1"]),
+            fact("approved", &["true"]),
+            fact("warning", &["false"]),
+            fact("note", &[&note]),
+            fact("audit", &[&audit]),
+        ],
+        [],
+        at_ms / 1000,
+        at_ms,
+    )
+}
+
+pub fn parse_audit(event: &Event) -> Result<crate::audit::Evidence> {
+    let claim = parse_attestation(event)?;
+    ensure!(
+        claim.approved && !claim.warning,
+        "claim does not approve an audit"
+    );
+    let snapshot = parse_fact_snapshot_event(event)?;
+    let facts: Vec<_> = snapshot
+        .facts
+        .iter()
+        .filter(|f| f.predicate == "audit")
+        .collect();
+    ensure!(
+        facts.len() == 1 && facts[0].values.len() == 1,
+        "claim needs one audit record"
+    );
+    let evidence: crate::audit::Evidence = serde_json::from_str(&facts[0].values[0])?;
+    evidence.validate()?;
+    Ok(evidence)
+}
+
 pub fn warn(keys: &Keys, release: EventId, active: bool, note: String) -> Result<Event> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -364,6 +416,40 @@ impl Trust {
     }
     fn relevant_signer(&self, author: &str) -> bool {
         !self.muted(author) && !self.overmuted(author) && self.distance(author).is_some()
+    }
+    /// Explicit audits only; publisher self-approvals count only for that user's
+    /// own local installation, never as an independent audit for other readers.
+    pub fn audits(&self, release: &Release) -> Vec<&Event> {
+        self.events
+            .values()
+            .filter(|event| {
+                let author = event.pubkey.to_hex();
+                (author != release.author() || author == self.root)
+                    && self.relevant_signer(&author)
+                    && parse_attestation(event)
+                        .is_ok_and(|a| a.release == release.event.id.to_hex())
+                    && parse_audit(event).is_ok()
+            })
+            .collect()
+    }
+
+    /// Mandatory installation policy. Neither trust overrides nor a zero legacy
+    /// attestation threshold can remove the requirement for an explicit audit.
+    pub fn authorize_install(
+        &self,
+        release: &Release,
+        allow_untrusted: bool,
+        minimum_audits: usize,
+        allow_warnings: bool,
+    ) -> Result<()> {
+        self.authorize_with_policy(release, allow_untrusted, 0, allow_warnings)?;
+        let minimum_audits = minimum_audits.max(1);
+        let count = self.audits(release).len();
+        ensure!(
+            count >= minimum_audits,
+            "release requires {minimum_audits} audit(s) from your social graph; found {count}. Use Audit and install, or record an explicit audit with haps attest --audited --provenance TEXT --note TEXT"
+        );
+        Ok(())
     }
     /// Current warnings from reachable, non-overmuted graph members.
     /// A followed publisher may warn about its own release (a recall).

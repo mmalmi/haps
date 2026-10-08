@@ -1,3 +1,5 @@
+#[path = "support/audit.rs"]
+mod audit;
 use haps::{
     discovery::{Announcement, Discovery},
     model::{PackageSpec, target},
@@ -179,6 +181,14 @@ async fn announcement_outbox_to_fresh_cli_install_without_source_registration() 
     accept.store(true, Ordering::Relaxed);
     assert_eq!(discovery.flush(&bus).await?, 0);
     let home = temp.path().join("fresh");
+    fs::create_dir_all(&home)?;
+    fs::write(
+        home.join("config.json"),
+        serde_json::to_vec(
+            &serde_json::json!({"identity": publisher.public_key().to_hex(), "sources": {}, "discovery_defaults_version": 2}),
+        )?,
+    )?;
+    audit::record(&home, &publisher, release.event.id)?;
     let output = Command::new(env!("CARGO_BIN_EXE_haps"))
         .env("NOSTR_RELAYS", &relay_url)
         .env("HTREE_CONFIG_DIR", temp.path().join("htree"))
@@ -198,7 +208,7 @@ async fn announcement_outbox_to_fresh_cli_install_without_source_registration() 
     anyhow::ensure!(
         output.status.success(),
         "{}",
-        String::from_utf8_lossy(&output.stderr)
+        String::from_utf8_lossy(&output.stdout)
     );
     serde_json::from_slice::<serde_json::Value>(&output.stdout)?;
     let installation = haps::install::Installation::new(home)?.with_desktop_dir(None);

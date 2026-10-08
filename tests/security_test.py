@@ -120,8 +120,11 @@ commands = [[{json.dumps(sys.executable)}, "build.py"]]
 "hello" = "hello"
 '''
         (self.repo / 'haps-build.toml').write_text(recipe)
+        agent = self.root / 'codex'
+        agent.write_text('#!/usr/bin/env python3\nimport json, pathlib, sys\nsys.stdin.read()\npathlib.Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text(json.dumps({"verdict":"pass", "note":"Reviewed source fixture"}))\n')
+        agent.chmod(0o755)
         env = dict(os.environ, HAPS_NO_DEFAULTS='true', HAPS_PYTHON=sys.executable,
-                   HTREE_CONFIG_DIR=str(self.root / 'hashtree'))
+                   HTREE_CONFIG_DIR=str(self.root / 'hashtree'), PATH=str(self.root) + os.pathsep + os.environ['PATH'])
 
         def run(*args, success=True):
             result = subprocess.run([str(BINARY), '--home', str(self.home), *args],
@@ -133,15 +136,15 @@ commands = [[{json.dumps(sys.executable)}, "build.py"]]
         bad = self.commit('finding')
         run('build', self.repo.as_uri(), '--rev', bad)  # Preview does not scan or execute.
         self.assertFalse((self.home / 'built-packages').exists())
-        failed = run('build', self.repo.as_uri(), '--rev', bad, '--execute', '--install', success=False)
+        failed = run('build', self.repo.as_uri(), '--rev', bad, '--execute', '--install', '--audit-agent', 'codex', success=False)
         self.assertIn('finding', failed.stderr)
         self.assertFalse((self.home / 'built-packages').exists())
         clean = self.commit('clean')
-        run('build', self.repo.as_uri(), '--rev', clean, '--execute', '--install')
+        run('build', self.repo.as_uri(), '--rev', clean, '--execute', '--install', '--audit-agent', 'codex')
         self.assertFalse((self.home / 'discovery/outbox').exists(), 'scans must not publish by default')
         (self.repo / 'haps-build.toml').write_text(recipe.replace('1.0.0', '1.1.0'))
         clean = self.commit('clean')
-        run('build', self.repo.as_uri(), '--rev', clean, '--execute', '--install', '--attest-scan')
+        run('build', self.repo.as_uri(), '--rev', clean, '--execute', '--install', '--audit-agent', 'codex', '--attest-scan')
         event_files = list((self.home / 'discovery/outbox').glob('*.json'))
         self.assertEqual(len(event_files), 1)
         event = json.loads(event_files[0].read_text())
@@ -158,8 +161,8 @@ commands = [[{json.dumps(sys.executable)}, "build.py"]]
         self.scanner.unlink()
         run('install', 'hello')
         run('update', 'hello')
-        refused = run('install', 'hello', '--require-attestations', '1', success=False)
-        self.assertIn('attestations', refused.stderr)
+        refused = run('install', 'hello', '--require-attestations', '2', success=False)
+        self.assertIn('audit(s)', refused.stderr)
 
 
 if __name__ == '__main__':

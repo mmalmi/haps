@@ -1,3 +1,5 @@
+#[path = "support/audit.rs"]
+mod audit;
 use std::{fs, path::Path, process::Command};
 use tempfile::tempdir;
 
@@ -73,12 +75,39 @@ commands = [["rustc", "hello.rs", "-o", "hello{exe}"]]
     assert!(!home.join("built-packages").exists());
     assert!(!run(&["build", &url, "--rev", "master"]).status.success());
     assert!(run(&["identity", "init"]).status.success());
-    let build = run(&["build", &url, "--rev", &rev, "--execute", "--install"]);
+    assert!(
+        !run(&["build", &url, "--rev", &rev, "--execute", "--install"])
+            .status
+            .success()
+    );
+    assert!(!home.join("built-packages").exists());
+    let build = run(&["build", &url, "--rev", &rev, "--execute"]);
     assert!(
         build.status.success(),
         "{}",
         String::from_utf8_lossy(&build.stderr)
     );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let repo = haps::repository::Repository::local(home.join("built-packages")).unwrap();
+    let keys = haps::install::load_keys(&home.join("identity.key")).unwrap();
+    let snapshot = runtime
+        .block_on(repo.catalog(&keys.public_key().to_hex()))
+        .unwrap();
+    let releases = runtime.block_on(repo.releases(&snapshot)).unwrap();
+    audit::record(&home, &keys, releases[0].event.id).unwrap();
+    assert!(
+        run(&[
+            "source",
+            "add",
+            "built",
+            home.join("built-packages").to_str().unwrap(),
+            "--author",
+            &keys.public_key().to_hex()
+        ])
+        .status
+        .success()
+    );
+    assert!(run(&["install", "hello"]).status.success());
     let executed = run(&["run", "hello"]);
     assert!(executed.status.success());
     assert_eq!(

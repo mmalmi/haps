@@ -1,4 +1,5 @@
 pub mod aliases;
+pub mod audit;
 pub mod build;
 pub mod comments;
 pub mod desktop;

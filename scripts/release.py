@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -18,7 +19,9 @@ TARGETS = [
 ]
 
 def run(binary, home, *args):
-    return subprocess.check_output([str(binary), '--home', str(home), '--no-defaults', *args], text=True).strip()
+    env = dict(os.environ, HAPS_NON_INTERACTIVE='true', HTREE_CONFIG_DIR=str(home / 'htree'))
+    env.pop('NOSTR_RELAYS', None)
+    return subprocess.check_output([str(binary), '--home', str(home), '--no-defaults', *args], env=env, text=True).strip()
 
 def package(tag, target, output):
     assert target in TARGETS
@@ -65,6 +68,11 @@ def package(tag, target, output):
         repository = root / 'repository'
         run(extracted, home, 'pack', str(spec), '--payload', str(payload), '--out', str(repository))
         run(extracted, home, 'source', 'add', 'smoke', str(repository), '--author', author)
+        # Explicit local test-fixture approval; never published from this offline
+        # temporary identity and never presented as a review of the public release.
+        run(extracted, home, 'attest', f'{author}/haps-smoke', '--version', version,
+            '--audited', '--provenance', 'Local archive smoke fixture; reproducibility unverified',
+            '--note', 'Checked the extracted executable version, target, and bundled helper')
         run(extracted, home, 'install', 'haps-smoke')
         assert run(extracted, home, 'run', 'haps-smoke', '--', '--version') == f'haps {version}'
     print(f'Packaged and installed {archive.name}')

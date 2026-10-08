@@ -158,6 +158,18 @@ fn real_cli_http_install_execute_update_comments_and_rollback() {
     assert!(!cli(&reader_home, &["install", "hello"]).status.success());
     ok(&reader_home, &["follow", &publisher]);
     assert!(ok(&reader_home, &["search", "greeting"]).contains("\"follow_distance\": 1"));
+    ok(
+        &reader_home,
+        &[
+            "attest",
+            &release.id.to_hex(),
+            "--audited",
+            "--provenance",
+            "Test fixture",
+            "--note",
+            "Reviewed greeting fixture",
+        ],
+    );
     ok(&reader_home, &["install", "hello"]);
     #[cfg(target_os = "linux")]
     {
@@ -258,6 +270,8 @@ fn real_cli_http_install_execute_update_comments_and_rollback() {
         ];
         if revoke {
             args.push("--revoke");
+        } else {
+            args.extend(["--audited", "--provenance", "Test fixture"]);
         }
         ok(&reader_home, &args);
     };
@@ -375,11 +389,12 @@ fn duplicate_names_require_a_publisher_and_updates_keep_that_publisher() {
     let spec = tmp.path().join("haps.toml");
     fs::write(&spec, format!("name = \"same\"\nversion = \"1.0.0\"\ntarget = \"{}\"\ndescription = \"Collision test\"\n", haps::model::target())).unwrap();
     let mut authors = Vec::new();
+    let mut releases: Vec<nostr::Event> = Vec::new();
     for name in ["alice", "bob"] {
         let home = tmp.path().join(name);
         let key = ok(&home, &["identity", "init"]);
         let repo = tmp.path().join(format!("{name}-repo"));
-        ok(
+        let packed = ok(
             &home,
             &[
                 "pack",
@@ -403,6 +418,7 @@ fn duplicate_names_require_a_publisher_and_updates_keep_that_publisher() {
         );
         ok(&reader, &["follow", &key]);
         ok(&reader, &["alias", "add", name, &key]);
+        releases.push(serde_json::from_str(&packed).unwrap());
         authors.push(key);
     }
     let shared_aliases = reader.join("hashtree/aliases");
@@ -431,6 +447,18 @@ fn duplicate_names_require_a_publisher_and_updates_keep_that_publisher() {
     let follow_file = tmp.path().join("follows.json");
     fs::write(&follow_file, serde_json::to_vec(&follows).unwrap()).unwrap();
     ok(&reader, &["import", follow_file.to_str().unwrap()]);
+    ok(
+        &reader,
+        &[
+            "attest",
+            &releases[1].id.to_hex(),
+            "--audited",
+            "--provenance",
+            "Test fixture",
+            "--note",
+            "Reviewed Bob fixture",
+        ],
+    );
     ok(&reader, &["install", "same"]);
     assert!(ok(&reader, &["list"]).contains(&authors[1]));
     let result = cli(&reader, &["install", "same", "--allow-untrusted"]);
@@ -439,6 +467,18 @@ fn duplicate_names_require_a_publisher_and_updates_keep_that_publisher() {
     assert!(choices.contains("multiple publishers"));
     assert!(choices.find("bob/same").unwrap() < choices.find("alice/same").unwrap());
     ok(&reader, &["remove", "bob/same"]);
+    ok(
+        &reader,
+        &[
+            "attest",
+            &releases[0].id.to_hex(),
+            "--audited",
+            "--provenance",
+            "Test fixture",
+            "--note",
+            "Reviewed Alice fixture",
+        ],
+    );
     ok(&reader, &["install", "alice/same"]);
     ok(&reader, &["update", "alice/same", "--allow-untrusted"]);
     use nostr::nips::nip19::ToBech32;
@@ -717,18 +757,22 @@ fn attestation_shortcut_pins_version_platform_and_exports_signed_claims() {
             .contains("Unexpected outbound connection")
     );
     assert!(!reader.join("installed.json").exists());
-    // Explicit warning overrides are per operation, not a saved preference.
-    ok(
-        &reader,
-        &[
-            "install",
-            "alice/hello",
-            "--version",
-            "1.0.0",
-            "--allow-untrusted",
-            "--allow-warnings",
-            "--json",
-        ],
+    // A warning override never bypasses the required audit.
+    assert!(
+        !cli(
+            &reader,
+            &[
+                "install",
+                "alice/hello",
+                "--version",
+                "1.0.0",
+                "--allow-untrusted",
+                "--allow-warnings",
+                "--json"
+            ]
+        )
+        .status
+        .success()
     );
     assert!(
         !cli(
@@ -763,6 +807,19 @@ fn attestation_shortcut_pins_version_platform_and_exports_signed_claims() {
     .unwrap();
     assert_eq!(withdrawn["warnings"], serde_json::json!([]));
     assert_eq!(withdrawn["attestations"], serde_json::json!([]));
+    ok(
+        &reader,
+        &[
+            "attest",
+            &releases[0].id.to_hex(),
+            "--audited",
+            "--provenance",
+            "Test fixture",
+            "--note",
+            note,
+        ],
+    );
+    ok(&reader, &["install", "alice/hello", "--version", "1.0.0"]);
     // Updates enforce warnings before changing the active installation.
     ok(
         &reader,
@@ -812,7 +869,16 @@ fn attestation_shortcut_pins_version_platform_and_exports_signed_claims() {
     assert_eq!(withdrawn["warnings"], serde_json::json!([]));
     ok(
         &reader,
-        &["attest", &releases[0].id.to_hex(), "--note", note, "--json"],
+        &[
+            "attest",
+            &releases[0].id.to_hex(),
+            "--audited",
+            "--provenance",
+            "Test fixture",
+            "--note",
+            note,
+            "--json",
+        ],
     );
     // A package/version shortcut still binds one platform, never every build.
     let foreign: nostr::Event = serde_json::from_str(&ok(

@@ -1,3 +1,5 @@
+#[path = "support/audit.rs"]
+mod audit;
 use haps::{
     discovery::Announcement,
     install::Installation,
@@ -145,6 +147,8 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
                 String::from_utf8_lossy(&result.stderr)
             );
         }
+        assert!(run(&["identity", "init"]).status.success());
+        audit::local(&home, release.event.id)?;
         let package = format!("{}/hello", publisher.public_key().to_bech32()?);
         let result = run(&["--non-interactive", "install", &package, "--json"]);
         anyhow::ensure!(
@@ -212,7 +216,7 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
         "following the curator must not grant publisher trust"
     );
     assert!(String::from_utf8_lossy(&denied.stdout).contains("outside your social graph"));
-    let endorsement = haps::trust::attest(&operator, release.event.id, true, "Checked".into())?;
+    let endorsement = audit::approval(&operator, release.event.id)?;
     state.events.lock().await.push(endorsement.clone());
     let approved = run(&["install", "hello", "--json"]);
     anyhow::ensure!(

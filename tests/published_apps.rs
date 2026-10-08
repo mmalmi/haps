@@ -4,7 +4,7 @@ use std::{fs, process::Command};
 
 #[test]
 #[ignore = "downloads signed application payloads from the public Hashtree catalog"]
-fn published_example_apps_install() -> anyhow::Result<()> {
+fn published_example_apps_respect_audit_gate() -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(
             haps::model::target(),
@@ -36,6 +36,17 @@ fn published_example_apps_install() -> anyhow::Result<()> {
             .env_remove("HAPS_NO_DEFAULTS")
             .args(["--non-interactive", "install", app, "--json"])
             .output()?;
+        if !output.status.success() {
+            let response: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+            let message = response["error"]["message"].as_str().unwrap_or("");
+            if message.contains("requires 1 audit(s) from your social graph; found 0") {
+                assert!(!home.join("installed.json").exists());
+                eprintln!(
+                    "{app}: discovered signed release, correctly blocked because no trusted audit exists; native payload check awaits an audit"
+                );
+                continue;
+            }
+        }
         anyhow::ensure!(
             output.status.success(),
             "{app} install failed ({}): {}\n{}",

@@ -168,6 +168,36 @@ impl Checkout {
         self.directory.path().join("repo")
     }
 
+    /// Retain an explicitly prepared checkout for a separate review session.
+    pub fn keep(self) -> PathBuf {
+        self.directory.keep()
+    }
+
+    /// Review must not change the source or introduce untracked build inputs.
+    pub fn ensure_pristine(&self) -> Result<()> {
+        let root = self.root();
+        let status = git_ok(git().current_dir(&root).args([
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+            "--ignored",
+        ]))?;
+        ensure!(
+            status.is_empty(),
+            "source changed during the audit; start a new audit"
+        );
+        let head = git_ok(git().current_dir(root).args(["rev-parse", "HEAD"]))?;
+        ensure!(
+            self.recipe
+                .package
+                .source
+                .as_ref()
+                .is_some_and(|source| source.rev.eq_ignore_ascii_case(&head)),
+            "source revision changed during audit"
+        );
+        Ok(())
+    }
+
     pub fn execute(&self) -> Result<PathBuf> {
         let root = self.directory.path().join("repo");
         for args in &self.recipe.build.commands {
@@ -175,6 +205,7 @@ impl Checkout {
             let status = Command::new(&args[0])
                 .args(&args[1..])
                 .current_dir(&root)
+                .stdout(std::io::stderr())
                 .status()?;
             ensure!(status.success(), "build command failed: {}", args[0]);
         }
