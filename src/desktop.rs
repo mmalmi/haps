@@ -9,11 +9,22 @@ use std::{fs, path::Path};
 const LINUX_LAUNCH_SCRIPT: &str = "XDG_DATA_DIRS=\"$1/usr/share:$1/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}\"; export XDG_DATA_DIRS; shift; exec \"$@\"";
 
 fn value(text: &str) -> String {
-    text.replace('\\', "\\\\")
+    let escaped = text
+        .replace('\\', "\\\\")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
-        .replace('\t', "\\t")
-        .replace(' ', "\\s")
+        .replace('\t', "\\t");
+    // Ordinary spaces need no escaping. Some launchers display \s literally.
+    // Preserve edge spaces, which desktop-file readers may otherwise trim.
+    let body = escaped.trim_matches(' ');
+    let leading = escaped.len() - escaped.trim_start_matches(' ').len();
+    let trailing = escaped.len() - leading - body.len();
+    format!(
+        "{}{}{}",
+        "\\s".repeat(leading),
+        body,
+        "\\s".repeat(trailing)
+    )
 }
 
 fn executable(path: &Path) -> Result<String> {
@@ -54,15 +65,25 @@ pub fn filename(home: &Path, release: &Release) -> String {
 }
 
 pub fn render(release: &Release, directory: &Path) -> Result<Option<String>> {
-    render_entry(release, directory, false)
+    render_entry(release, directory, Format::Current)
 }
 
-/// Previous Haps versions launched without the package's resource directories.
-pub(crate) fn render_legacy(release: &Release, directory: &Path) -> Result<Option<String>> {
-    render_entry(release, directory, true)
+/// Exact historical formats, used only to recognize launchers owned by Haps.
+pub(crate) fn previous_entries(release: &Release, directory: &Path) -> Result<[Option<String>; 2]> {
+    Ok([
+        render_entry(release, directory, Format::EscapedSpaces)?,
+        render_entry(release, directory, Format::LegacyExec)?,
+    ])
 }
 
-fn render_entry(release: &Release, directory: &Path, legacy: bool) -> Result<Option<String>> {
+#[derive(Clone, Copy)]
+enum Format {
+    Current,
+    EscapedSpaces,
+    LegacyExec,
+}
+
+fn render_entry(release: &Release, directory: &Path, format: Format) -> Result<Option<String>> {
     let spec = &release.data.package;
     let Some(desktop) = &spec.desktop else {
         return Ok(None);
@@ -70,7 +91,7 @@ fn render_entry(release: &Release, directory: &Path, legacy: bool) -> Result<Opt
     let command = directory.join(&spec.commands[&desktop.command]);
     let icon = directory.join(&desktop.icon);
     let icon = icon.to_str().context("desktop icon path must be UTF-8")?;
-    let exec = if legacy {
+    let exec = if matches!(format, Format::LegacyExec) {
         format!("/usr/bin/env -- {}", executable(&command)?)
     } else {
         crate::launch::linux_data_dirs(directory, None)?;
@@ -81,11 +102,15 @@ fn render_entry(release: &Release, directory: &Path, legacy: bool) -> Result<Opt
             executable(&command)?
         )
     };
+    let display_value = |text: &str| match format {
+        Format::Current => value(text),
+        Format::EscapedSpaces | Format::LegacyExec => value(text).replace(' ', "\\s"),
+    };
     Ok(Some(format!(
         "[Desktop Entry]\nType=Application\nName={}\nExec={}\nIcon={}\nTerminal=false\nCategories=Network;\nX-Haps-Publisher={}\nX-Haps-Release={}\n",
-        value(&desktop.name),
+        display_value(&desktop.name),
         exec,
-        value(icon),
+        display_value(icon),
         release.author(),
         release.event.id
     )))
@@ -135,6 +160,18 @@ fn write(path: &Path, content: Option<&str>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn display_values_preserve_ordinary_spaces() {
+        assert_eq!(value("Iris Chat"), "Iris Chat");
+        assert_eq!(
+            value("/home/app data/Iris Chat/icon.svg"),
+            "/home/app data/Iris Chat/icon.svg"
+        );
+        assert_eq!(value(" Iris Chat "), "\\sIris Chat\\s");
+        assert_eq!(value(" "), "\\s");
+        assert_eq!(value("Iris\\Chat\n\t"), "Iris\\\\Chat\\n\\t");
+    }
+
     #[test]
     fn exec_escaping_and_transaction_failure() -> Result<()> {
         assert_eq!(

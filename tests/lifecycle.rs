@@ -429,7 +429,7 @@ async fn desktop_launcher_tracks_install_update_rollback_and_removal() -> anyhow
     let entry = entries.join(haps::desktop::filename(&home.canonicalize()?, &first));
     let initial = fs::read_to_string(&entry)?;
     assert!(initial.contains(&first.event.id.to_hex()));
-    assert!(initial.contains("Name=Hello\\sDesktop"));
+    assert!(initial.contains("Name=Hello Desktop\n"));
     if std::env::var_os("HAPS_TEST_DESKTOP").is_some() {
         let output = std::process::Command::new("gio")
             .env("XDG_DATA_DIRS", "/custom resources:/usr/share")
@@ -460,12 +460,28 @@ async fn desktop_launcher_tracks_install_update_rollback_and_removal() -> anyhow
     fs::remove_file(&entry)?;
     installed.install(&repo, &first).await?;
     assert_eq!(fs::read_to_string(&entry)?, initial);
+    // Repair the original space-escaped entry on a same-version reinstall.
+    let space_escaped: String = initial
+        .lines()
+        .map(|line| {
+            let line = if line.starts_with("Name=") || line.starts_with("Icon=") {
+                line.replace(' ', "\\s")
+            } else {
+                line.into()
+            };
+            format!("{line}\n")
+        })
+        .collect();
+    fs::write(&entry, &space_escaped)?;
+    installed.install(&repo, &first).await?;
+    assert_eq!(fs::read_to_string(&entry)?, initial);
     let second = repo.publish(&author, make("1.1.0"), &payload).await?;
     fs::write(&entry, "user edit")?;
     assert!(installed.install(&repo, &second).await.is_err());
     assert_eq!(installed.receipt("hello")?.current.id, first.event.id);
     assert_eq!(fs::read_to_string(&entry)?, "user edit");
-    fs::write(&entry, &initial)?;
+    // A normal update also recognizes the space-escaped entry from the old release.
+    fs::write(&entry, &space_escaped)?;
     installed.install(&repo, &second).await?;
     assert!(fs::read_to_string(&entry)?.contains(&second.event.id.to_hex()));
     installed.rollback("hello")?;

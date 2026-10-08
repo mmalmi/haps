@@ -132,18 +132,19 @@ impl Installation {
             .transpose()?
             .flatten();
         let path = directory.join(crate::desktop::filename(&self.home, release));
-        let legacy = old
-            .as_ref()
-            .or(new.as_ref())
-            .map(|r| crate::desktop::render_legacy(r, &self.version_dir(r)))
-            .transpose()?
-            .flatten();
         // Migrate only an exact launcher previously generated for this signed
         // release. User edits still fail the transaction's ownership check.
-        if let Some(legacy) = legacy
-            && fs::read_to_string(&path).ok().as_ref() == Some(&legacy)
-        {
-            old_text = Some(legacy);
+        if let Some(previous) = old.as_ref().or(new.as_ref()) {
+            let existing = fs::read_to_string(&path).ok();
+            for legacy in crate::desktop::previous_entries(previous, &self.version_dir(previous))?
+                .into_iter()
+                .flatten()
+            {
+                if existing.as_ref() == Some(&legacy) {
+                    old_text = Some(legacy);
+                    break;
+                }
+            }
         }
         crate::desktop::transaction(&path, old_text.as_deref(), new_text.as_deref(), || {
             self.save(receipts)
@@ -357,14 +358,15 @@ pub fn load_keys(path: &Path) -> Result<nostr::Keys> {
     nostr::Keys::parse(key.trim()).context("invalid secret key file")
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn reinstall_migrates_only_an_owned_legacy_launcher() -> Result<()> {
         let tmp = tempfile::tempdir()?;
-        let home = tmp.path().join("home");
+        let home = tmp.path().join("home with spaces");
         let entries = tmp.path().join("applications");
         let installation = Installation::new(home)?.with_desktop_dir(Some(entries.clone()));
         let payload = tmp.path().join("payload");
@@ -380,7 +382,7 @@ mod tests {
             app: None,
             source: None,
             desktop: Some(DesktopEntry {
-                name: "Hello".into(),
+                name: "Iris Chat".into(),
                 command: "hello".into(),
                 icon: "icon.svg".into(),
             }),
@@ -392,16 +394,115 @@ mod tests {
         installation.install(&repository, &release).await?;
         let path = entries.join(crate::desktop::filename(&installation.home, &release));
         let new = fs::read_to_string(&path)?;
-        let legacy =
-            crate::desktop::render_legacy(&release, &installation.path("hello")?)?.unwrap();
-        assert_ne!(new, legacy);
-        fs::write(&path, &legacy)?;
-        installation.install(&repository, &release).await?;
-        assert_eq!(fs::read_to_string(&path)?, new);
-        let modified = format!("{legacy}# user's edit\n");
-        fs::write(&path, &modified)?;
-        assert!(installation.install(&repository, &release).await.is_err());
-        assert_eq!(fs::read_to_string(&path)?, modified);
+        for legacy in crate::desktop::previous_entries(&release, &installation.path("hello")?)?
+            .into_iter()
+            .flatten()
+        {
+            fs::write(&path, &legacy)?;
+            installation.install(&repository, &release).await?;
+            assert_eq!(fs::read_to_string(&path)?, new);
+            let modified = format!("{legacy}# user's edit\n");
+            fs::write(&path, &modified)?;
+            assert!(installation.install(&repository, &release).await.is_err());
+            assert_eq!(fs::read_to_string(&path)?, modified);
+        }
+        Ok(())
+    }
+
+    // Exercise Linux registration on macOS too, without installing a Linux binary.
+    #[tokio::test]
+    async fn registration_repairs_space_escaped_names_and_preserves_user_edits() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let entries = tmp.path().join("applications");
+        let installation = Installation::new(tmp.path().join("home with spaces"))?
+            .with_desktop_dir(Some(entries.clone()));
+        let payload = tmp.path().join("payload");
+        fs::create_dir(&payload)?;
+        fs::write(payload.join("iris-chat"), b"fixture")?;
+        fs::write(payload.join("Iris Chat.svg"), b"<svg/>")?;
+        let repository = Repository::local(tmp.path().join("repo"))?;
+        let release = repository
+            .publish(
+                &nostr::Keys::generate(),
+                PackageSpec {
+                    name: "iris-chat".into(),
+                    version: "1.0.0".parse()?,
+                    target: "x86_64-unknown-linux-gnu".into(),
+                    description: "Menu name fixture".into(),
+                    commands: BTreeMap::from([("iris-chat".into(), "iris-chat".into())]),
+                    app: None,
+                    source: None,
+                    desktop: Some(DesktopEntry {
+                        name: "Iris Chat".into(),
+                        command: "iris-chat".into(),
+                        icon: "Iris Chat.svg".into(),
+                    }),
+                },
+                &payload,
+            )
+            .await?;
+        let receipts = BTreeMap::from([(
+            release.identity(),
+            Receipt {
+                current: release.event.clone(),
+                previous: None,
+                minimum_attestations: 0,
+            },
+        )]);
+        installation.save_desktop_change(None, Some(&release.event), &receipts)?;
+        let path = entries.join(crate::desktop::filename(&installation.home, &release));
+        let expected = fs::read_to_string(&path)?;
+        assert!(expected.contains("\nName=Iris Chat\n"));
+        let icon = expected
+            .lines()
+            .find(|line| line.starts_with("Icon="))
+            .unwrap();
+        assert!(icon.ends_with("/Iris Chat.svg"));
+        assert!(!icon.contains("\\s"));
+        println!("Generated desktop entry:\n{expected}");
+        let escaped: String = expected
+            .lines()
+            .map(|line| {
+                let line = if line.starts_with("Name=") || line.starts_with("Icon=") {
+                    line.replace(' ', "\\s")
+                } else {
+                    line.into()
+                };
+                format!("{line}\n")
+            })
+            .collect();
+        assert_ne!(escaped, expected);
+        let historical =
+            crate::desktop::previous_entries(&release, &installation.version_dir(&release))?;
+        assert_eq!(historical[0].as_ref(), Some(&escaped));
+        assert!(
+            historical[1]
+                .as_ref()
+                .unwrap()
+                .contains("\nExec=/usr/bin/env -- ")
+        );
+        for legacy in historical.into_iter().flatten() {
+            assert!(legacy.contains("\nName=Iris\\sChat\n"));
+            fs::write(&path, &legacy)?;
+            installation.save_desktop_change(
+                Some(&release.event),
+                Some(&release.event),
+                &receipts,
+            )?;
+            assert_eq!(fs::read_to_string(&path)?, expected);
+            for edited in [
+                format!("{legacy}# user comment\n"),
+                legacy.replace("Iris\\sChat", "My Chat"),
+            ] {
+                fs::write(&path, &edited)?;
+                assert!(
+                    installation
+                        .save_desktop_change(Some(&release.event), Some(&release.event), &receipts)
+                        .is_err()
+                );
+                assert_eq!(fs::read_to_string(&path)?, edited);
+            }
+        }
         Ok(())
     }
 }
