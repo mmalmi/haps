@@ -1080,6 +1080,25 @@ async fn main() -> ExitCode {
 
 async fn execute(mut cli: Cli) -> Result<u8> {
     let non_interactive = cli.non_interactive || cli.command.json();
+    let (progress, _reporter) = haps::progress::Progress::stderr(
+        !cli.command.json()
+            && matches!(
+                cli.command,
+                Command::Install { .. } | Command::Update { .. }
+            ),
+    )?;
+    match &cli.command {
+        Command::Install { package, .. } => {
+            progress.stage(format!("Preparing to install {}", terminal_text(package)));
+        }
+        Command::Update { package, .. } => {
+            progress.stage(format!(
+                "Checking for updates to {}",
+                terminal_text(package)
+            ));
+        }
+        _ => {}
+    }
     if let Command::Init(args) = &cli.command {
         let spec = haps::init::create(args)?;
         if args.json {
@@ -1107,7 +1126,10 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         .context("set HAPS_HOME or --home")?;
     fs::create_dir_all(&home)?;
     let home = home.canonicalize()?;
-    let guard = lock(&home.join(".cli.lock"))?;
+    let guard = lock_with_wait(&home.join(".cli.lock"), || {
+        progress.stage("Waiting for another Haps command");
+    })?;
+    progress.stage("Loading saved social graph");
     let config_file = home.join("config.json");
     let mut config: Config = if config_file.exists() {
         read_json(&config_file)?
@@ -1178,6 +1200,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 .split_once('/')
                 .map(|(key, _)| nostr::PublicKey::parse(key))
                 .transpose()?;
+            progress.stage("Looking up packages and social trust");
             refresh_discovery(
                 &home,
                 &mut config,
@@ -1190,7 +1213,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         }
         _ => {}
     }
-    let installation = Installation::new(home.clone())?;
+    let installation = Installation::new(home.clone())?.with_progress(progress.clone());
     let is_warning = matches!(&cli.command, Command::Warn(_));
     match cli.command {
         Command::Target | Command::Init(_) => unreachable!(),
@@ -1690,9 +1713,12 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             require_attestations,
             json,
         } => {
+            progress.stage("Reading package catalogs");
             let choices = candidates(&home, &mut config, None, Some(&package)).await?;
             let releases: Vec<_> = choices.iter().map(|c| c.release.clone()).collect();
+            progress.stage("Checking release attestations and warnings");
             refresh_feedback(&home, &config, &mut trust, &releases).await?;
+            progress.clear();
             let candidate = select(
                 choices,
                 &package,
@@ -1733,6 +1759,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     require_attestations,
                 )
                 .await?;
+            progress.clear();
             print_installed(&candidate.release, &trust, &config.aliases, json)?;
         }
         Command::Update {
@@ -1743,9 +1770,12 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         } => {
             let receipt = installation.receipt(&package)?;
             let current = Release::verify(receipt.current)?;
+            progress.stage("Reading package catalogs");
             let choices = candidates(&home, &mut config, None, Some(&current.identity())).await?;
             let releases: Vec<_> = choices.iter().map(|c| c.release.clone()).collect();
+            progress.stage("Checking release attestations and warnings");
             refresh_feedback(&home, &config, &mut trust, &releases).await?;
+            progress.clear();
             let candidate = select(
                 choices,
                 &current.identity(),
@@ -1780,6 +1810,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     receipt.minimum_attestations,
                 )
                 .await?;
+            progress.clear();
             print_installed(&candidate.release, &trust, &config.aliases, json)?;
         }
         Command::Run {

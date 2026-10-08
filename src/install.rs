@@ -22,6 +22,7 @@ pub struct Receipt {
 pub struct Installation {
     home: PathBuf,
     desktop_dir: Option<PathBuf>,
+    progress: crate::progress::Progress,
 }
 
 impl Installation {
@@ -35,7 +36,12 @@ impl Installation {
         Ok(Self {
             home: home.canonicalize()?,
             desktop_dir,
+            progress: crate::progress::Progress::default(),
         })
+    }
+    pub fn with_progress(mut self, progress: crate::progress::Progress) -> Self {
+        self.progress = progress;
+        self
     }
     /// Override desktop registration for isolated installations and tests.
     pub fn with_desktop_dir(mut self, directory: Option<PathBuf>) -> Self {
@@ -216,7 +222,10 @@ impl Installation {
             "release target does not match this machine ({})",
             target()
         );
-        let _guard = lock(&self.home.join(".install.lock"))?;
+        let _guard = lock_with_wait(&self.home.join(".install.lock"), || {
+            self.progress
+                .stage("Waiting for another package installation");
+        })?;
         let mut receipts = self.receipts()?;
         let id = release.identity();
         let previous = receipts.get(&id).map(|r| r.current.clone());
@@ -225,6 +234,8 @@ impl Installation {
         if let Some(previous) = &previous {
             let old = Release::verify(previous.clone())?;
             if old.event.id == release.event.id {
+                self.progress
+                    .stage("Package is already current; checking registration");
                 receipts.get_mut(&id).unwrap().minimum_attestations = minimum_attestations;
                 self.save_change(Some(previous), Some(&release.event), &receipts)?;
                 return Ok(());
@@ -234,6 +245,7 @@ impl Installation {
                 "refusing downgrade or changed release at the same version; use rollback for the previous installed release"
             );
         }
+        self.progress.stage("Reading package manifest");
         let manifest: Manifest = repo.json(&release.data.manifest).await?;
         manifest.validate(&release.data.package)?;
         let final_dir = self.version_dir(&release);
@@ -243,6 +255,10 @@ impl Installation {
             .prefix(".staging-")
             .tempdir_in(parent)?;
         let tree = repo.store.tree();
+        self.progress.download(
+            manifest.files.iter().map(|f| f.size).sum(),
+            manifest.files.len(),
+        );
         for file in &manifest.files {
             let output = stage.path().join(safe_path(&file.path)?);
             fs::create_dir_all(output.parent().unwrap())?;
@@ -259,6 +275,7 @@ impl Installation {
                     .context("file size overflow")?;
                 ensure!(written <= file.size, "download exceeds signed file size");
                 destination.write_all(&chunk)?;
+                self.progress.advance(chunk.len() as u64, 0);
             }
             ensure!(written == file.size, "incomplete file: {}", file.path);
             // Check existence even for empty files: a missing root must not masquerade as empty content.
@@ -274,7 +291,10 @@ impl Installation {
                 }))?;
             }
             destination.sync_all()?;
+            self.progress.advance(0, 1);
         }
+        self.progress.finish_download();
+        self.progress.stage("Registering package");
         // A previous interrupted install may have left this immutable slot. Never
         // trust those bytes: replace it only after the fresh verified stage exists.
         if final_dir.exists() {

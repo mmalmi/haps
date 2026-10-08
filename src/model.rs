@@ -341,6 +341,10 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 pub fn lock(path: &Path) -> Result<std::fs::File> {
+    lock_with_wait(path, || {})
+}
+
+pub fn lock_with_wait(path: &Path, on_wait: impl FnOnce()) -> Result<std::fs::File> {
     std::fs::create_dir_all(path.parent().context("lock has no parent")?)?;
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -348,6 +352,13 @@ pub fn lock(path: &Path) -> Result<std::fs::File> {
         .read(true)
         .write(true)
         .open(path)?;
-    fs2::FileExt::lock_exclusive(&file)?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {}
+        Err(error) if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() => {
+            on_wait();
+            fs2::FileExt::lock_exclusive(&file)?;
+        }
+        Err(error) => return Err(error.into()),
+    }
     Ok(file)
 }

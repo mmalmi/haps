@@ -91,6 +91,11 @@ shared Hashtree client is compiled into Haps. Cargo and prebuilt installs both
 reuse an existing daemon and compatible tools on `PATH`. Git itself and build
 toolchains remain separate prerequisites for source builds.
 
+`haps install` and `haps update` report their current step immediately, with
+updates every five seconds during waits. Downloads show verified bytes, percentage,
+and completed files before registration. Progress goes to stderr; `--json` keeps
+its existing machine-readable output without progress messages.
+
 Website: [haps.hashtree.cc](https://haps.hashtree.cc).
 [Source and documentation](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/haps)
 live on Hashtree, with an additional [GitHub mirror](https://github.com/mmalmi/haps).
