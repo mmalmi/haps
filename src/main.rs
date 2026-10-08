@@ -26,7 +26,7 @@ struct Cli {
     /// Start a fresh configuration without discovery presets or a trust seed.
     #[arg(long, global = true, env = "HAPS_NO_DEFAULTS")]
     no_defaults: bool,
-    /// Never prompt; require publisher/name when several publishers match.
+    /// Never prompt; require publisher/name when installing a package.
     #[arg(long, global = true, env = "HAPS_NON_INTERACTIVE")]
     non_interactive: bool,
     #[command(subcommand)]
@@ -1028,6 +1028,7 @@ async fn candidates(
 struct Selection {
     non_interactive: bool,
     include_untrusted: bool,
+    confirm_install: bool,
 }
 
 fn select(
@@ -1039,6 +1040,12 @@ fn select(
     target_filter: &str,
     selection: Selection,
 ) -> Result<Candidate> {
+    use std::io::IsTerminal;
+    let interactive = !selection.non_interactive
+        && std::io::stdin().is_terminal()
+        && std::io::stdout().is_terminal()
+        && std::io::stderr().is_terminal()
+        && !std::env::var("TERM").is_ok_and(|term| term == "dumb");
     let package = if let Some((key, name)) = package.split_once('/') {
         format!("{}/{}", ensure_public_key(key)?, name)
     } else {
@@ -1064,13 +1071,13 @@ fn select(
         candidates.retain(|c| trust.socially_trusted(&c.release));
     }
     let authors: BTreeSet<_> = candidates.iter().map(|c| c.release.author()).collect();
+    let confirm_single = selection.confirm_install && !package.contains('/') && authors.len() == 1;
     ensure!(
         !candidates.is_empty(),
         "no matching release for {} in the selected scope; packages outside your social graph require an explicit npub/package",
         target_filter
     );
     if authors.len() > 1 {
-        use std::io::IsTerminal;
         let mut choices: Vec<_> = authors.into_iter().collect();
         let approvals = |author: &str| {
             candidates
@@ -1122,12 +1129,7 @@ fn select(
                 )
             })
             .collect();
-        if selection.non_interactive
-            || !std::io::stdin().is_terminal()
-            || !std::io::stdout().is_terminal()
-            || !std::io::stderr().is_terminal()
-            || std::env::var("TERM").is_ok_and(|term| term == "dumb")
-        {
+        if !interactive {
             return Err(AmbiguousPublishers {
                 candidates: releases
                     .iter()
@@ -1157,7 +1159,33 @@ fn select(
             .version
             .cmp(&a.release.data.package.version)
     });
-    Ok(candidates.remove(0))
+    let candidate = candidates.remove(0);
+    if confirm_single {
+        let release = &candidate.release;
+        if !interactive {
+            return Err(PublisherConfirmationRequired {
+                candidate: release_json(release, trust, aliases),
+            }
+            .into());
+        }
+        use nostr::nips::nip19::ToBech32;
+        eprintln!(
+            "Found {} {} · {}",
+            release_label(release, aliases),
+            release.data.package.version,
+            relationship(trust, &release.author(), aliases),
+        );
+        eprintln!("Publisher: {}", release.event.pubkey.to_bech32()?);
+        eprintln!("  {}", attestation_summary(release, trust, aliases));
+        ensure!(
+            dialoguer::Confirm::new()
+                .with_prompt("Install this package?")
+                .default(false)
+                .interact()?,
+            "cancelled; nothing was installed"
+        );
+    }
+    Ok(candidate)
 }
 
 // Terminal text must not execute control sequences from shared aliases or signed notes.
@@ -1308,6 +1336,22 @@ impl std::fmt::Display for AmbiguousPublishers {
 }
 impl std::error::Error for AmbiguousPublishers {}
 
+#[derive(Debug)]
+struct PublisherConfirmationRequired {
+    candidate: serde_json::Value,
+}
+
+impl std::fmt::Display for PublisherConfirmationRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "bare-name installation needs publisher confirmation; use an interactive terminal or specify publisher/name:\n  haps install {}",
+            self.candidate["identity"].as_str().unwrap()
+        )
+    }
+}
+impl std::error::Error for PublisherConfirmationRequired {}
+
 fn print_release(
     release: &Release,
     trust: &Trust,
@@ -1400,6 +1444,10 @@ async fn main() -> ExitCode {
                 if let Some(ambiguous) = error.downcast_ref::<AmbiguousPublishers>() {
                     value["code"] = "ambiguous_package".into();
                     value["candidates"] = serde_json::json!(ambiguous.candidates);
+                }
+                if let Some(unconfirmed) = error.downcast_ref::<PublisherConfirmationRequired>() {
+                    value["code"] = "publisher_confirmation_required".into();
+                    value["candidate"] = unconfirmed.candidate.clone();
                 }
                 println!("{}", serde_json::json!({"error": value}));
             } else {
@@ -1590,6 +1638,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     Selection {
                         non_interactive,
                         include_untrusted: package.contains('/'),
+                        confirm_install: false,
                     },
                 )?;
                 let directory = haps::audit::prepare(&home, &candidate.release)?;
@@ -2187,6 +2236,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 Selection {
                     non_interactive,
                     include_untrusted: false,
+                    confirm_install: false,
                 },
             )?;
             print_release(&candidate.release, &trust, &config.aliases)?;
@@ -2218,6 +2268,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 Selection {
                     non_interactive,
                     include_untrusted: allow_untrusted,
+                    confirm_install: true,
                 },
             )?;
             let require_attestations = require_attestations.max(1).max(
@@ -2288,6 +2339,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 Selection {
                     non_interactive,
                     include_untrusted: true,
+                    confirm_install: false,
                 },
             )?;
             ensure_audited(
@@ -2519,6 +2571,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     Selection {
                         non_interactive,
                         include_untrusted: false,
+                        confirm_install: false,
                     },
                 )?;
                 if !json {

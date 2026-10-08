@@ -17,6 +17,9 @@ fn published_example_apps_respect_audit_gate() -> anyhow::Result<()> {
             || std::env::var("HAPS_TEST_ISOLATED").as_deref() == Ok("1"),
         "run this test inside a VM/container with HAPS_TEST_ISOLATED=1"
     );
+    let catalog: nostr::Event =
+        serde_json::from_str(include_str!("../packages/catalog-root.json"))?;
+    let publisher = catalog.pubkey.to_hex();
     let apps = std::env::var("HAPS_TEST_APPS").unwrap_or_else(|_| "iris-chat".into());
     for app in apps.split(',') {
         let temp = tempfile::tempdir()?;
@@ -34,7 +37,12 @@ fn published_example_apps_respect_audit_gate() -> anyhow::Result<()> {
             .env("HTREE_PREFER_LOCAL_DAEMON", "false")
             .env_remove("HTREE_LOCAL_DAEMON_ONLY")
             .env_remove("HAPS_NO_DEFAULTS")
-            .args(["--non-interactive", "install", app, "--json"])
+            .args([
+                "--non-interactive",
+                "install",
+                &format!("{publisher}/{app}"),
+                "--json",
+            ])
             .output()?;
         if !output.status.success() {
             let response: serde_json::Value = serde_json::from_slice(&output.stdout)?;

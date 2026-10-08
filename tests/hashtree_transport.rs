@@ -225,7 +225,12 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
     // The relay stops answering subsequent requests, while content stays available.
     delay_ms.store(0, Ordering::Relaxed);
     one_root_only.store(true, Ordering::Relaxed);
-    let output = run(&["install", "hello", "--allow-untrusted", "--json"])?;
+    let output = run(&[
+        "install",
+        &release.identity(),
+        "--allow-untrusted",
+        "--json",
+    ])?;
     assert!(
         output.status.success(),
         "{} {}",

@@ -173,9 +173,13 @@ async fn install_reports_waits_and_verified_download_before_completion() -> anyh
     )?;
     audit::record(&home, &author, release.event.id)?;
     let lock = haps::model::lock(&home.join(".cli.lock"))?;
-    let mut cli = Running::start(&home, &["install", "hello"]);
+    let package = release.identity();
+    let mut cli = Running::start(&home, &["install", &package]);
     // Even another Haps process holding the home lock must not hide startup.
-    cli.until("Preparing to install hello", Duration::from_secs(2));
+    cli.until(
+        &format!("Preparing to install {package}"),
+        Duration::from_secs(2),
+    );
     cli.until("Waiting for another Haps command", Duration::from_secs(2));
     drop(lock);
     assert_eq!(

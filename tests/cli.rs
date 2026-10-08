@@ -170,7 +170,7 @@ fn real_cli_http_install_execute_update_comments_and_rollback() {
             "Reviewed greeting fixture",
         ],
     );
-    ok(&reader_home, &["install", "hello"]);
+    ok(&reader_home, &["install", &format!("{publisher}/hello")]);
     #[cfg(target_os = "linux")]
     {
         let output = Command::new(env!("CARGO_BIN_EXE_haps"))
@@ -278,17 +278,29 @@ fn real_cli_http_install_execute_update_comments_and_rollback() {
     review(release.id, false);
     ok(
         &reader_home,
-        &["install", "hello", "--require-attestations", "1"],
+        &[
+            "install",
+            &format!("{publisher}/hello"),
+            "--require-attestations",
+            "1",
+        ],
     );
     review(release.id, true);
     assert!(
-        !cli(&reader_home, &["install", "hello", "--allow-untrusted"])
-            .status
-            .success()
+        !cli(
+            &reader_home,
+            &[
+                "install",
+                &format!("{publisher}/hello"),
+                "--allow-untrusted"
+            ]
+        )
+        .status
+        .success()
     );
     // Immediate re-approval must supersede revocation even within the same second.
     review(release.id, false);
-    ok(&reader_home, &["install", "hello"]);
+    ok(&reader_home, &["install", &format!("{publisher}/hello")]);
     write_manifest("1.1.0");
     let second = ok(
         &author_home,
@@ -308,9 +320,16 @@ fn real_cli_http_install_execute_update_comments_and_rollback() {
             .success()
     );
     assert!(
-        !cli(&reader_home, &["install", "hello", "--allow-untrusted"])
-            .status
-            .success()
+        !cli(
+            &reader_home,
+            &[
+                "install",
+                &format!("{publisher}/hello"),
+                "--allow-untrusted"
+            ]
+        )
+        .status
+        .success()
     );
     review(second.id, false);
     ok(&reader_home, &["update", "hello"]);
@@ -459,7 +478,7 @@ fn duplicate_names_require_a_publisher_and_updates_keep_that_publisher() {
             "Reviewed Bob fixture",
         ],
     );
-    ok(&reader, &["install", "same"]);
+    ok(&reader, &["install", &format!("{}/same", authors[1])]);
     assert!(ok(&reader, &["list"]).contains(&authors[1]));
     let result = cli(&reader, &["install", "same", "--allow-untrusted"]);
     assert!(!result.status.success());

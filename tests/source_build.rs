@@ -107,7 +107,11 @@ commands = [["rustc", "hello.rs", "-o", "hello{exe}"]]
         .status
         .success()
     );
-    assert!(run(&["install", "hello"]).status.success());
+    assert!(
+        run(&["install", &format!("{}/hello", keys.public_key().to_hex())])
+            .status
+            .success()
+    );
     let executed = run(&["run", "hello"]);
     assert!(executed.status.success());
     assert_eq!(

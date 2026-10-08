@@ -159,9 +159,9 @@ commands = [[{json.dumps(sys.executable)}, "build.py"]]
         author = run('identity', 'show').stdout.strip()
         run('source', 'add', 'local', str(self.home / 'built-packages'), '--author', author)
         self.scanner.unlink()
-        run('install', 'hello')
+        run('install', f'{author}/hello')
         run('update', 'hello')
-        refused = run('install', 'hello', '--require-attestations', '2', success=False)
+        refused = run('install', f'{author}/hello', '--require-attestations', '2', success=False)
         self.assertIn('audit(s)', refused.stderr)
 
 

@@ -218,7 +218,11 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
     assert!(String::from_utf8_lossy(&denied.stdout).contains("outside your social graph"));
     let endorsement = audit::approval(&operator, release.event.id)?;
     state.events.lock().await.push(endorsement.clone());
-    let approved = run(&["install", "hello", "--json"]);
+    let unconfirmed = run(&["install", "hello", "--json"]);
+    assert!(!unconfirmed.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&unconfirmed.stdout)?;
+    assert_eq!(response["error"]["code"], "publisher_confirmation_required");
+    let approved = run(&["install", &release.identity(), "--json"]);
     anyhow::ensure!(
         approved.status.success(),
         "{} {}",
@@ -278,7 +282,7 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
     let results: serde_json::Value = serde_json::from_slice(&search.stdout)?;
     assert_eq!(results.as_array().unwrap().len(), 1);
     assert_eq!(results[0]["attesters"][0], operator.public_key().to_hex());
-    let installed = run(&["install", "hello", "--json"]);
+    let installed = run(&["install", &release.identity(), "--json"]);
     anyhow::ensure!(
         installed.status.success(),
         "{} {}",

@@ -113,7 +113,10 @@ def main():
             run('follow', proof['publisher'])
             found = json.loads(run('search', proof['name'], '--json').stdout)
             assert len(found) == 1 and found[0]['publisher'] == proof['publisher']
-            installed = json.loads(run('install', proof['name'], '--json').stdout)
+            unconfirmed = run('install', proof['name'], '--json', check=False)
+            assert unconfirmed.returncode != 0
+            assert json.loads(unconfirmed.stdout)['error']['code'] == 'publisher_confirmation_required'
+            installed = json.loads(run('install', explicit, '--json').stdout)
             assert installed['release']['release_id'] == proof['release_id']
             assert run('run', proof['name']).stdout.strip() == proof['message']
             directory = Path(run('path', proof['name']).stdout.strip())

@@ -139,6 +139,61 @@ class ChooserTest(unittest.TestCase):
         self.addCleanup(term.close)
         return term
 
+    def only_alice(self):
+        for publisher in ['buildbot', 'other']:
+            self.catalog.run('reader', 'source', 'remove', publisher)
+
+    def test_single_publisher_requires_confirmation_and_defaults_to_cancel(self):
+        self.only_alice()
+        term = self.terminal('install', 'hello')
+        output = term.read_until(b'Install this package?').decode()
+        self.assertIn('alice/hello 1.0.0', output)
+        self.assertRegex(output, r'Publisher: npub1[0-9a-z]{58}')
+        self.assertIn('Followed by you', output)
+        self.assertIn('Attested by bob, carol', output)
+        self.assertFalse((self.catalog.home('reader') / 'installed.json').exists())
+        term.send(b'\r')
+        code, output = term.finish()
+        self.assertNotEqual(code, 0, output)
+        self.assertIn('cancelled', output)
+        self.assertEqual(json.loads(self.catalog.run('reader', 'list', '--json').stdout), [])
+
+        term = self.terminal('install', 'hello')
+        term.read_until(b'Install this package?')
+        term.send(b'y')
+        code, output = term.finish()
+        self.assertEqual(code, 0, output)
+        self.assertIn('Installed alice/hello 1.0.0', output)
+        self.assertEqual(self.catalog.run('reader', 'run', 'hello').stdout.strip(), 'Hello from Haps')
+
+    def test_single_publisher_is_not_implicitly_accepted_by_scripts(self):
+        self.only_alice()
+        for flags, env in [(['--non-interactive'], {}), ([], {'HAPS_NON_INTERACTIVE': 'true'}),
+                           (['--json'], {}), ([], {'TERM': 'dumb'})]:
+            term = self.terminal('install', 'hello', '--allow-unaudited', *flags, env_extra=env)
+            code, output = term.finish()
+            self.assertNotEqual(code, 0, output)
+            self.assertNotIn('Install this package?', output)
+            self.assertNotIn('\x1b', output)
+            self.assertIn('publisher/name', output)
+            if flags == ['--json']:
+                error = json.loads(output)['error']
+                self.assertEqual(error['code'], 'publisher_confirmation_required')
+                self.assertEqual(error['candidate']['publisher'], self.catalog.keys['alice'])
+                self.assertEqual(error['candidate']['release_id'], self.catalog.releases['alice']['id'])
+        piped = self.catalog.run('reader', 'install', 'hello', check=False)
+        self.assertNotEqual(piped.returncode, 0)
+        self.assertIn('publisher/name', piped.stderr)
+        self.assertEqual(json.loads(self.catalog.run('reader', 'list', '--json').stdout), [])
+        # Read-only lookup still accepts a bare name, and an explicit alias
+        # selects the publisher without adding an installation prompt.
+        self.assertEqual(json.loads(self.catalog.run('reader', 'info', 'hello', '--json').stdout)['publisher'],
+                         self.catalog.keys['alice'])
+        term = self.terminal('install', 'alice/hello')
+        code, output = term.finish()
+        self.assertEqual(code, 0, output)
+        self.assertNotIn('Install this package?', output)
+
     def test_arrow_selection_and_signed_notes(self):
         term = self.terminal('install', 'hello', '--require-attestations', '2', columns=48)
         menu = term.read_until(b'No trusted attestations').decode()

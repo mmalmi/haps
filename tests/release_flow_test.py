@@ -118,7 +118,7 @@ class ReleaseAdapter(unittest.TestCase):
             run(reader, 'follow', publisher)
             run(reader, 'source', 'add', 'tools', catalog, '--author', publisher)
             run(reader, 'attest', f'{publisher}/haps', '--version', '1.0.0', '--audited', '--provenance', 'Test fixture', '--note', 'Reviewed fixture')
-            run(reader, 'install', 'haps')
+            run(reader, 'install', f'{publisher}/haps')
             run(reader, 'link', 'haps')
             launcher = reader / 'bin/haps'
             def linked_version():

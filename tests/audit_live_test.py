@@ -24,7 +24,7 @@ class LiveAudit(unittest.TestCase):
         # ordinary offline suite's fake executable must never enter this test.
         fixture.env['PATH'] = os.environ['PATH']
         fixture.publish(runnable=True)
-        denied = fixture.run_cli('install', 'hello', success=False)
+        denied = fixture.run_cli('install', fixture.package, success=False)
         self.assertIn('audit(s)', denied.stderr)
         spec = importlib.util.spec_from_file_location('live_audit_adapter',
             audit_test.ROOT / 'src/integrations/audit.py')
@@ -44,6 +44,8 @@ class LiveAudit(unittest.TestCase):
 
         terminal = Terminal(Environment(), 'install', 'hello')
         self.addCleanup(terminal.close)
+        terminal.read_until(b'Install this package?')
+        terminal.send(b'y')
         terminal.read_until(b'Audit and install')
         terminal.send(b'y')
         terminal.read_until(b'Choose how to audit')

@@ -261,25 +261,37 @@ Aliases use the existing public `~/.hashtree/aliases` file and parser from
 shared configuration directory. Haps does not copy aliases into its own settings
 or read signing keys to resolve public aliases. Aliases do not imply trust.
 
+When a bare name matches one socially trusted publisher, installation shows the
+package, version, full publisher key, social relationship, and attestations, then asks
+for confirmation (default: no). This happens before any audit, build, or installation.
+An explicit `npub/package`, public-key/package, or local alias/package already selects
+a publisher and needs no extra confirmation.
+
 When a bare name matches multiple socially trusted publishers, a terminal offers an arrow-key chooser
 ordered by social distance, then trusted attestations of each publisher's newest
 matching release. Enter selects; Escape cancels. Each choice shows a local alias
 (or full public key), the version, social distance, and attesters. Selection does
-not bypass trust policy. Existing installations retain their publisher on update.
+not bypass trust policy and needs no second confirmation. Existing installations retain
+their publisher on update.
 The chooser shows up to three connections who follow each publisher and how many
 more there are, using the same rule as Iris Contacts. Local aliases label the keys;
 JSON output includes every matching public key in `followed_by`. Muted connections
 are excluded. Numeric distances remain available in JSON for ranking.
 
 For agents and scripts, `--non-interactive` (or `HAPS_NON_INTERACTIVE=true`) disables
-prompts even in a terminal. Redirected stdin, stdout, or stderr also disables the chooser.
+prompts even in a terminal. Redirected stdin, stdout, or stderr also disables prompts.
+Non-interactive installation requires an explicit publisher even if only one matches;
+`--allow-unaudited` does not bypass publisher confirmation.
 `search`, `info`, `install`, `update`, `list`, `attest`, and `warn` accept `--json`, which
 implies non-interactive mode. Search and list return one JSON array; info returns
 one release object; install/update return `{ "status": "installed", "release": ... }`.
 `attest` and `warn` return the signed event. Runtime failures return a JSON `error` object and
 a nonzero exit status. Ambiguous names return `code: "ambiguous_package"` and a
 socially ranked `candidates` array, including full publisher keys, release IDs,
-and signed attestations and warnings. Diagnostics stay on stderr. CLI argument errors use
+and signed attestations and warnings. A single bare-name install returns
+`code: "publisher_confirmation_required"` and a `candidate` release object.
+Read-only `info` still resolves a single bare-name match without confirmation.
+Diagnostics stay on stderr. CLI argument errors use
 the normal usage message on stderr.
 
 ```sh

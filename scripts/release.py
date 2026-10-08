@@ -73,7 +73,7 @@ def package(tag, target, output):
         run(extracted, home, 'attest', f'{author}/haps-smoke', '--version', version,
             '--audited', '--provenance', 'Local archive smoke fixture; reproducibility unverified',
             '--note', 'Checked the extracted executable version, target, and bundled helper')
-        run(extracted, home, 'install', 'haps-smoke')
+        run(extracted, home, 'install', f'{author}/haps-smoke')
         assert run(extracted, home, 'run', 'haps-smoke', '--', '--version') == f'haps {version}'
     print(f'Packaged and installed {archive.name}')
 

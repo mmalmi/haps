@@ -170,16 +170,26 @@ async fn cli_hides_unknown_packages_but_explicit_publisher_installs_warn() -> an
     let search = run(&["search", "hello", "--json"]);
     let found: serde_json::Value = serde_json::from_slice(&search.stdout)?;
     assert_eq!(found.as_array().unwrap().len(), 1);
-    assert!(run(&["install", "hello", "--json"]).status.success());
+    let unconfirmed = run(&["install", "hello", "--json"]);
+    assert!(!unconfirmed.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&unconfirmed.stdout)?;
+    assert_eq!(response["error"]["code"], "publisher_confirmation_required");
+    assert_eq!(
+        response["error"]["candidate"]["release_id"],
+        release.event.id.to_hex()
+    );
+    assert!(run(&["install", &explicit, "--json"]).status.success());
     // A vouch for 1.0.0 must not approve a new build or silently select the old one.
     let mut newer = release.data.package.clone();
     newer.version = "1.1.0".parse()?;
     Repository::local(tmp.path().join("repo"))?
         .publish(&author, newer, &tmp.path().join("payload"))
         .await?;
-    assert!(!run(&["install", "hello", "--json"]).status.success());
+    let denied = run(&["install", &explicit, "--json"]);
+    assert!(!denied.status.success());
+    assert!(String::from_utf8_lossy(&denied.stdout).contains("audit(s)"));
     assert!(
-        run(&["install", "hello", "--version", "1.0.0", "--json"])
+        run(&["install", &explicit, "--version", "1.0.0", "--json"])
             .status
             .success()
     );

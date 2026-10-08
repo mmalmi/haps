@@ -70,6 +70,7 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
                         AGENT_CALLED=str(self.root / 'agent-called'), HTREE_CONFIG_DIR=str(self.root / 'htree'))
         self.env.pop('NOSTR_RELAYS', None)
         self.author = self.run_cli('identity', 'init', home=self.publisher).stdout.strip()
+        self.package = f'{self.author}/hello'
         self.run_cli('identity', 'init')
         self.run_cli('follow', self.author)
 
@@ -111,8 +112,8 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
 
     def test_audit_bypass_is_per_operation_and_preserves_the_threshold(self):
         self.publish()
-        self.run_cli('install', 'hello', '--require-attestations', '2', success=False)
-        out = self.run_cli('install', 'hello', '--require-attestations', '2', '--allow-unaudited', '--json')
+        self.run_cli('install', self.package, '--require-attestations', '2', success=False)
+        out = self.run_cli('install', self.package, '--require-attestations', '2', '--allow-unaudited', '--json')
         self.assertEqual(json.loads(out.stdout)['status'], 'installed')
         self.assertIn('audit requirement', out.stderr)
         self.assertFalse((self.root / 'agent-called').exists())
@@ -125,20 +126,20 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         self.assertEqual(next(iter(receipts.values()))['minimum_attestations'], 2)
         self.run_cli('rollback', 'hello', success=False)
         self.run_cli('rollback', 'hello', '--allow-unaudited')
-        self.run_cli('install', 'hello', '--version', '1.0.0', success=False)
+        self.run_cli('install', self.package, '--version', '1.0.0', success=False)
         self.assertFalse((self.home / 'audits').exists())
 
     def test_audit_bypass_keeps_warnings_and_explicit_review_separate(self):
         self.publish()
-        self.run_cli('install', 'hello', '--audit', '--allow-unaudited', success=False)
-        self.run_cli('install', 'hello', '--audit-agent', 'codex', '--allow-unaudited', success=False)
+        self.run_cli('install', self.package, '--audit', '--allow-unaudited', success=False)
+        self.run_cli('install', self.package, '--audit-agent', 'codex', '--allow-unaudited', success=False)
         self.run_cli('warn', self.release['id'], '--note', 'Fixture warning')
-        self.run_cli('install', 'hello', '--allow-unaudited', success=False)
-        self.run_cli('install', 'hello', '--allow-unaudited', '--allow-warnings')
+        self.run_cli('install', self.package, '--allow-unaudited', success=False)
+        self.run_cli('install', self.package, '--allow-unaudited', '--allow-warnings')
 
     def test_one_local_review_only_fills_one_missing_audit(self):
         self.publish()
-        denied = self.run_cli('install', 'hello', '--require-attestations', '2', '--audit-agent', 'codex', success=False)
+        denied = self.run_cli('install', self.package, '--require-attestations', '2', '--audit-agent', 'codex', success=False)
         self.assertIn('more independent audits', denied.stderr)
         self.assertFalse((self.root / 'agent-called').exists())
         reviewer = self.root / 'independent-reviewer'
@@ -148,27 +149,27 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         self.run_cli('attest', self.release['id'], '--audited', '--provenance', 'Reviewed fixture payload',
                      '--note', 'Independent fixture review', '--out', str(claim), home=reviewer)
         self.run_cli('import', str(claim))
-        self.run_cli('install', 'hello', '--require-attestations', '2', '--audit-agent', 'codex')
+        self.run_cli('install', self.package, '--require-attestations', '2', '--audit-agent', 'codex')
         self.assertTrue((self.root / 'agent-called').exists())
         info = json.loads(self.run_cli('info', 'hello', '--json').stdout)
         self.assertEqual(len(info['audits']), 2)
 
     def test_default_gate_and_explicit_audit_with_unverified_provenance(self):
         self.publish()
-        denied = self.run_cli('install', 'hello', '--allow-untrusted', '--allow-warnings', '--require-attestations', '0', '--json', success=False)
+        denied = self.run_cli('install', self.package, '--allow-untrusted', '--allow-warnings', '--require-attestations', '0', '--json', success=False)
         self.assertIn('audit(s)', denied.stdout)
         self.assertFalse((self.root / 'agent-called').exists())
         self.run_cli('attest', self.release['id'], '--note', 'Works for me')
-        self.run_cli('install', 'hello', success=False)
+        self.run_cli('install', self.package, success=False)
         self.run_cli('attest', self.release['id'], '--audited', '--provenance', 'Inspected payload; rebuild not checked', '--note', 'Reviewed fixture')
-        self.run_cli('install', 'hello')
+        self.run_cli('install', self.package)
         info = json.loads(self.run_cli('info', 'hello', '--json').stdout)
         self.assertFalse(info['audits'][0]['evidence']['binary_match'])
         self.assertFalse((self.root / 'build-called').exists())
 
     def test_audit_and_install_requires_a_matching_rebuild(self):
         self.publish()
-        result = self.run_cli('install', 'hello', '--audit', '--audit-agent', 'codex', '--json')
+        result = self.run_cli('install', self.package, '--audit', '--audit-agent', 'codex', '--json')
         self.assertEqual(json.loads(result.stdout)['status'], 'installed')
         self.assertTrue((self.root / 'build-called').exists())
         info = json.loads(self.run_cli('info', 'hello', '--json').stdout)
@@ -178,7 +179,7 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
 
     def test_mismatching_rebuild_never_approves_or_installs(self):
         self.publish(matches=False)
-        out = self.run_cli('install', 'hello', '--audit', '--audit-agent', 'codex', success=False)
+        out = self.run_cli('install', self.package, '--audit', '--audit-agent', 'codex', success=False)
         self.assertIn('does not match', out.stderr)
         self.assertFalse((self.home / 'installed.json').exists())
         info = json.loads(self.run_cli('info', 'hello', '--json').stdout)
@@ -187,7 +188,7 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
     def test_incomplete_review_never_executes_build(self):
         self.publish()
         self.env['AUDIT_VERDICT'] = 'incomplete'
-        self.run_cli('install', 'hello', '--audit', '--audit-agent', 'codex', success=False)
+        self.run_cli('install', self.package, '--audit', '--audit-agent', 'codex', success=False)
         self.assertFalse((self.root / 'build-called').exists())
         self.assertFalse((self.home / 'installed.json').exists())
 
@@ -199,14 +200,14 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         rules = self.root / 'rules.yaml'
         rules.write_text('rules: []\n')
         self.run_cli('security', '--rules', str(rules), '--scanner', str(scanner))
-        self.run_cli('install', 'hello', '--audit-agent', 'codex', success=False)
+        self.run_cli('install', self.package, '--audit-agent', 'codex', success=False)
         self.assertFalse((self.root / 'build-called').exists())
         self.assertEqual(json.loads(self.run_cli('info', 'hello', '--json').stdout)['audits'], [])
 
     def test_saved_agent_model_and_publish_defaults(self):
         self.publish()
         self.run_cli('audit', 'settings', '--agent', 'codex', '--model', 'fixture-model', '--publish', 'true')
-        self.run_cli('install', 'hello', '--audit')
+        self.run_cli('install', self.package, '--audit')
         evidence = json.loads(self.run_cli('info', 'hello', '--json').stdout)['audits'][0]['evidence']
         self.assertEqual(evidence['reviewer'], {'agent': 'codex', 'requested_model': 'fixture-model', 'reported_model': 'fixture-model'})
         self.assertTrue(any((self.home / 'discovery/outbox').iterdir()))
@@ -214,7 +215,7 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
     def test_publication_can_be_overridden_per_audit(self):
         self.publish()
         self.run_cli('audit', 'settings', '--publish', 'true')
-        self.run_cli('install', 'hello', '--audit-agent', 'codex', '--publish-audit', 'false')
+        self.run_cli('install', self.package, '--audit-agent', 'codex', '--publish-audit', 'false')
         self.assertFalse((self.home / 'discovery/outbox').exists())
         self.assertTrue(json.loads(self.run_cli('audit', 'settings').stdout)['publish'])
 
@@ -225,7 +226,7 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         self.assertIn(str(session / 'repo'), out.stdout)
         self.assertFalse((self.root / 'build-called').exists())
         self.run_cli('audit', 'finish', session.name, '--note', 'Reviewed fixture source and recipe', '--reviewer', 'external-agent', '--model', 'user-claimed-model', '--publish', 'false')
-        self.run_cli('install', 'hello')
+        self.run_cli('install', self.package)
         evidence = json.loads(self.run_cli('info', 'hello', '--json').stdout)['audits'][0]['evidence']
         self.assertTrue(evidence['binary_match'])
         self.assertNotIn('reported_model', evidence['reviewer'])
@@ -238,7 +239,7 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         result = self.run_cli('audit', 'finish', session.name, '--note', 'Reviewed', success=False)
         self.assertIn('prepared source has changed', result.stderr)
         self.assertFalse((self.root / 'build-called').exists())
-        self.run_cli('install', 'hello', success=False)
+        self.run_cli('install', self.package, success=False)
 
     @unittest.skipUnless(os.name == 'posix', 'requires a terminal')
     def test_terminal_first_audit_offers_review_and_remembers_publication_choice(self):
@@ -250,8 +251,22 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
                 return [str(BINARY), '--home', str(fixture.home), *args]
             def env(self, _):
                 return {**fixture.env, 'HAPS_NON_INTERACTIVE': 'false', 'TERM': 'xterm-256color'}
+        declined = Terminal(Adapter(), 'install', 'hello', '--audit-agent', 'codex')
+        self.addCleanup(declined.close)
+        declined.read_until(b'Install this package?')
+        declined.send(b'n')
+        code, output = declined.finish()
+        self.assertNotEqual(code, 0, output)
+        self.assertIn('cancelled', output)
+        self.assertFalse((self.root / 'agent-called').exists())
+        self.assertFalse((self.root / 'build-called').exists())
+        self.assertFalse((self.home / 'installed.json').exists())
         term = Terminal(Adapter(), 'install', 'hello', env_extra={})
         self.addCleanup(term.close)
+        term.read_until(b'Install this package?')
+        self.assertFalse((self.root / 'agent-called').exists())
+        self.assertFalse((self.root / 'build-called').exists())
+        term.send(b'y')
         term.read_until(b'Audit and install')
         term.send(b'y')
         term.read_until(b'Choose how to audit')
