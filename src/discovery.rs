@@ -363,10 +363,26 @@ impl Discovery {
         } else {
             filter = filter.hashtag("haps");
         }
-        if let Some(query) = query {
-            filter = filter.search(query);
-        }
         let mut events = lookup.query(vec![filter]).await?;
+        if let Some(query) = query {
+            // NIP-50 searches event content, but package names are in `d` tags.
+            // Match the bounded package metadata locally, including queries
+            // whose words span the name and description, before fetching releases.
+            events.retain(|event| {
+                let Ok(announcement) = Announcement::verify(event.clone()) else {
+                    return false;
+                };
+                let description = announcement
+                    .head
+                    .as_ref()
+                    .map(|head| head.description.as_str())
+                    .unwrap_or(&event.content);
+                let text = format!("{} {description}", announcement.name).to_lowercase();
+                query
+                    .split_whitespace()
+                    .all(|term| text.contains(&term.to_lowercase()))
+            });
+        }
         let ids: Vec<_> = events
             .iter()
             .filter_map(|event| Announcement::verify(event.clone()).ok())

@@ -148,6 +148,28 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
             );
         }
         assert!(run(&["identity", "init"]).status.success());
+        assert!(
+            run(&["follow", &publisher.public_key().to_hex()])
+                .status
+                .success()
+        );
+        // Registering an index imports its events. Remove only that disposable
+        // discovery cache so the first search must fetch the published index.
+        if home.join("discovery").exists() {
+            fs::remove_dir_all(home.join("discovery"))?;
+        }
+        // Search before any exact lookup has warmed the event cache. Package
+        // names live in tags, while descriptions live in the event content.
+        let search = run(&["search", "hel friendly", "--json"]);
+        anyhow::ensure!(
+            search.status.success(),
+            "cold {mode} search: {} {}",
+            String::from_utf8_lossy(&search.stderr),
+            String::from_utf8_lossy(&search.stdout)
+        );
+        let results: serde_json::Value = serde_json::from_slice(&search.stdout)?;
+        assert_eq!(results.as_array().unwrap().len(), 1);
+        assert_eq!(results[0]["package"]["name"], "hello");
         audit::local(&home, release.event.id)?;
         let package = format!("{}/hello", publisher.public_key().to_bech32()?);
         let result = run(&["--non-interactive", "install", &package, "--json"]);

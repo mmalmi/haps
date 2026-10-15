@@ -4,7 +4,7 @@ use std::{fs, process::Command};
 
 #[test]
 #[ignore = "downloads signed application payloads from the public Hashtree catalog"]
-fn published_example_apps_respect_audit_gate() -> anyhow::Result<()> {
+fn published_example_apps_respect_audit_gate_and_download_payloads() -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(
             haps::model::target(),
@@ -30,29 +30,52 @@ fn published_example_apps_respect_audit_gate() -> anyhow::Result<()> {
             "unknown example app"
         );
         eprintln!("Installing {app} from the public catalog...");
-        let output = Command::new(env!("CARGO_BIN_EXE_haps"))
-            .env("HAPS_HOME", &home)
-            .env("XDG_DATA_HOME", &data)
-            .env("HTREE_CONFIG_DIR", temp.path().join("hashtree"))
-            .env("HTREE_PREFER_LOCAL_DAEMON", "false")
-            .env_remove("HTREE_LOCAL_DAEMON_ONLY")
-            .env_remove("HAPS_NO_DEFAULTS")
-            .args([
-                "--non-interactive",
-                "install",
-                &format!("{publisher}/{app}"),
-                "--json",
-            ])
-            .output()?;
+        let command = || {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_haps"));
+            command
+                .env("HAPS_HOME", &home)
+                .env("XDG_DATA_HOME", &data)
+                .env("HTREE_CONFIG_DIR", temp.path().join("hashtree"))
+                .env("HTREE_PREFER_LOCAL_DAEMON", "false")
+                .env_remove("HTREE_LOCAL_DAEMON_ONLY")
+                .env_remove("HAPS_NO_DEFAULTS")
+                .env_remove("NOSTR_RELAYS");
+            command
+        };
+        // The website's names must be searchable without an earlier exact
+        // package lookup having imported their metadata into the local cache.
+        let search = command().args(["search", app, "--json"]).output()?;
+        anyhow::ensure!(
+            search.status.success(),
+            "{app} cold search failed: {} {}",
+            String::from_utf8_lossy(&search.stderr),
+            String::from_utf8_lossy(&search.stdout)
+        );
+        let matches: serde_json::Value = serde_json::from_slice(&search.stdout)?;
+        assert!(
+            matches
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| { item["publisher"] == publisher && item["package"]["name"] == app })
+        );
+        let mut install = command();
+        install.args([
+            "--non-interactive",
+            "install",
+            &format!("{publisher}/{app}"),
+            "--json",
+        ]);
+        let mut output = install.output()?;
         if !output.status.success() {
             let response: serde_json::Value = serde_json::from_slice(&output.stdout)?;
             let message = response["error"]["message"].as_str().unwrap_or("");
             if message.contains("requires 1 audit(s) from your social graph; found 0") {
                 assert!(!home.join("installed.json").exists());
                 eprintln!(
-                    "{app}: discovered signed release, correctly blocked because no trusted audit exists; native payload check awaits an audit"
+                    "{app}: audit gate passed; checking payload transport with a one-operation bypass in the disposable test home"
                 );
-                continue;
+                output = install.arg("--allow-unaudited").output()?;
             }
         }
         anyhow::ensure!(
