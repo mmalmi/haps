@@ -108,7 +108,11 @@ def main():
             # Discovery alone must not silently authorize a stranger's code.
             denied = run('install', proof['name'], '--json', check=False)
             assert denied.returncode != 0 and 'social graph' in denied.stdout.lower(), denied.stdout
-            explicit_install = run('install', explicit, '--json')
+            unaudited = run('install', explicit, '--json', check=False)
+            assert unaudited.returncode != 0 and 'audit' in unaudited.stdout.lower(), unaudited.stdout
+            # This disposable transport fixture has no audit. Check the gate,
+            # then explicitly bypass it for this operation to verify its bytes.
+            explicit_install = run('install', explicit, '--allow-unaudited', '--json')
             assert 'not authored or vouched for by your social graph' in explicit_install.stderr
             run('follow', proof['publisher'])
             found = json.loads(run('search', proof['name'], '--json').stdout)
@@ -116,7 +120,7 @@ def main():
             unconfirmed = run('install', proof['name'], '--json', check=False)
             assert unconfirmed.returncode != 0
             assert json.loads(unconfirmed.stdout)['error']['code'] == 'publisher_confirmation_required'
-            installed = json.loads(run('install', explicit, '--json').stdout)
+            installed = json.loads(run('install', explicit, '--allow-unaudited', '--json').stdout)
             assert installed['release']['release_id'] == proof['release_id']
             assert run('run', proof['name']).stdout.strip() == proof['message']
             directory = Path(run('path', proof['name']).stdout.strip())
@@ -127,6 +131,7 @@ def main():
                               'name': proof['name'], 'release_id': proof['release_id'],
                               'manual_sources': 0, 'found_by': 'name search',
                               'unknown_publisher_hidden': True, 'bare_untrusted_install_blocked': True,
+                              'unaudited_install_blocked': True,
                               'explicit_install_warned': True, 'installed_and_executed': True}))
 
 

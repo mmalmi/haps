@@ -891,6 +891,10 @@ cargo test --locked
 The regular suite uses temporary identities, repositories and homes, with loopback
 relays and HTTP servers. It covers announcement retries, publisher discovery,
 signed shared indexes and an install by `npub/package` without a registered catalog.
+The two-user CLI test packs and publishes as one identity, then searches by name,
+installs and runs the package as another identity with an empty discovery cache.
+It uses a local relay and blob server; only the external `htree` upload helper is
+substituted, and no publisher keys, catalogs or caches are given to the reader.
 A three-user relay test covers discovery, comments and replies, socially filtered
 endorsements and warnings, installation blocking, and revoked findings without
 manual event imports. A separate opt-in `tests/public_discovery_e2e.py` runs the
