@@ -921,8 +921,12 @@ HAPS_TEST_ISOLATED=1 HAPS_TEST_APPS=iris-chat,iris-drive,nostr-vpn cargo test --
 ```
 
 Public catalog or transport outages fail this acceptance check. A signed release
-without a trusted audit must be blocked; native payload checks run only for
-audited releases. Ordinary `cargo test` remains independent of public services.
+without a trusted audit must first be blocked without creating an installation.
+The test then uses `--allow-unaudited` for one operation in its disposable home
+to check the actual payload, executable, receipt, and applicable platform
+signature or launcher.
+This bypass creates no audit and does not change the default installation policy.
+Ordinary `cargo test` remains independent of public services.
 
 The static website lives in `website/public` and deploys with the adjacent Wrangler
 configuration. Publish that directory separately as `haps-site` on hashtree; the
