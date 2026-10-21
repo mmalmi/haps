@@ -41,7 +41,15 @@ struct Prepared {
     payload: PathBuf,
 }
 
-pub async fn prepare(args: &ReleaseArgs, home: &Path) -> Result<Option<(PathBuf, String, Keys)>> {
+pub struct PreparedRelease {
+    pub directory: PathBuf,
+    pub catalog: String,
+    pub keys: Keys,
+    pub releases: std::collections::BTreeSet<nostr::EventId>,
+    pub packages: std::collections::BTreeSet<String>,
+}
+
+pub async fn prepare(args: &ReleaseArgs, home: &Path) -> Result<Option<PreparedRelease>> {
     let config: Config = serde_json::from_slice(&fs::read(&args.config)?)?;
     safe_name(&config.catalog)?;
     let keys = load_keys(
@@ -110,6 +118,8 @@ pub async fn prepare(args: &ReleaseArgs, home: &Path) -> Result<Option<(PathBuf,
     }
     let repo = Repository::local(directory.join("packages"))?;
     let discovery = crate::discovery::Discovery::open(&directory)?;
+    let mut releases = std::collections::BTreeSet::new();
+    let mut packages = std::collections::BTreeSet::new();
     for package in plan {
         let release = repo
             .publish_reusable(&keys, package.spec, &package.payload)
@@ -118,7 +128,15 @@ pub async fn prepare(args: &ReleaseArgs, home: &Path) -> Result<Option<(PathBuf,
             "Prepared {} {} {}",
             release.data.package.name, release.data.package.version, release.data.package.target
         );
+        releases.insert(release.event.id);
+        packages.insert(release.data.package.name.clone());
         discovery.ingest([release.event]).await?;
     }
-    Ok(Some((directory.join("packages"), config.catalog, keys)))
+    Ok(Some(PreparedRelease {
+        directory: directory.join("packages"),
+        catalog: config.catalog,
+        keys,
+        releases,
+        packages,
+    }))
 }

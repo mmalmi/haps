@@ -5,9 +5,24 @@ use haps::{
 use nostr::nips::nip19::ToBech32;
 use std::{collections::BTreeMap, fs, process::Command};
 
-#[tokio::test]
+#[path = "support/network.rs"]
+mod network;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn publish_checks_catalog_before_using_existing_or_bundled_htree() -> anyhow::Result<()> {
     let temp = tempfile::tempdir()?;
+    let accept = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let app = axum::Router::new()
+        .route("/", axum::routing::get(network::relay))
+        .route("/catalog/*path", axum::routing::get(network::catalog_file))
+        .with_state(network::RelayState {
+            events: Default::default(),
+            catalog: temp.path().into(),
+            accept: accept.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let relay = format!("ws://{}/", listener.local_addr()?);
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let catalog = temp.path().join("catalog with spaces");
     let payload = temp.path().join("payload");
     fs::create_dir(&payload)?;
@@ -89,7 +104,7 @@ fn main() {
             .env("PUBLISH_MARKER", &marker)
             .env("TEST_HOST", keys.public_key().to_bech32().unwrap())
             .env("TEST_ROOT", hashtree_core::nhash_encode(&[1; 32]).unwrap())
-            .env("NOSTR_RELAYS", "")
+            .env("NOSTR_RELAYS", &relay)
             .env("HTREE_PREFER_LOCAL_DAEMON", "false")
             .env("HTREE_CONFIG_DIR", temp.path().join("hashtree"))
             .args(["--no-defaults", "--home"])
@@ -114,7 +129,7 @@ fn main() {
     assert!(fs::read_to_string(&marker)?.contains("libexec"));
     assert_eq!(
         fs::read_dir(temp.path().join("home/discovery/outbox"))?.count(),
-        2
+        0
     );
     let announcements = haps::discovery::Discovery::open(&temp.path().join("home"))?
         .announcements(Some(keys.public_key()))
@@ -125,6 +140,12 @@ fn main() {
     fs::create_dir(&existing)?;
     fs::copy(&helper, existing.join(format!("htree{suffix}")))?;
     assert!(run(&haps, &existing, false).status.success());
+    accept.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        !run(&haps, &existing, false).status.success(),
+        "an explicit relay rejection must fail the current publication"
+    );
+    accept.store(true, std::sync::atomic::Ordering::Relaxed);
     assert!(fs::read_to_string(&marker)?.contains("existing"));
     assert!(!run(&haps, &existing, true).status.success());
     let bare = temp.path().join(format!("haps{suffix}"));
@@ -153,7 +174,7 @@ fn main() {
             .env("PUBLISH_MARKER", &marker)
             .env("TEST_HOST", keys.public_key().to_bech32().unwrap())
             .env("TEST_ROOT", hashtree_core::nhash_encode(&[1; 32]).unwrap())
-            .env("NOSTR_RELAYS", "")
+            .env("NOSTR_RELAYS", &relay)
             .env("HTREE_PREFER_LOCAL_DAEMON", "false")
             .env("HTREE_CONFIG_DIR", temp.path().join("hashtree"))
             .env("HAPS_HOME", &managed)
@@ -179,6 +200,12 @@ fn main() {
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("content upload failed"));
     assert!(!managed.join("discovery/outbox").exists());
+    accept.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        !managed_run(&["catalog", "publish"], false).status.success(),
+        "an explicit relay rejection must fail the current catalog publication"
+    );
+    accept.store(true, std::sync::atomic::Ordering::Relaxed);
     let published = managed_run(&["catalog", "publish"], false);
     assert!(
         published.status.success(),
@@ -221,5 +248,6 @@ fn main() {
     fs::write(file, serde_json::to_vec(&event)?)?;
     assert!(!run(&haps, &existing, false).status.success());
     assert!(!marker.exists(), "invalid catalogs must not be published");
+    task.abort();
     Ok(())
 }

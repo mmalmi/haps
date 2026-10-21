@@ -1854,6 +1854,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                         selected.ingest(package_events.clone()).await?;
                     }
                     let location = haps::event_catalog::upload_index(
+                        &home,
                         &selected.events(vec![nostr::Filter::new()]).await?,
                     )?;
                     drop(selected);
@@ -1866,8 +1867,8 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     )?;
                     package_events.push(announcement);
                     discovery.queue(&package_events)?;
-                    discovery.ingest(package_events).await?;
-                    flush_discovery(&home, &discovery).await;
+                    discovery.ingest(package_events.clone()).await?;
+                    flush_discovery(&home, &discovery, &package_events).await?;
                     println!("Published catalog {name}: {location}");
                 }
             }
@@ -1954,11 +1955,18 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             haps::security::configure(&home, rules.as_deref(), scanner.as_deref(), disable)?;
         }
         Command::ImportRelease(args) => {
-            if let Some((path, name, keys)) = haps::release::prepare(&args, &home).await? {
+            if let Some(prepared) = haps::release::prepare(&args, &home).await? {
+                let haps::release::PreparedRelease {
+                    directory: path,
+                    catalog: name,
+                    keys,
+                    releases,
+                    packages,
+                } = prepared;
                 if args.publish {
                     let mut events =
                         haps::event_catalog::package_events(&home, &path, &keys, None).await?;
-                    let location = haps::event_catalog::upload_index(&events)?;
+                    let location = haps::event_catalog::upload_index(&home, &events)?;
                     let discovery = Discovery::open(&home)?;
                     let previous = discovery.events(vec![nostr::Filter::new()]).await?;
                     events.push(haps::event_catalog::advance(
@@ -1966,14 +1974,31 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                         haps::event_catalog::IndexAnnouncement::sign(&keys, &name, &location)?,
                         &previous,
                     )?);
-                    discovery.queue(&events)?;
+                    let required: Vec<_> = events
+                        .iter()
+                        .filter(|event| {
+                            releases.contains(&event.id)
+                                || (event.kind == haps::discovery::SOFTWARE_KIND
+                                    && haps::model::tag_value(event, "d")
+                                        .is_ok_and(|name| packages.contains(name)))
+                                || event.kind == haps::event_catalog::INDEX_KIND
+                        })
+                        .cloned()
+                        .collect();
+                    discovery.queue(&required)?;
                     discovery.ingest(events).await?;
                     let bus = haps::discovery::relay_bus(&home).await?;
                     ensure!(
-                        discovery.flush(&bus).await? == 0,
+                        discovery.flush_events(&bus, &required).await? == 0,
                         "release announcements remain queued; run haps sync before considering publication complete"
                     );
                     println!("Release announcements acknowledged by a relay");
+                    let historical = discovery.pending()?;
+                    if historical > 0 {
+                        eprintln!(
+                            "{historical} unrelated announcements remain queued; retry with haps sync"
+                        );
+                    }
                 } else {
                     println!("Prepared catalog {name}; publish with haps catalog publish {name}");
                 }
@@ -1992,12 +2017,18 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 haps::event_catalog::package_events(&home, &path, &keys, Some(&name)).await?;
             let discovery = Discovery::open(&home)?;
             discovery.queue(&events)?;
-            discovery.ingest(events).await?;
-            flush_discovery(&home, &discovery).await;
+            discovery.ingest(events.clone()).await?;
+            flush_discovery(&home, &discovery, &events).await?;
         }
         Command::Sync => {
             let discovery = Discovery::open(&home)?;
-            flush_discovery(&home, &discovery).await;
+            let bus = haps::discovery::relay_bus(&home).await?;
+            let pending = discovery.flush(&bus).await?;
+            ensure!(
+                pending == 0,
+                "{pending} announcements remain queued; retry with haps sync"
+            );
+            println!("Announcements acknowledged by a relay");
             drop(discovery);
             refresh_discovery(&home, &mut config, &mut trust, None, None, None).await?;
         }
@@ -2838,15 +2869,19 @@ async fn refresh_feedback(
     save_comments(home, &comments)
 }
 
-async fn flush_discovery(home: &Path, discovery: &Discovery) {
-    match haps::discovery::relay_bus(home).await {
-        Ok(bus) => match discovery.flush(&bus).await {
-            Ok(0) => println!("Announcements acknowledged by a relay"),
-            Ok(pending) => eprintln!("{pending} announcements queued; retry with haps sync"),
-            Err(error) => eprintln!("Announcements remain queued: {error:#}"),
-        },
-        Err(error) => eprintln!("Announcements remain queued: {error:#}. Retry with haps sync"),
+async fn flush_discovery(home: &Path, discovery: &Discovery, events: &[Event]) -> Result<()> {
+    let bus = haps::discovery::relay_bus(home).await?;
+    let pending = discovery.flush_events(&bus, events).await?;
+    ensure!(
+        pending == 0,
+        "{pending} publication announcements remain queued; retry with haps sync"
+    );
+    println!("Announcements acknowledged by a relay");
+    let historical = discovery.pending()?;
+    if historical > 0 {
+        eprintln!("{historical} unrelated announcements remain queued; retry with haps sync");
     }
+    Ok(())
 }
 
 async fn discover_social_indexes(

@@ -88,12 +88,23 @@ pub fn root_url(root: &Cid) -> Result<String> {
 
 /// Import selected events into an isolated native htree store and push its DAG.
 /// No directory wrapper, Haps manifest, or private browsing records are included.
-pub fn upload_index(events: &[Event]) -> Result<String> {
+pub fn upload_index(home: &Path, events: &[Event]) -> Result<String> {
     ensure!(
         !events.is_empty(),
         "catalog is empty; add a package before publishing"
     );
     let helper = crate::helpers::find("htree").context("Publishing needs htree. Install the Haps bundle or run `cargo install hashtree-cli --locked`.")?;
+    let scope = crate::publication::scope(
+        home,
+        &(
+            events.iter().map(|event| event.id).collect::<Vec<_>>(),
+            crate::publication::helper_identity(&helper)?,
+        ),
+    )?;
+    let _guard = lock(&scope.join("publish.lock"))?;
+    if let Some(root) = crate::publication::uploaded(&scope) {
+        return Ok(root);
+    }
     let staging = tempfile::tempdir()?;
     let input = staging.path().join("events.json");
     std::fs::write(&input, serde_json::to_vec(events)?)?;
@@ -124,7 +135,9 @@ pub fn upload_index(events: &[Event]) -> Result<String> {
         output.status.success(),
         "Hashtree content upload failed; catalog was not announced"
     );
-    root_url(&root)
+    let location = root_url(&root)?;
+    crate::publication::remember(&scope, &location)?;
+    Ok(location)
 }
 
 pub fn directory(home: &Path, name: &str) -> Result<PathBuf> {
@@ -142,20 +155,23 @@ pub fn advance(keys: &Keys, event: Event, previous: &[Event]) -> Result<Event> {
                 && old.kind == event.kind
                 && tag_value(old, "d").ok() == Some(identifier)
         })
-        .map(|old| old.created_at)
-        .max();
-    if let Some(latest) = latest
-        && latest >= event.created_at
-    {
-        return Ok(EventBuilder::new(event.kind, event.content)
-            .tags(event.tags)
-            .custom_created_at(Timestamp::from(
-                latest
-                    .as_secs()
-                    .checked_add(1)
-                    .context("timestamp overflow")?,
-            ))
-            .sign_with_keys(keys)?);
+        .max_by_key(|old| old.created_at);
+    if let Some(latest) = latest {
+        if latest.content == event.content && latest.tags == event.tags {
+            return Ok(latest.clone());
+        }
+        if latest.created_at >= event.created_at {
+            return Ok(EventBuilder::new(event.kind, event.content)
+                .tags(event.tags)
+                .custom_created_at(Timestamp::from(
+                    latest
+                        .created_at
+                        .as_secs()
+                        .checked_add(1)
+                        .context("timestamp overflow")?,
+                ))
+                .sign_with_keys(keys)?);
+        }
     }
     Ok(event)
 }
@@ -211,8 +227,11 @@ pub async fn add_package(home: &Path, name: &str, package: &str) -> Result<usize
 }
 
 /// Confirm upload before using the immutable root in signed discovery events.
-pub fn upload(path: &Path, legacy_name: Option<&str>) -> Result<String> {
+pub fn upload(home: &Path, path: &Path, legacy_name: Option<&str>) -> Result<String> {
     let helper = crate::helpers::find("htree").context("Publishing needs htree. Install the Haps bundle or run `cargo install hashtree-cli --locked`.")?;
+    if legacy_name.is_none() {
+        return crate::publication::upload_directory(home, &helper, path);
+    }
     let mut command = std::process::Command::new(&helper);
     command.arg("add").arg(path);
     if let Some(name) = legacy_name {
@@ -232,7 +251,12 @@ pub fn upload(path: &Path, legacy_name: Option<&str>) -> Result<String> {
         output.status.success(),
         "Hashtree catalog publication failed"
     );
-    let text = String::from_utf8(output.stdout)?;
+    let location = uploaded_root(&output.stdout)?;
+    Ok(location)
+}
+
+pub(crate) fn uploaded_root(output: &[u8]) -> Result<String> {
+    let text = std::str::from_utf8(output)?;
     let hash = text
         .lines()
         .find_map(|line| {
@@ -249,16 +273,6 @@ pub fn upload(path: &Path, legacy_name: Option<&str>) -> Result<String> {
         })
         .context("htree did not return an immutable nhash; update hashtree-cli")?;
     hashtree_core::nhash_decode(hash)?;
-    if legacy_name.is_none() {
-        let output = std::process::Command::new(helper)
-            .args(["push", hash])
-            .output()?;
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
-        ensure!(
-            output.status.success(),
-            "Hashtree content upload failed; catalog was not announced"
-        );
-    }
     Ok(format!("htree://{hash}"))
 }
 
@@ -271,7 +285,7 @@ pub async fn package_events(
     let repo = crate::repository::Repository::local(path.to_path_buf())?;
     let snapshot = repo.catalog(&keys.public_key().to_hex()).await?;
     let releases = repo.releases(&snapshot).await?;
-    let location = upload(path, legacy_name)?;
+    let location = upload(home, path, legacy_name)?;
     let previous = Discovery::open(home)?
         .events(vec![nostr::Filter::new()])
         .await?;

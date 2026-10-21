@@ -15,6 +15,7 @@ pub mod lookup;
 pub mod model;
 pub mod package_head;
 pub mod progress;
+mod publication;
 pub mod repository;
 pub mod security;
 pub mod store;

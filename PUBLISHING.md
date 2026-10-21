@@ -154,7 +154,28 @@ signing keys private.
 the Haps publisher's key. It must match the catalog signer; use `--key-file` when
 you packed with a separate key. The hosting identity remains independent.
 Announcements that do not receive a relay acknowledgement stay queued locally;
-retry them with `haps sync`.
+retry them with `haps sync`. A publication exits unsuccessfully until its own
+required announcements receive positive relay acknowledgements. Older unrelated
+outbox entries remain queued and are reported separately. `haps sync` retries
+the whole queue and exits unsuccessfully if anything remains unacknowledged.
+
+Managed catalogs and `import-release --publish` keep private upload checkpoints
+outside the published directory. With a compatible `htree`, later publications
+reuse unchanged source-file addresses and upload only changes since the last
+successfully uploaded root. An unchanged retry preserves signed release and head
+events. Failed uploads never advance that checkpoint. Changing the catalog,
+helper, storage directory, or file-server configuration starts a separate scope;
+existing history remains included. The first publication without a valid cache
+still addresses the complete catalog.
+
+Haps probes optional helper capabilities: directory addressing caches require the
+new Unix `htree add --cache` option; retained-root delta upload is available from
+`htree` 0.2.152. Older bundled or installed helpers remain supported, with a clear
+notice when these speedups are unavailable. The addressing cache trusts stable
+Unix file identity/change metadata and immutable local content-addressed storage;
+upload checkpoints trust retention on the same previously successful file-server
+configuration. These caches do not perform a full payload-integrity or remote
+retention audit on every publication.
 
 Readers can find your package by name or publisher:
 

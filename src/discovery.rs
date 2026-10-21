@@ -444,17 +444,57 @@ impl Discovery {
         Ok(())
     }
     pub async fn flush(&self, bus: &RelayEventBus) -> Result<usize> {
+        self.flush_selected(bus, None).await
+    }
+    /// Require positive relay acknowledgements only for this publication.
+    /// Unrelated historical entries remain durable for an explicit `sync`.
+    pub async fn flush_events(&self, bus: &RelayEventBus, events: &[Event]) -> Result<usize> {
+        ensure!(!events.is_empty(), "publication has no required events");
+        let ids = events.iter().map(|event| event.id).collect();
+        self.flush_selected(bus, Some(&ids)).await
+    }
+    pub fn pending(&self) -> Result<usize> {
+        let dir = self.home.join("discovery/outbox");
+        if !dir.exists() {
+            return Ok(0);
+        }
+        Ok(fs::read_dir(dir)?.count())
+    }
+    async fn flush_selected(
+        &self,
+        bus: &RelayEventBus,
+        ids: Option<&std::collections::BTreeSet<nostr::EventId>>,
+    ) -> Result<usize> {
         bus.client()
             .wait_for_connection(Duration::from_secs(3))
             .await;
         let dir = self.home.join("discovery/outbox");
         if !dir.exists() {
+            ensure!(
+                ids.is_none(),
+                "required publication events are missing from the outbox"
+            );
             return Ok(0);
         }
         let mut pending = 0;
+        let mut found = std::collections::BTreeSet::new();
         for entry in fs::read_dir(&dir)? {
             let path = entry?.path();
+            if let Some(ids) = ids
+                && !path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .and_then(|id| nostr::EventId::from_hex(id).ok())
+                    .is_some_and(|id| ids.contains(&id))
+            {
+                continue;
+            }
             let event: Event = read_json(&path)?;
+            ensure!(
+                path.file_stem().and_then(|name| name.to_str()) == Some(&event.id.to_hex()),
+                "queued event ID does not match its filename"
+            );
+            found.insert(event.id);
             ensure!(
                 retained(&event) || crate::feedback::valid(&event),
                 "invalid queued event"
@@ -473,6 +513,12 @@ impl Discovery {
                 eprintln!("Announcement {} remains queued: {:?}", event.id, result);
                 pending += 1;
             }
+        }
+        if let Some(ids) = ids {
+            ensure!(
+                ids.is_subset(&found),
+                "required publication events are missing from the outbox"
+            );
         }
         Ok(pending)
     }

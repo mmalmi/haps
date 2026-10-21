@@ -232,7 +232,10 @@ async fn direct_head_cannot_change_publisher_release_or_platform() -> anyhow::Re
     assert!(Announcement::verify(forged).is_err());
     let advanced =
         haps::event_catalog::advance(&author, event.clone(), std::slice::from_ref(&event))?;
-    assert!(advanced.created_at > event.created_at);
+    assert_eq!(
+        advanced, event,
+        "an unchanged retry must preserve the exact signed head"
+    );
     // Invalid catalog advertisements are rejected before being retained.
     let bad = EventBuilder::new(haps::model::APP_KIND, "{}")
         .tags([Tag::identifier("haps/index/../bad")])
