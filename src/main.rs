@@ -1546,6 +1546,7 @@ async fn main() -> ExitCode {
 
 async fn execute(mut cli: Cli) -> Result<u8> {
     let non_interactive = cli.non_interactive || cli.command.json();
+    haps::progress::Progress::plain_output(non_interactive);
     let bootstrap = if matches!(&cli.command, Command::Update { package, .. } if package == "haps")
     {
         let installer = haps::bootstrap::Installer::current()?;

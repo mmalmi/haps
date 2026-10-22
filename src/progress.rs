@@ -1,12 +1,16 @@
 //! Optional CLI progress. A separate reporter stays responsive during blocking I/O too.
 use std::{
     io::{self, IsTerminal, Write},
-    sync::{Arc, Condvar, Mutex},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 
 const INTERVAL: Duration = Duration::from_secs(5);
+static PLAIN_OUTPUT: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Default)]
 pub struct Progress(Option<Arc<Shared>>);
@@ -40,6 +44,11 @@ struct Transfer {
 }
 
 impl Progress {
+    /// Apply the CLI output mode to every reporter, including nested audit phases.
+    pub fn plain_output(plain: bool) {
+        PLAIN_OUTPUT.store(plain, Ordering::Relaxed);
+    }
+
     pub fn stderr(enabled: bool) -> io::Result<(Self, Reporter)> {
         if !enabled {
             return Ok((Self::default(), Reporter(None)));
@@ -49,7 +58,9 @@ impl Progress {
                 phase: None,
                 last_output: Instant::now(),
                 stopped: false,
-                inline: io::stderr().is_terminal(),
+                inline: io::stderr().is_terminal()
+                    && !PLAIN_OUTPUT.load(Ordering::Relaxed)
+                    && !std::env::var("TERM").is_ok_and(|term| term == "dumb"),
                 line_visible: false,
             }),
             wake: Condvar::new(),
