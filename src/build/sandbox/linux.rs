@@ -10,6 +10,7 @@ pub(super) fn preflight() -> Result<()> {
         let output = Command::new("/usr/bin/bwrap")
             .args([
                 "--unshare-all",
+                "--unshare-user",
                 "--die-with-parent",
                 "--disable-userns",
                 "--cap-drop",
@@ -49,6 +50,7 @@ pub(super) fn command(runner: &Runner, args: &[String]) -> Result<Command> {
     // mounted; --share-net also grants access to abstract Unix sockets.
     command.args([
         "--unshare-all",
+        "--unshare-user",
         "--die-with-parent",
         "--new-session",
         "--disable-userns",

@@ -77,6 +77,8 @@ if sys.platform == 'linux':
     status = pathlib.Path('/proc/self/status').read_text()
     assert 'NoNewPrivs:\\t1' in status
     assert 'CapEff:\\t0000000000000000' in status
+    nested = subprocess.run(['unshare','--user','/bin/true'], capture_output=True)
+    assert nested.returncode != 0, 'created another user namespace inside the sandbox'
 if sys.platform == 'darwin':
     import ctypes
     libc = ctypes.CDLL('/usr/lib/libSystem.B.dylib', use_errno=True)
