@@ -92,6 +92,7 @@ impl Runner {
             "/opt/hostedtoolcache",
             "/etc/ld.so.cache",
             "/etc/ld.so.conf",
+            "/etc/alternatives",
             "/etc/passwd",
             "/etc/group",
             "/etc/nsswitch.conf",
