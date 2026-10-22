@@ -5,8 +5,10 @@ use haps::{
 use nostr::Keys;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct Relay {
+    silent: bool,
+    acknowledgement_delay: Duration,
     rejected: Arc<tokio::sync::Mutex<std::collections::BTreeSet<nostr::EventId>>>,
     rejected_names: Arc<tokio::sync::Mutex<std::collections::BTreeSet<String>>>,
     received: Arc<tokio::sync::Mutex<Vec<nostr::Event>>>,
@@ -32,8 +34,12 @@ async fn relay(
                 Err(_) => false,
             };
             let accepted = !state.rejected.lock().await.contains(&event.id) && !rejected_name;
-            eprintln!("Fixture relay acknowledgement: {} {accepted}", event.id);
             state.received.lock().await.push(event.clone());
+            if state.silent {
+                continue;
+            }
+            tokio::time::sleep(state.acknowledgement_delay).await;
+            eprintln!("Fixture relay acknowledgement: {} {accepted}", event.id);
             if socket
                 .send(axum::extract::ws::Message::Text(
                     serde_json::json!(["OK", event.id, accepted, "fixture acknowledgement"])
@@ -77,6 +83,7 @@ async fn publication_requires_only_current_events_and_preserves_unrelated_outbox
         rejected: Arc::new(tokio::sync::Mutex::new([old.id].into())),
         rejected_names: Default::default(),
         received: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        ..Default::default()
     };
     let app = axum::Router::new()
         .route("/", axum::routing::get(relay))
@@ -144,6 +151,7 @@ async fn sync_exits_unsuccessfully_while_announcements_are_rejected() -> anyhow:
         rejected: Arc::new(tokio::sync::Mutex::new([event.id].into())),
         rejected_names: Default::default(),
         received: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        ..Default::default()
     };
     let app = axum::Router::new()
         .route("/", axum::routing::get(relay))
@@ -224,6 +232,7 @@ async fn real_import_release_scopes_acknowledgements_and_preserves_history_on_re
         rejected: Arc::new(tokio::sync::Mutex::new([historical[0].event.id].into())),
         rejected_names: Arc::new(tokio::sync::Mutex::new(["untouched".into()].into())),
         received: Default::default(),
+        ..Default::default()
     };
     let app = axum::Router::new()
         .route("/", axum::routing::get(relay))
@@ -361,5 +370,76 @@ with tarfile.open(archive,'w:gz') as output:
     }
     assert_eq!(Discovery::open(&home)?.pending()?, 2);
     task.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_positive_ack_wins_over_rejection_and_silence_without_losing_pending_events()
+-> anyhow::Result<()> {
+    let temp = tempfile::tempdir()?;
+    let event = announcement(&Keys::generate(), "first-ack")?;
+    let rejected = Relay {
+        rejected: Arc::new(tokio::sync::Mutex::new([event.id].into())),
+        ..Default::default()
+    };
+    let silent = Relay {
+        silent: true,
+        ..Default::default()
+    };
+    let accepted = Relay {
+        acknowledgement_delay: Duration::from_millis(200),
+        ..Default::default()
+    };
+    let mut tasks = Vec::new();
+    let mut urls = Vec::new();
+    for state in [rejected, silent.clone(), accepted.clone()] {
+        let app = axum::Router::new()
+            .route("/", axum::routing::get(relay))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        urls.push(format!("ws://{}/", listener.local_addr()?));
+        tasks.push(tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap()
+        }));
+    }
+    let bus = nostr_pubsub_relay::RelayEventBus::new(&urls, Duration::from_secs(1)).await?;
+    let discovery = Discovery::open(temp.path())?;
+    discovery.queue(std::slice::from_ref(&event))?;
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        discovery.flush_events(&bus, std::slice::from_ref(&event)),
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "a silent relay must not hide an already received positive ACK"
+    );
+    assert_eq!(result??, 0);
+    assert_eq!(
+        accepted.received.lock().await.as_slice(),
+        std::slice::from_ref(&event)
+    );
+    assert_eq!(
+        silent.received.lock().await.as_slice(),
+        std::slice::from_ref(&event)
+    );
+    assert_eq!(discovery.pending()?, 0);
+    // No positive ACK: rejection alone or queueing to a silent relay is insufficient.
+    discovery.queue(std::slice::from_ref(&event))?;
+    let path = temp
+        .path()
+        .join(format!("discovery/outbox/{}.json", event.id));
+    let original = std::fs::read(&path)?;
+    let no_ack = nostr_pubsub_relay::RelayEventBus::new(&urls[..2], Duration::from_secs(1)).await?;
+    assert_eq!(
+        discovery
+            .flush_events(&no_ack, std::slice::from_ref(&event))
+            .await?,
+        1
+    );
+    assert_eq!(std::fs::read(path)?, original);
+    for task in tasks {
+        task.abort();
+    }
     Ok(())
 }

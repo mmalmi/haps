@@ -2,6 +2,7 @@
 //! Index operators transport publisher signatures; they never become package authors.
 use crate::{model::*, repository::Repository, store::VerifiedStore};
 use anyhow::{Context, Result, ensure};
+use futures::{StreamExt, stream::FuturesUnordered};
 use hashtree_core::Cid;
 use hashtree_index::{SearchIndex, SearchIndexOptions};
 use hashtree_nostr::{NostrEventStore, stored_event_from_nostr_sdk_event};
@@ -501,13 +502,26 @@ impl Discovery {
             );
             // EventBus::publish only acknowledges an in-memory send queue.
             // Keep the durable copy until an actual relay sends a positive OK.
-            let result = tokio::time::timeout(
-                Duration::from_secs(10),
-                bus.client()
-                    .send_event_to(bus.relays().iter().map(String::as_str), &event),
-            )
+            let result = tokio::time::timeout(Duration::from_secs(10), async {
+                // The SDK's multi-relay send waits for *all* acknowledgements
+                // before returning any successes. A silent relay must not hide
+                // a positive OK already received for this exact event.
+                let mut sends: FuturesUnordered<_> = bus
+                    .relays()
+                    .iter()
+                    .map(|relay| bus.client().send_event_to([relay.as_str()], &event))
+                    .collect();
+                let mut failures = Vec::new();
+                while let Some(result) = sends.next().await {
+                    if matches!(&result, Ok(output) if !output.success.is_empty()) {
+                        return Ok(());
+                    }
+                    failures.push(format!("{result:?}"));
+                }
+                Err(failures)
+            })
             .await;
-            if matches!(result, Ok(Ok(ref output)) if !output.success.is_empty()) {
+            if matches!(result, Ok(Ok(()))) {
                 fs::remove_file(path)?;
             } else {
                 eprintln!("Announcement {} remains queued: {:?}", event.id, result);
