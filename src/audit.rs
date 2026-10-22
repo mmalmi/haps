@@ -1,4 +1,5 @@
 //! Release audit evidence. A review and a reproducible-build check are distinct.
+use crate::progress::Progress;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, process::Command};
@@ -55,6 +56,18 @@ pub fn review(
     model: Option<&str>,
     interactive: bool,
 ) -> Result<Review> {
+    let (progress, _reporter) = Progress::stderr(true)?;
+    review_with_progress(checkout, agent, model, interactive, &progress)
+}
+
+fn review_with_progress(
+    checkout: &crate::build::Checkout,
+    agent: &str,
+    model: Option<&str>,
+    interactive: bool,
+    progress: &Progress,
+) -> Result<Review> {
+    progress.clear();
     let root = checkout.root();
     eprintln!("Audit source: {}", root.display());
     eprintln!("Build recipe: {}", serde_json::to_string(&checkout.recipe)?);
@@ -88,6 +101,7 @@ pub fn review(
         eprintln!(
             "Reviewing with {agent}; source is sent to its configured service. A passing review permits the build recipe to run with your user permissions."
         );
+        progress.stage(format!("Reviewing source with {agent}"));
         let input = tempfile::NamedTempFile::new()?;
         crate::model::atomic_write(input.path(), &serde_json::to_vec(&checkout.recipe)?)?;
         let output = runner()
@@ -119,6 +133,7 @@ pub fn review(
         "audit needs a review note of at most 4096 bytes"
     );
     checkout.ensure_pristine()?;
+    progress.clear();
     Ok(review)
 }
 
@@ -131,6 +146,8 @@ pub async fn review_and_rebuild(
     interactive: bool,
 ) -> Result<(Evidence, String)> {
     let source = release.data.package.source.clone().context("this release has no pinned source; Audit and install cannot reproduce it. A reviewer can record an explicit audit with provenance instead")?;
+    let (progress, _reporter) = Progress::stderr(true)?;
+    progress.stage("Fetching pinned source for audit");
     let checkout = crate::build::Checkout::fetch(
         source.clone(),
         "haps-build.toml",
@@ -140,10 +157,11 @@ pub async fn review_and_rebuild(
         checkout.recipe.package == release.data.package,
         "source recipe does not describe the exact published package"
     );
+    progress.stage("Checking published package manifest");
     let manifest: crate::model::Manifest = repository.json(&release.data.manifest).await?;
     manifest.validate(&release.data.package)?;
-    let review = review(&checkout, agent, model, interactive)?;
-    let evidence = rebuild(home, release, &checkout, review.reviewer).await?;
+    let review = review_with_progress(&checkout, agent, model, interactive, &progress)?;
+    let evidence = rebuild(home, release, &checkout, review.reviewer, &progress).await?;
     Ok((evidence, review.note))
 }
 
@@ -152,8 +170,10 @@ async fn rebuild(
     release: &crate::model::Release,
     checkout: &crate::build::Checkout,
     reviewer: Reviewer,
+    progress: &Progress,
 ) -> Result<Evidence> {
     if crate::security::enabled(home) {
+        progress.stage("Scanning source before the audit build");
         let report = crate::security::scan_source(
             home,
             release
@@ -166,8 +186,9 @@ async fn rebuild(
         )?;
         crate::security::bind_report(home, release, report)?;
     }
-    eprintln!("Rebuilding the audited source...");
+    progress.stage("Rebuilding the audited source");
     let payload = checkout.execute()?;
+    progress.stage("Comparing rebuilt files with the published package");
     let rebuilt_repo =
         crate::repository::Repository::local(checkout.root().parent().unwrap().join("comparison"))?;
     let rebuilt = rebuilt_repo
@@ -177,6 +198,7 @@ async fn rebuild(
         rebuilt == release.data.manifest,
         "rebuilt payload does not match the published release (files, bytes, or executable metadata differ). No audit approval was recorded and nothing was installed"
     );
+    progress.clear();
     eprintln!("Rebuilt payload matches the published release.");
     Ok(Evidence {
         schema: "haps.audit.v1".into(),
@@ -200,6 +222,8 @@ async fn rebuild(
 /// A persistent, private checkout. Preparation never executes the build recipe.
 pub fn prepare(home: &Path, release: &crate::model::Release) -> Result<std::path::PathBuf> {
     let source = release.data.package.source.clone().context("this release has no pinned source; record an explicit completed audit with provenance instead")?;
+    let (progress, _reporter) = Progress::stderr(true)?;
+    progress.stage("Fetching pinned source for audit");
     let checkout =
         crate::build::Checkout::fetch(source, "haps-build.toml", &home.join("audits/pending"))?;
     ensure!(
@@ -295,17 +319,20 @@ pub async fn finish(
         .source
         .clone()
         .context("pinned source missing")?;
+    let (progress, _reporter) = Progress::stderr(true)?;
+    progress.stage("Fetching pinned source for audit");
     let checkout =
         crate::build::Checkout::fetch(source, "haps-build.toml", &home.join("audits/work"))?;
     ensure!(
         checkout.recipe.package == release.data.package,
         "source recipe does not describe the exact published package"
     );
+    progress.stage("Checking prepared source has not changed");
     ensure!(
         source_fingerprint(&directory.join("repo"))? == source_fingerprint(&checkout.root())?,
         "prepared source has changed; start a new audit instead of approving different files"
     );
-    let evidence = rebuild(home, &release, &checkout, reviewer).await?;
+    let evidence = rebuild(home, &release, &checkout, reviewer, &progress).await?;
     Ok((release, evidence))
 }
 

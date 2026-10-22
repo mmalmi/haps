@@ -1,10 +1,14 @@
 """Real CLI audit gate, agent review, rebuild, and immutable payload comparison."""
 import json
 import os
+import queue
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 import importlib.util
@@ -176,6 +180,74 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         self.assertTrue(info['audits'][0]['evidence']['binary_match'])
         self.assertFalse((self.home / 'discovery/outbox').exists())
         self.assertEqual(list((self.home / 'audits/work').iterdir()), [])
+
+    def test_audit_reports_source_and_agent_waits_before_completion(self):
+        self.publish()
+        fetch_gate = self.root / 'fetch-continue'
+        review_gate = self.root / 'review-continue'
+        real_git = shutil.which('git')
+        git = self.bin / 'git'
+        git.write_text('#!/usr/bin/env python3\n' +
+                       'import os, sys, time\nfrom pathlib import Path\n' +
+                       f'gate = Path({str(fetch_gate)!r})\n' +
+                       'if "clone" in sys.argv[1:]:\n'
+                       '    while not gate.exists(): time.sleep(0.02)\n' +
+                       f'os.execv({real_git!r}, [{real_git!r}, *sys.argv[1:]])\n')
+        git.chmod(0o755)
+        agent = self.bin / 'codex'
+        agent.write_text(agent.read_text().replace(
+            "out = pathlib.Path", f'import time\nwhile not pathlib.Path({str(review_gate)!r}).exists(): time.sleep(0.02)\nout = pathlib.Path'))
+        lines = queue.Queue()
+        transcript = []
+
+        def until(label, heartbeat=False):
+            deadline = time.monotonic() + 9
+            while True:
+                try:
+                    line = lines.get(timeout=max(0, deadline - time.monotonic()))
+                except queue.Empty:
+                    self.fail(f'No live {label!r} (heartbeat={heartbeat}): {"".join(transcript)}')
+                transcript.append(line)
+                if label in line and (not heartbeat or 's elapsed)' in line):
+                    return
+
+        with tempfile.TemporaryFile(mode='w+') as stdout:
+            process = subprocess.Popen(
+                [str(BINARY), '--home', str(self.home), 'install', self.package,
+                 '--audit-agent', 'codex', '--json'], env=self.env,
+                stdout=stdout, stderr=subprocess.PIPE, text=True)
+
+            def read_stderr():
+                for line in process.stderr:
+                    lines.put(line)
+
+            reader = threading.Thread(target=read_stderr, daemon=True)
+            reader.start()
+            try:
+                until('Fetching pinned source for audit')
+                until('Fetching pinned source for audit', heartbeat=True)
+                self.assertFalse((self.root / 'agent-called').exists())
+                self.assertFalse((self.home / 'installed.json').exists())
+                fetch_gate.touch()
+                until('Reviewing source with codex')
+                until('Reviewing source with codex', heartbeat=True)
+                self.assertFalse((self.root / 'build-called').exists())
+                self.assertFalse((self.home / 'installed.json').exists())
+                review_gate.touch()
+                self.assertEqual(process.wait(timeout=20), 0)
+                reader.join(timeout=2)
+                stdout.seek(0)
+                self.assertEqual(json.loads(stdout.read())['status'], 'installed')
+            finally:
+                fetch_gate.touch()
+                review_gate.touch()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                reader.join(timeout=2)
+                process.stderr.close()
 
     def test_mismatching_rebuild_never_approves_or_installs(self):
         self.publish(matches=False)
