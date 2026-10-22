@@ -48,6 +48,28 @@ async fn installation_requires_an_exact_current_audit_even_with_trust_overrides(
     )?)?;
     assert!(trust.authorize_install(&release, true, 0, true).is_err());
     let at = (nostr::Timestamp::now().as_secs() + 5) * 1000;
+    let source_evidence = Evidence {
+        schema: "haps.audit.v1".into(),
+        method: "source-review".into(),
+        provenance: "Reviewed pinned source; binary not verified".into(),
+        binary_match: false,
+        reviewer: None,
+    };
+    let source_review = attest_audit_at(
+        &reviewer,
+        release.event.id,
+        "Source review".into(),
+        &source_evidence,
+        at - 1000,
+    )?;
+    // Explicitly false keeps pre-source-build clients from counting this as approval.
+    assert!(!haps::trust::parse_attestation(&source_review)?.approved);
+    assert!(haps::trust::parse_audit(&source_review).is_err());
+    trust.ingest(source_review)?;
+    assert!(trust.audits(&release).is_empty());
+    assert!(trust.attestations(&release).is_empty());
+    assert_eq!(trust.source_reviews(&release).len(), 1);
+    assert!(trust.authorize_install(&release, true, 0, true).is_err());
     let evidence = Evidence::manual("Reviewed fixture bytes; rebuild not checked".into())?;
     trust.ingest(attest_audit_at(
         &publisher,

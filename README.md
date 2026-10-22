@@ -371,18 +371,63 @@ haps build htree://npub1.../project --rev FULL_COMMIT_HASH
 haps build htree://npub1.../project --rev FULL_COMMIT_HASH --execute --install
 ```
 
-The first command previews the committed `haps-build.toml` recipe. Building requires
+The first command previews the optional `[build]` section in the pinned `haps.toml`.
+The older `haps-build.toml` format remains supported. Building requires
 `--execute`; recipes run with your user permissions and are **not sandboxed**.
 Haps delegates `htree://` Git transport to `git-remote-htree` and also accepts HTTPS
 and local `file://` Git URLs. Full commit hashes are required; moving branches and
 tags are not sufficient build pins. Toolchains must already be available. Submodule
 and language dependency resolution are not managed by this initial recipe runner.
 
-See [haps-build.toml](haps-build.toml) for a working recipe. Build commands are
-argument arrays, followed by an explicit mapping of output files into the package.
+See [haps.toml](haps.toml) for a working manifest containing package metadata and build instructions together. Build commands are
+argument arrays, followed by an explicit mapping of output files or directories into the package. Directory staging preserves executable bits, resolves links only inside the checkout, and rejects escapes and cycles. Use `"." = "output-directory"` to stage a directory’s contents at the package root; overlapping files are rejected.
 `{exe}` expands to the platform executable suffix, and `target = "host"` selects
 the current build target. Haps signs local build results with the builder's identity
 and records the original Git URL and commit in the signed package metadata.
+
+To build an existing Haps package locally instead of installing its published binary:
+
+```sh
+haps install alice/hello --from-source --audit-agent codex
+# Inspect a manifest without downloading or executing source:
+haps manifest haps.toml --target x86_64-unknown-linux-gnu
+```
+
+Source installation reviews the exact pinned source and build instructions **before**
+execution. It installs the local output under the builder's identity, records its
+source revision and recipe hash, and gives it a distinct local build version. It
+never substitutes local bytes under the publisher's signature and does not need to
+match a publisher binary. A local source build contributes one review; it cannot
+satisfy a policy requiring additional independent reviewers. Installed local builds
+are available in the local build catalog. Repeat source installation from the
+original publisher/package to build a newer upstream release.
+
+A Haps-enabled repository normally has **one `haps.toml`**, with `[package]` and
+an optional `[build]` section. Root-level package fields are also accepted. Use
+`[targets."TRIPLE".package]` and `[targets."TRIPLE".build]` for platform overrides;
+each override replaces that package/build field, including whole command/artifact
+maps. Additional packages in the same repository use `[packages.NAME.package]`,
+`[packages.NAME.build]`, and corresponding nested `targets` sections. Use
+`haps build ... --package NAME`, `haps manifest ... --package NAME`, or `haps pack ... --package NAME --target TRIPLE`
+to select one. Add `# https://haps.hashtree.cc` as a helpful header comment.
+
+Build commands can invoke Cargo, CMake, npm, or any existing project tooling.
+For Arch recipes, `[build] builder = "makepkg"` uses the pinned checkout's
+`PKGBUILD` with `makepkg --holdver --log --noarchive`; omit `build.commands` and
+map the declared files/directories under `pkg/` into Haps artifacts. Install the
+Arch build tools and declared system dependencies first. Haps does not run pacman
+installation hooks or treat an AUR listing as an audit. Keeping `PKGBUILD`, its
+supporting files, and `haps.toml` in the same pinned repository also lets Hashtree
+store and distribute the recipe without requiring AUR to be online.
+
+Without a declared build section, a selected agent can propose commands and output
+paths from the project's existing instructions. This proposal executes nothing;
+a separate source-and-recipe review must pass before the build runs. A human can
+instead supply a local `haps.toml` with `--from-source --recipe-file FILE` (or
+`haps build ... --recipe-file FILE`). The exact executed recipe is content-addressed
+and included in the local build's audit provenance. A known unsupported platform
+can set `[build] unavailable = "Reason and public build documentation"` so Haps
+stops with that explanation instead of proposing a fallback.
 
 Discovered package locations can be `htree://` directories, resolved from signed
 Hashtree roots and read as verified content. This is separate from Git source builds. Catalog signatures, publisher pins, content hashes, and
@@ -439,19 +484,22 @@ This records no audit and preserves your configured threshold for future operati
 Signatures, payload integrity, social filtering, direct mutes, and release warnings
 still apply. It cannot be combined with audit-review options.
 
-When an interactive install lacks an audit, Haps offers **Audit and install**:
+When an interactive install lacks an audit, **Audit and install** offers a reviewed
+local source build or verification of the published binary:
 
 1. Choose an installed Codex or Claude Code agent, or review the source yourself.
    On Omarchy, its supported default agent is shown first. Lazy mise launchers are
    resolved to an already-installed executable without installing or updating it. Haps does not install
    agents or sign you in. Python 3 and Git are required.
 2. Haps clones the exact source commit into a private temporary directory and
-   prints its location and committed `haps-build.toml`. Source preparation does
+   prints its location and resolved build instructions. `haps.toml` is preferred;
+   `haps-build.toml` is supported for older projects. Source preparation does
    not run build commands. Agent review uses a restricted invocation and sends
    the supplied source snapshot to the agent's configured service.
 3. After a passing review, Haps runs the recipe **with your user permissions**.
-   Builds are not sandboxed. It compares every packaged file, its bytes, and its
-   executable metadata with the signed published payload. Mismatches, failed
+   Builds are not sandboxed. Source installation keeps the local output. Binary
+   verification compares every packaged file, its bytes, and executable metadata
+   with the signed published payload. Mismatches, failed
    builds, unavailable agents, or incomplete reviews stop without approval or
    installation. Temporary checkouts are cleaned up.
 4. Haps signs the result and installs only after the audit policy is satisfied.
@@ -480,7 +528,7 @@ For a separate person or agent to review at their own pace:
 
 ```sh
 haps audit prepare alice/hello --version 1.0.0
-# Inspect the printed checkout location, source, and haps-build.toml.
+# Inspect the printed source, project instructions, and optional haps.toml build section.
 # Use the printed session name and the same Haps home:
 haps audit finish SESSION --note "What I reviewed" --publish false
 haps install alice/hello --version 1.0.0
@@ -489,7 +537,9 @@ haps install alice/hello --version 1.0.0
 Prepared checkouts remain in `HAPS_HOME/audits/pending` until you remove them.
 They are private directories, **not execution sandboxes**. Keep the source
 unchanged. `finish` compares it with a fresh checkout of the pinned commit,
-rebuilds from that fresh checkout, and requires the published payload to match.
+rebuilds from that fresh checkout when instructions are declared, and requires
+the published payload to match before approving the binary. With no recipe it
+records only a source review; that review cannot authorize a binary installation.
 External agents can use `--reviewer NAME --model MODEL`; these are recorded as
 user-supplied metadata. They cannot set `binary_match` without Haps doing the
 comparison. Haps does not automatically install after `finish`.
@@ -505,15 +555,19 @@ haps attest RELEASE_EVENT_ID --audited \
 
 This explicit `attest` command publishes the signed claim and records
 `binary_match: false`. It does not claim a rebuild succeeded. In contrast,
-**Audit and install always requires a match**. Recipes must describe the exact
+**Verifying a published binary by rebuilding requires a match**. Recipes must describe the exact
 published package. Timestamps, signatures, dependencies, or toolchain differences
 can prevent identical output; Haps does not strip differences to manufacture a
 match. A match connects the reviewed source and build inputs to the payload; it
 does not prove the code safe or independently verify the compiler and dependencies.
 
-The built-in agent adapter currently reviews at most 512 KiB and 2,000 tracked
-UTF-8 source files. Binary inputs, symlinks, submodules, and larger trees require
-manual or external review. It stops rather than silently reviewing a subset.
+The built-in agent adapter inventories up to 20,000 tracked files and reads at
+most 512 KiB of text from pinned Git objects. For large trees it starts with build
+metadata and project instructions, then lets the reviewer request more tracked
+files for up to six inspection rounds within ten minutes. It never follows source
+symlinks or grants access to host files. Binary contents and omitted files are
+explicit in the inventory; every review records its coverage. Insufficient or
+failed reviews stop without approval. Manual/external review remains available.
 `haps build ... --execute --install` also requires a selected source reviewer;
 its result is marked as a local build with no publisher-binary comparison.
 

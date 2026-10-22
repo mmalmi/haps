@@ -31,6 +31,9 @@ jobs:
       - name: Test installers and Omarchy integration
         if: runner.os == 'Linux'
         run: python3 -m unittest discover -s tests -p '*_test.py'
+      - name: Build and install an audited PKGBUILD using Arch tooling
+        if: runner.os == 'Linux'
+        run: bash scripts/test-makepkg.sh
       - name: Test the interactive chooser in a macOS terminal
         if: runner.os == 'macOS'
         run: python3 -m unittest discover -s tests -p chooser_test.py

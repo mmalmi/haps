@@ -48,6 +48,88 @@ pub fn agents() -> Result<Vec<String>> {
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
+/// Propose commands from project instructions; this does not approve or execute them.
+pub fn plan_build(
+    source: &crate::build::SourceCheckout,
+    package: &crate::model::PackageSpec,
+    agent: &str,
+    model: Option<&str>,
+) -> Result<crate::build::Recipe> {
+    ensure!(
+        matches!(agent, "codex" | "claude"),
+        "manual source builds need build instructions in haps.toml or --recipe-file FILE"
+    );
+    let (progress, _reporter) = Progress::stderr(true)?;
+    progress.stage(format!("Reading project build instructions with {agent}"));
+    let input = tempfile::NamedTempFile::new()?;
+    crate::model::atomic_write(
+        input.path(),
+        &serde_json::to_vec(&serde_json::json!({"package": package, "build": null}))?,
+    )?;
+    let output = runner()
+        .arg("plan")
+        .arg(source.root())
+        .arg(input.path())
+        .arg(agent)
+        .arg(model.unwrap_or(""))
+        .output()
+        .context("could not start build planning agent")?;
+    ensure!(
+        output.status.success(),
+        "build planning incomplete: {}",
+        String::from_utf8_lossy(&output.stderr)
+            .trim()
+            .escape_debug()
+    );
+    #[derive(Deserialize)]
+    struct Plan {
+        verdict: String,
+        note: String,
+        build: Option<Build>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Build {
+        builder: crate::build::Builder,
+        commands: Vec<Vec<String>>,
+        artifacts: Vec<Artifact>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Artifact {
+        destination: String,
+        path: String,
+    }
+    let plan: Plan = serde_json::from_slice(&output.stdout).context("invalid build plan")?;
+    ensure!(
+        plan.verdict == "ready",
+        "build instructions incomplete: {}",
+        plan.note.escape_debug()
+    );
+    let build = plan
+        .build
+        .context("agent did not provide build instructions")?;
+    let mut artifacts = std::collections::BTreeMap::new();
+    for artifact in build.artifacts {
+        ensure!(
+            artifacts
+                .insert(artifact.destination, artifact.path)
+                .is_none(),
+            "duplicate build artifact destination"
+        );
+    }
+    source.ensure_pristine()?;
+    Ok(crate::build::Recipe {
+        package: package.clone(),
+        build: crate::build::Steps {
+            unavailable: None,
+            builder: build.builder,
+            commands: build.commands,
+            artifacts,
+        },
+    })
+}
+
 /// A user-selected agent reviews a bounded source snapshot without executing it.
 /// Manual reviewers inspect the checkout before confirming in the terminal.
 pub fn review(
@@ -148,10 +230,10 @@ pub async fn review_and_rebuild(
     let source = release.data.package.source.clone().context("this release has no pinned source; Audit and install cannot reproduce it. A reviewer can record an explicit audit with provenance instead")?;
     let (progress, _reporter) = Progress::stderr(true)?;
     progress.stage("Fetching pinned source for audit");
-    let checkout = crate::build::Checkout::fetch(
+    let checkout = crate::build::Checkout::project_for(
         source.clone(),
-        "haps-build.toml",
         &home.join("audits/work"),
+        Some(&release.data.package.name),
     )?;
     ensure!(
         checkout.recipe.package == release.data.package,
@@ -224,12 +306,7 @@ pub fn prepare(home: &Path, release: &crate::model::Release) -> Result<std::path
     let source = release.data.package.source.clone().context("this release has no pinned source; record an explicit completed audit with provenance instead")?;
     let (progress, _reporter) = Progress::stderr(true)?;
     progress.stage("Fetching pinned source for audit");
-    let checkout =
-        crate::build::Checkout::fetch(source, "haps-build.toml", &home.join("audits/pending"))?;
-    ensure!(
-        checkout.recipe.package == release.data.package,
-        "source recipe does not describe the exact published package"
-    );
+    let checkout = crate::build::SourceCheckout::fetch(source, &home.join("audits/pending"))?;
     let directory = checkout
         .root()
         .parent()
@@ -321,18 +398,34 @@ pub async fn finish(
         .context("pinned source missing")?;
     let (progress, _reporter) = Progress::stderr(true)?;
     progress.stage("Fetching pinned source for audit");
-    let checkout =
-        crate::build::Checkout::fetch(source, "haps-build.toml", &home.join("audits/work"))?;
-    ensure!(
-        checkout.recipe.package == release.data.package,
-        "source recipe does not describe the exact published package"
-    );
+    let checkout = crate::build::SourceCheckout::fetch(source, &home.join("audits/work"))?;
     progress.stage("Checking prepared source has not changed");
     ensure!(
         source_fingerprint(&directory.join("repo"))? == source_fingerprint(&checkout.root())?,
         "prepared source has changed; start a new audit instead of approving different files"
     );
-    let evidence = rebuild(home, &release, &checkout, reviewer, &progress).await?;
+    let recipe = checkout
+        .recipe_for(None, Some(&release.data.package.name))?
+        .filter(|recipe| recipe.build.unavailable.is_none());
+    let evidence = if let Some(recipe) = recipe {
+        let checkout = crate::build::Checkout::with_recipe(checkout, recipe)?;
+        ensure!(
+            checkout.recipe.package == release.data.package,
+            "source recipe does not describe the exact published package"
+        );
+        rebuild(home, &release, &checkout, reviewer, &progress).await?
+    } else {
+        Evidence {
+            schema: "haps.audit.v1".into(),
+            method: "source-review".into(),
+            provenance: format!(
+                "Reviewed pinned source {}. No build was executed; the published binary has not been verified or audited by this source review.",
+                checkout.source.rev
+            ),
+            binary_match: false,
+            reviewer: Some(reviewer),
+        }
+    };
     Ok((release, evidence))
 }
 
@@ -364,6 +457,10 @@ impl Evidence {
             }
         }
         ensure!(self.schema == "haps.audit.v1", "unsupported audit evidence");
+        ensure!(
+            self.method != "source-review" || !self.binary_match,
+            "source-only review cannot claim a binary match"
+        );
         ensure!(
             !self.method.trim().is_empty() && self.method.len() <= 100,
             "audit method is required"

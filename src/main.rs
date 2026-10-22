@@ -1,4 +1,5 @@
 mod cli_dependencies;
+mod cli_source;
 
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand};
@@ -63,7 +64,7 @@ struct ClaimArgs {
     json: bool,
 }
 
-#[derive(Args, Default)]
+#[derive(Args, Clone, Default)]
 struct AuditReviewArgs {
     /// Reviewer: codex, claude, or manual (defaults to your audit settings).
     #[arg(long)]
@@ -154,11 +155,23 @@ enum Command {
     Pack {
         manifest: PathBuf,
         #[arg(long)]
+        package: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
         payload: PathBuf,
         #[arg(long)]
         out: PathBuf,
         #[arg(long)]
         key_file: Option<PathBuf>,
+    },
+    /// Inspect package metadata and build instructions without fetching or executing source.
+    Manifest {
+        path: PathBuf,
+        #[arg(long)]
+        package: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
     },
     /// Prepare or publish packages from a verified Hashtree/Iris Git release directory.
     ImportRelease(haps::release::ReleaseArgs),
@@ -186,8 +199,15 @@ enum Command {
         repository: String,
         #[arg(long)]
         rev: String,
-        #[arg(long, default_value = "haps-build.toml")]
-        recipe: String,
+        /// Manifest inside the source (defaults to haps.toml, then haps-build.toml).
+        #[arg(long)]
+        recipe: Option<String>,
+        /// Reviewed local manifest for third-party packaging.
+        #[arg(long, conflicts_with = "recipe")]
+        recipe_file: Option<PathBuf>,
+        /// Select an additional package declared in the project manifest.
+        #[arg(long)]
+        package: Option<String>,
         /// Run the recipe with your user permissions. Builds are not sandboxed.
         #[arg(long)]
         execute: bool,
@@ -225,6 +245,12 @@ enum Command {
     /// Install a package. An explicit publisher/name can bypass the social filter.
     Install {
         package: String,
+        /// Build and install reviewed source instead of downloading the publisher's binary.
+        #[arg(long, conflicts_with = "allow_unaudited")]
+        from_source: bool,
+        /// Use a local haps.toml for the source build.
+        #[arg(long, requires = "from_source")]
+        recipe_file: Option<PathBuf>,
         #[arg(long)]
         version: Option<semver::Version>,
         #[arg(long)]
@@ -1303,6 +1329,11 @@ fn release_json(
             "evidence": haps::trust::parse_audit(event).expect("validated audit"), "event": event})
         })
         .collect();
+    let source_reviews: Vec<_> = trust.source_reviews(release).iter().map(|event| {
+        serde_json::json!({"signer": event.pubkey.to_hex(),
+            "label": publisher_label(aliases, &event.pubkey.to_hex()),
+            "evidence": haps::trust::parse_source_review(event).expect("validated source review"), "event": event})
+    }).collect();
     serde_json::json!({
         "identity": release.identity(),
         "label": release_label(release, aliases),
@@ -1312,7 +1343,7 @@ fn release_json(
         "overmuted": trust.overmuted(&release.author()), "socially_trusted": trust.socially_trusted(release),
         "followed_by": trust.followed_by_friends(&release.author()).iter().map(|key| serde_json::json!({"pubkey": key, "label": publisher_label(aliases, key)})).collect::<Vec<_>>(),
         "attesters": trust.attesters(release), "attestations": attestations,
-        "warnings": warnings, "audits": audits, "minimum_audits": 1,
+        "warnings": warnings, "audits": audits, "source_reviews": source_reviews, "minimum_audits": 1,
     })
 }
 
@@ -1666,7 +1697,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 println!("Source to review: {}", directory.join("repo").display());
                 println!("Pinned release: {}", candidate.release.event.id);
                 println!(
-                    "This checkout is private, but it is not a sandbox. Preparation has not executed build commands. Review haps-build.toml and all source; keep the checkout unchanged."
+                    "Preparation has not executed build commands. Review the source, project instructions, and optional haps.toml build section; keep the checkout unchanged."
                 );
                 println!(
                     "After review, run with the same Haps home: haps audit finish {} --note \"What you checked\"",
@@ -1676,7 +1707,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                         .to_string_lossy()
                 );
                 println!(
-                    "Finishing runs the recipe with your user permissions and requires the rebuilt payload to match. Then run haps install {} --version {}.",
+                    "With a recipe, finishing rebuilds and compares the published binary. Without one it records only a source review, which cannot approve a binary installation. Package: {} version {}.",
                     release_label(&candidate.release, &config.aliases),
                     candidate.release.data.package.version
                 );
@@ -1716,9 +1747,14 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 )
                 .await?;
                 println!(
-                    "Audited {} ({}) with a matching rebuild. Ready to install.",
+                    "Reviewed {} ({}): {}.",
                     release_label(&release, &config.aliases),
-                    release.event.id
+                    release.event.id,
+                    if evidence.binary_match {
+                        "rebuilt binary matches; ready to install"
+                    } else {
+                        "source reviewed; binary has not been verified"
+                    }
                 );
             }
         },
@@ -1730,7 +1766,8 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         } => {
             let directory = haps::event_catalog::directory(&home, &catalog)?;
             if let Some(payload) = payload {
-                let spec: PackageSpec = toml::from_str(&fs::read_to_string(&package)?)?;
+                let spec =
+                    haps::build::manifest::Manifest::parse(&fs::read_to_string(&package)?)?.package;
                 let keys = publishing_keys(&home, &mut config)?;
                 let repo = Repository::local(directory.join("packages"))?;
                 let release = repo.publish(&keys, spec, &payload).await?;
@@ -1950,15 +1987,39 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         },
         Command::Pack {
             manifest,
+            package,
+            target: selected_target,
             payload,
             out,
             key_file,
         } => {
-            let spec: PackageSpec = toml::from_str(&fs::read_to_string(manifest)?)?;
+            let spec = haps::build::manifest::Manifest::select(
+                &fs::read_to_string(manifest)?,
+                selected_target.as_deref().unwrap_or(target()),
+                package.as_deref(),
+            )?
+            .package;
             let keys = load_keys(&key_file.unwrap_or_else(|| home.join("identity.key")))?;
             let repo = Repository::local(out)?;
             let release = repo.publish(&keys, spec, &payload).await?;
             println!("{}", serde_json::to_string_pretty(&release.event)?);
+        }
+        Command::Manifest {
+            path,
+            package,
+            target: selected_target,
+        } => {
+            ensure!(
+                fs::metadata(&path)?.len() <= MAX_METADATA as u64,
+                "manifest is too large"
+            );
+            let manifest = haps::build::manifest::Manifest::select(
+                &fs::read_to_string(path)?,
+                selected_target.as_deref().unwrap_or(target()),
+                package.as_deref(),
+            )?;
+            manifest.package.validate()?;
+            println!("{}", serde_json::to_string_pretty(&manifest)?);
         }
         Command::Link { package, bin_dir } => {
             let package = resolve_package(&config, &package)?;
@@ -2094,6 +2155,8 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             repository,
             rev,
             recipe,
+            recipe_file,
+            package,
             execute,
             install,
             audit_review,
@@ -2106,41 +2169,82 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                         && audit_review.publish_audit.is_none()),
                 "audit options for build require --install"
             );
-            let checkout = haps::build::Checkout::fetch(
+            let source = haps::build::SourceCheckout::fetch(
                 SourceInfo {
                     git: repository,
                     rev,
                 },
-                &recipe,
                 &home.join("builds"),
             )?;
+            let recipe = if let Some(path) = recipe_file {
+                ensure!(
+                    fs::metadata(&path)?.len() <= MAX_METADATA as u64,
+                    "build manifest is too large"
+                );
+                haps::build::manifest::Manifest::select(
+                    &fs::read_to_string(path)?,
+                    target(),
+                    package.as_deref(),
+                )?
+                .recipe()?
+            } else {
+                source.recipe_for(recipe.as_deref(), package.as_deref())?.context("no build instructions declared; add [build] to haps.toml or supply --recipe-file")?
+            };
+            let checkout = haps::build::Checkout::with_recipe(source, recipe)?;
             println!("{}", serde_json::to_string_pretty(&checkout.recipe)?);
-            if execute {
-                let keys = own_keys(&home, &config)?;
-                let reviewed = if install {
-                    use std::io::IsTerminal;
-                    let interactive = !non_interactive
-                        && std::io::stdin().is_terminal()
-                        && std::io::stderr().is_terminal();
-                    let agent = audit_agent(
-                        audit_review
-                            .audit_agent
-                            .as_deref()
-                            .or(config.audit.agent.as_deref()),
-                        interactive,
+            if execute && install {
+                ensure!(
+                    !attest_scan || haps::security::enabled(&home),
+                    "enable source scans with haps security --rules FILE first"
+                );
+                let candidate = cli_source::build(
+                    &home,
+                    &mut config,
+                    &mut trust,
+                    checkout,
+                    &audit_review,
+                    non_interactive,
+                )
+                .await?;
+                cli_dependencies::install(
+                    &home,
+                    &mut config,
+                    &mut trust,
+                    &installation,
+                    &candidate,
+                    AuditOptions {
+                        requested: false,
+                        review: &audit_review,
+                        non_interactive,
+                        allow_untrusted: true,
+                        allow_warnings: false,
+                        allow_unaudited: false,
+                        minimum: 1,
+                    },
+                    false,
+                )
+                .await?;
+                if attest_scan {
+                    let keys = own_keys(&home, &config)?;
+                    let report = haps::model::read_json(
+                        &home
+                            .join("security/releases")
+                            .join(format!("{}.json", candidate.release.event.id)),
                     )?;
-                    let model = audit_review.audit_model.as_deref().or_else(|| {
-                        (agent != "manual")
-                            .then_some(config.audit.model.as_deref())
-                            .flatten()
-                    });
-                    Some((
-                        haps::audit::review(&checkout, &agent, model, interactive)?,
-                        interactive,
-                    ))
-                } else {
-                    None
-                };
+                    publish_scan(
+                        &home,
+                        &config,
+                        haps::security::attestation(&keys, &candidate.release, &report)?,
+                    )
+                    .await?;
+                }
+                println!(
+                    "Built {} {}",
+                    candidate.release.identity(),
+                    candidate.release.event.id
+                );
+            } else if execute {
+                let keys = own_keys(&home, &config)?;
                 let scan = if haps::security::enabled(&home) {
                     Some(haps::security::scan_source(
                         &home,
@@ -2153,10 +2257,6 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                         &checkout.root(),
                     )?)
                 } else {
-                    ensure!(
-                        !attest_scan,
-                        "enable source scans with haps security --rules FILE first"
-                    );
                     None
                 };
                 let payload = checkout.execute()?;
@@ -2164,59 +2264,8 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 let release = repo
                     .publish(&keys, checkout.recipe.package.clone(), &payload)
                     .await?;
-                if install {
-                    let (review, interactive) = reviewed.context("source review missing")?;
-                    let evidence = haps::audit::Evidence {
-                        schema: "haps.audit.v1".into(), method: format!("{}-review-local-build", review.reviewer.agent),
-                        provenance: "Built locally from reviewed pinned source and recipe. No publisher binary was compared; dependencies and toolchain are not independently verified.".into(),
-                        binary_match: false,
-                        reviewer: Some(review.reviewer),
-                    };
-                    record_audit(
-                        &home,
-                        &mut config,
-                        &mut trust,
-                        &keys,
-                        &release,
-                        (&evidence, review.note),
-                        (audit_review.publish_audit, interactive),
-                    )
-                    .await?;
-                    trust.authorize_install(&release, true, 1, false)?;
-                    let candidate = Candidate {
-                        repository: Arc::new(repo),
-                        package_card: None,
-                        release: release.clone(),
-                    };
-                    cli_dependencies::install(
-                        &home,
-                        &mut config,
-                        &mut trust,
-                        &installation,
-                        &candidate,
-                        AuditOptions {
-                            requested: false,
-                            review: &audit_review,
-                            non_interactive,
-                            allow_untrusted: true,
-                            allow_warnings: false,
-                            allow_unaudited: false,
-                            minimum: 1,
-                        },
-                        false,
-                    )
-                    .await?;
-                }
                 if let Some(report) = scan {
-                    let report = haps::security::bind_report(&home, &release, report)?;
-                    if attest_scan {
-                        publish_scan(
-                            &home,
-                            &config,
-                            haps::security::attestation(&keys, &release, &report)?,
-                        )
-                        .await?;
-                    }
+                    haps::security::bind_report(&home, &release, report)?;
                 }
                 println!("Built {} {}", release.identity(), release.event.id);
             } else {
@@ -2317,12 +2366,14 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         }
         Command::Install {
             package,
+            mut from_source,
+            recipe_file,
             version,
             allow_untrusted,
             allow_warnings,
             require_attestations,
             allow_unaudited,
-            audit,
+            mut audit,
             audit_review,
             json,
         } => {
@@ -2351,14 +2402,67 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     .get(&candidate.release.identity())
                     .map_or(0, |r| r.minimum_attestations),
             );
+            use std::io::IsTerminal;
+            if !from_source
+                && !audit
+                && !allow_unaudited
+                && !non_interactive
+                && !json
+                && std::io::stdin().is_terminal()
+                && std::io::stderr().is_terminal()
+                && trust.audits(&candidate.release).len() < require_attestations
+                && candidate.release.data.package.source.is_some()
+            {
+                let choice = dialoguer::Select::new()
+                    .with_prompt("Audit and install: choose what to install")
+                    .items([
+                        "Build reviewed source",
+                        "Verify the published binary",
+                        "Cancel",
+                    ])
+                    .default(0)
+                    .interact()?;
+                ensure!(choice != 2, "installation cancelled");
+                from_source = choice == 0;
+                audit = choice == 1;
+            }
+            let candidate = if from_source {
+                trust.authorize_with_policy(
+                    &candidate.release,
+                    allow_untrusted || package.contains('/'),
+                    0,
+                    allow_warnings,
+                )?;
+                ensure!(
+                    require_attestations == 1,
+                    "a local source build provides one source review; this policy requires more independent reviews"
+                );
+                cli_source::from_release(
+                    &home,
+                    &mut config,
+                    &mut trust,
+                    &candidate,
+                    &audit_review,
+                    recipe_file.as_deref(),
+                    non_interactive,
+                )
+                .await?
+            } else {
+                candidate
+            };
+            let completed_review = AuditReviewArgs::default();
             ensure_audited(
                 &home,
                 &mut config,
                 &mut trust,
                 &candidate,
                 AuditOptions {
-                    requested: audit,
-                    review: &audit_review,
+                    requested: audit && !from_source,
+                    review: if from_source {
+                        &completed_review
+                    } else {
+                        &audit_review
+                    },
                     non_interactive,
                     allow_untrusted: allow_untrusted || package.contains('/'),
                     allow_warnings,
@@ -2383,8 +2487,12 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 &installation,
                 &candidate,
                 AuditOptions {
-                    requested: audit,
-                    review: &audit_review,
+                    requested: audit && !from_source,
+                    review: if from_source {
+                        &completed_review
+                    } else {
+                        &audit_review
+                    },
                     non_interactive,
                     allow_untrusted: allow_untrusted || package.contains('/'),
                     allow_warnings,

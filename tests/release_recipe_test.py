@@ -18,7 +18,7 @@ import bundle
 class ReleaseRecipeTest(unittest.TestCase):
     @unittest.skipUnless(tomllib, 'Recipe metadata validation needs Python 3.11+')
     def test_recipe_matches_every_published_platform(self):
-        recipe = tomllib.loads((ROOT / 'haps-build.toml').read_text())
+        recipe = tomllib.loads((ROOT / 'haps.toml').read_text())
         config = json.loads((ROOT / 'haps-release.json').read_text())
         version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['package']['version']
         for platform in config['packages']:

@@ -65,7 +65,15 @@ pub fn attest_audit_at(
         [
             fact("type", &["haps_release_attestation"]),
             fact("schema", &["1"]),
-            fact("approved", &["true"]),
+            // Older clients must also reject source-only evidence as approval.
+            fact(
+                "approved",
+                &[if evidence.method == "source-review" {
+                    "false"
+                } else {
+                    "true"
+                }],
+            ),
             fact("warning", &["false"]),
             fact("note", &[&note]),
             fact("audit", &[&audit]),
@@ -82,6 +90,24 @@ pub fn parse_audit(event: &Event) -> Result<crate::audit::Evidence> {
         claim.approved && !claim.warning,
         "claim does not approve an audit"
     );
+    parse_audit_evidence(event)
+}
+
+pub fn parse_source_review(event: &Event) -> Result<crate::audit::Evidence> {
+    let claim = parse_attestation(event)?;
+    ensure!(
+        !claim.approved && !claim.warning,
+        "source review cannot approve the binary"
+    );
+    let evidence = parse_audit_evidence(event)?;
+    ensure!(
+        evidence.method == "source-review",
+        "not a source-only review"
+    );
+    Ok(evidence)
+}
+
+fn parse_audit_evidence(event: &Event) -> Result<crate::audit::Evidence> {
     let snapshot = parse_fact_snapshot_event(event)?;
     let facts: Vec<_> = snapshot
         .facts
@@ -428,7 +454,20 @@ impl Trust {
                     && self.relevant_signer(&author)
                     && parse_attestation(event)
                         .is_ok_and(|a| a.release == release.event.id.to_hex())
-                    && parse_audit(event).is_ok()
+                    && parse_audit(event).is_ok_and(|audit| audit.method != "source-review")
+            })
+            .collect()
+    }
+
+    /// Source reviews are visible evidence, but never binary approval or a vouch.
+    pub fn source_reviews(&self, release: &Release) -> Vec<&Event> {
+        self.events
+            .values()
+            .filter(|event| {
+                self.relevant_signer(&event.pubkey.to_hex())
+                    && parse_attestation(event)
+                        .is_ok_and(|claim| claim.release == release.event.id.to_hex())
+                    && parse_source_review(event).is_ok()
             })
             .collect()
     }

@@ -92,7 +92,7 @@ shown below. A successful install alone does not prove the app works.
 From 0.1.13, installation also requires an explicit
 audit of the exact release by default (`--allow-unaudited` bypasses it for one operation). Another reader needs an audit from their social graph;
 your publisher self-audit only counts for your own installation. Provide pinned
-source and a matching `haps-build.toml` to support Audit and install. See the
+source and a matching `[build]` section in the same `haps.toml` to support automatic binary reproduction (legacy `haps-build.toml` is also accepted). Source installation audits and builds the pinned source without requiring a publisher-binary match. See the
 [audit workflow](README.md#release-audits) for source review,
 rebuild comparison, and approvals with unverified reproducibility stated.
 

@@ -36,7 +36,7 @@ jobs:
           import os, tomllib
           with open('Cargo.toml', 'rb') as file:
               package = tomllib.load(file)['package']
-          with open('haps-build.toml', 'rb') as file:
+          with open('haps.toml', 'rb') as file:
               recipe = tomllib.load(file)['package']
           assert 'v' + package['version'] == os.environ['TAG']
           assert recipe['name'] == package['name'] and recipe['version'] == package['version']

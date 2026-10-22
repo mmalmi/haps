@@ -84,7 +84,7 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         self.assertEqual(out.returncode == 0, success, (args, out.stdout, out.stderr))
         return out
 
-    def publish(self, matches=True, version='1.0.0', runnable=False):
+    def publish(self, matches=True, version='1.0.0', runnable=False, recipe_style='legacy'):
         def git(*args):
             return subprocess.check_output(['git', '-C', str(self.source), *args], stderr=subprocess.DEVNULL, text=True).strip()
         git('init')
@@ -98,7 +98,17 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         (self.source / 'build.py').write_text(f'from pathlib import Path\n{marker_command}Path("hello").write_bytes({content!r})\n')
         recipe = '[package]\n' + spec.replace('[commands]', '[package.commands]')
         recipe += '\n[build]\ncommands = [[' + json.dumps(sys.executable) + ', "build.py"]]\n[build.artifacts]\nhello="hello"\n'
-        (self.source / 'haps-build.toml').write_text(recipe)
+        if recipe_style == 'legacy':
+            (self.source / 'haps-build.toml').write_text(recipe)
+        elif recipe_style == 'unified':
+            (self.source / 'haps.toml').write_text(spec + recipe[recipe.index('\n[build]'):])
+        elif recipe_style == 'unavailable':
+            (self.source / 'haps.toml').write_text(spec + '\n[build]\nunavailable="Needs platform signing setup"\n')
+        elif recipe_style == 'none':
+            (self.source / 'haps.toml').write_text(spec)
+            (self.source / 'README.md').write_text('Build with python3 build.py. The output is hello.\n')
+        else:
+            raise ValueError(recipe_style)
         git('add', '.')
         git('commit', '-m', 'fixture')
         revision = git('rev-parse', 'HEAD')
@@ -340,7 +350,7 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         self.assertFalse((self.root / 'build-called').exists())
         term.send(b'y')
         term.read_until(b'Audit and install')
-        term.send(b'y')
+        term.send(b'\x1b[B\n')
         term.read_until(b'Choose how to audit')
         term.send(b'\n')
         term.read_until(b'Publish this and future audits', timeout=30)

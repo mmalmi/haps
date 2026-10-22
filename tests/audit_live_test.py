@@ -6,6 +6,7 @@ HAPS_LIVE_AUDIT=1 HAPS_TEST_BINARY=/path/to/haps python3 -m unittest discover \
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 import unittest
 
@@ -16,6 +17,34 @@ from chooser_test import Terminal
 @unittest.skipUnless(os.name == 'posix' and os.environ.get('HAPS_LIVE_AUDIT') == '1',
                      'requires explicit opt-in, a terminal, and an installed signed-in agent')
 class LiveAudit(unittest.TestCase):
+    def test_real_agent_plans_from_project_instructions_then_reviews_local_build(self):
+        fixture = audit_test.Audits('runTest')
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.env['PATH'] = os.environ['PATH']
+        fixture.publish(runnable=True, matches=False, recipe_style='none')
+        spec = importlib.util.spec_from_file_location('live_source_adapter', audit_test.ROOT / 'src/integrations/audit.py')
+        adapter = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(adapter)
+        agent = adapter.agents()[0]
+        self.assertNotEqual(agent, 'manual')
+        result = subprocess.run([str(audit_test.BINARY), '--home', str(fixture.home),
+            'install', fixture.package, '--from-source', '--audit-agent', agent, '--json'],
+            env=fixture.env, capture_output=True, text=True, timeout=360)
+        self.assertEqual(result.returncode, 0, (result.stdout, result.stderr))
+        identity = json.loads(result.stdout)['release']['identity']
+        info = json.loads(fixture.run_cli('info', identity, '--json').stdout)
+        evidence = info['audits'][0]['evidence']
+        self.assertFalse(evidence['binary_match'])
+        self.assertIn('SHA-256', evidence['provenance'])
+        self.assertNotEqual(info['publisher'], fixture.author)
+        self.assertEqual(fixture.run_cli('run', 'hello').stdout.strip(), 'Haps audit test passed')
+        self.assertFalse((fixture.root / 'agent-called').exists())
+        if path := os.environ.get('HAPS_LIVE_SOURCE_EVIDENCE'):
+            Path(path).write_text(json.dumps({'status': 'passed', 'agent': agent,
+                'evidence': evidence, 'installed_command_output': 'Haps audit test passed',
+                'publisher_binary_mismatched': True}, indent=2) + '\n')
+
     def test_default_agent_reviews_rebuilds_installs_and_runs(self):
         fixture = audit_test.Audits('runTest')
         fixture.setUp()
@@ -47,7 +76,7 @@ class LiveAudit(unittest.TestCase):
         terminal.read_until(b'Install this package?')
         terminal.send(b'y')
         terminal.read_until(b'Audit and install')
-        terminal.send(b'y')
+        terminal.send(b'\x1b[B\n')
         terminal.read_until(b'Choose how to audit')
         terminal.send(b'\n')
         terminal.read_until(b'Publish this and future audits', timeout=240)
