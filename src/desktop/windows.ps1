@@ -52,10 +52,28 @@ function Set-Registry($scheme, $entry) {
     } finally { $key.Dispose() }
 }
 $shell = New-Object -ComObject WScript.Shell
-function Matches-Link($entry) {
-    if (!$entry) { return $false }
+function Link-Differences($entry) {
+    if (!$entry) { return 'No expected shortcut entry' }
     $link = $shell.CreateShortcut($p.shortcut)
-    return ($link.TargetPath -ceq $entry.command -and $link.Arguments -ceq '' -and $link.WorkingDirectory -ceq $entry.directory -and $link.IconLocation -ceq ($entry.icon + ',0') -and $link.Description -ceq ($entry.name + ' [' + $p.owner + ']') -and $link.Hotkey -ceq '' -and $link.WindowStyle -eq 1)
+    $expected = [ordered]@{
+        TargetPath = $entry.command
+        Arguments = ''
+        WorkingDirectory = $entry.directory
+        IconLocation = ($entry.icon + ',0')
+        Description = ($entry.name + ' [' + $p.owner + ']')
+        Hotkey = ''
+        WindowStyle = 1
+    }
+    foreach ($property in $expected.Keys) {
+        if ($link.$property -cne $expected[$property]) {
+            $actual = $link.$property | ConvertTo-Json -Compress
+            $wanted = $expected[$property] | ConvertTo-Json -Compress
+            "$property expected $wanted, got $actual"
+        }
+    }
+}
+function Matches-Link($entry) {
+    return (@(Link-Differences $entry).Count -eq 0)
 }
 function Set-Link($entry) {
     if (!$entry) { if (Test-Path -LiteralPath $p.shortcut) { Remove-Item -LiteralPath $p.shortcut }; return }
@@ -106,7 +124,7 @@ try {
     foreach ($scheme in $schemes) {
         if (!(Equal-State (Registry-State $scheme) (Expected $p.new $scheme))) { throw "URI registration verification failed: $scheme" }
     }
-    if ($p.new) { if (!(Matches-Link $p.new)) { throw 'Shortcut verification failed' } }
+    if ($p.new) { if (!(Matches-Link $p.new)) { throw ('Shortcut verification failed: ' + ((Link-Differences $p.new) -join '; ')) } }
     elseif (Test-Path -LiteralPath $p.shortcut) { throw 'Shortcut removal failed' }
 } catch {
     $original = $_

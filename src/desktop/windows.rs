@@ -36,9 +36,11 @@ fn entry(release: &Release, directory: &Path) -> Result<Option<Entry>> {
         .map(|desktop| {
             Ok(Entry {
                 name: desktop.name.clone(),
-                command: path(&directory.join(&release.data.package.commands[&desktop.command]))?,
-                directory: path(directory)?,
-                icon: path(&directory.join(&desktop.icon))?,
+                command: path(&fs::canonicalize(
+                    directory.join(&release.data.package.commands[&desktop.command]),
+                )?)?,
+                directory: path(&fs::canonicalize(directory)?)?,
+                icon: path(&fs::canonicalize(directory.join(&desktop.icon))?)?,
                 schemes: desktop.uri_schemes.clone(),
             })
         })
