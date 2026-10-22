@@ -456,6 +456,7 @@ impl Trust {
                         .is_ok_and(|a| a.release == release.event.id.to_hex())
                     && parse_audit(event).is_ok_and(|audit| {
                         audit.method != "source-review"
+                            && (audit.method != "trusted-source-build" || author == self.root)
                             && audit.build.as_ref().is_none_or(|build| {
                                 build.manifest == release.data.manifest
                                     && release.data.package.source.is_some()

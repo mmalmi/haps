@@ -171,6 +171,37 @@ async fn recorded_output_must_match_before_it_can_approve_a_binary() -> anyhow::
         2000,
     )?)?;
     assert_eq!(trust.audits(&release).len(), 1);
+    // A rebuild reusing another person's source review adds no independent audit.
+    evidence.method = "trusted-source-build".into();
+    let other_builder = Keys::generate();
+    let observer = Keys::generate();
+    let mut observer_trust = Trust::new(observer.public_key().to_hex());
+    observer_trust.ingest(
+        EventBuilder::new(Kind::ContactList, "")
+            .tags([
+                Tag::public_key(keys.public_key()),
+                Tag::public_key(other_builder.public_key()),
+            ])
+            .sign_with_keys(&observer)?,
+    )?;
+    for builder in [&keys, &other_builder] {
+        let derived = attest_audit_at(
+            builder,
+            release.event.id,
+            "Rebuilt using the same existing source review".into(),
+            &evidence,
+            2500,
+        )?;
+        observer_trust.ingest(derived.clone())?;
+        trust.ingest(derived)?;
+    }
+    assert_eq!(trust.audits(&release).len(), 1);
+    assert!(observer_trust.audits(&release).is_empty());
+    assert!(
+        observer_trust
+            .authorize_install(&release, true, 2, false)
+            .is_err()
+    );
     evidence.method = "source-review".into();
     evidence.binary_match = false;
     trust.ingest(attest_audit_at(

@@ -149,6 +149,13 @@ async fn build_reviewed(
         );
     }
     let reused_review = trusted.is_some();
+    // Rebuilding someone else's review is useful local evidence, not another
+    // independent source audit. Never automatically republish it as our review.
+    let publication = if reused_review {
+        (Some(false), false)
+    } else {
+        (options.publish_audit, interactive)
+    };
     let (reviewer, note, reviewed_by) = if let Some((event_id, _)) = trusted {
         eprintln!("Using a trusted audit of this exact source and build recipe.");
         (
@@ -257,7 +264,7 @@ async fn build_reviewed(
                 &keys,
                 &upstream.release,
                 (&evidence, note.clone()),
-                (options.publish_audit, interactive),
+                publication,
             )
             .await?;
         }
@@ -323,7 +330,7 @@ async fn build_reviewed(
         &keys,
         &release,
         (&evidence, note),
-        (options.publish_audit, interactive),
+        publication,
     )
     .await?;
     let snapshot = repo.catalog(&keys.public_key().to_hex()).await?;

@@ -571,7 +571,8 @@ When an interactive install lacks an audit, Haps asks **Audit and install? y/N**
 Another reader who trusts a matching binary audit can install that exact published
 payload. A trusted source review with a recorded build recipe hash can instead be
 reused to build the same pinned source and recipe locally without another agent
-review. A changed or unavailable recipe requires a fresh review. Manual source
+review. Reused-build records stay local and do not count as independent audits
+for other readers. A changed or unavailable recipe requires a fresh review. Manual source
 reviews without build identity cannot authorize this automatic build. Dependency
 release pins are never replaced by differently signed local builds. Local source
 builds belong to your own publishing key and include a `+haps.…` build identifier.
