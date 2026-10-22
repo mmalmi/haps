@@ -64,6 +64,19 @@ icon = "share/icons/my-app.png"
 ```
 
 The command names a key in `[commands]`; the icon is a packaged PNG or SVG.
+Windows GUI packages use the same `[desktop]` fields with a packaged `.ico`
+icon and a declared `.exe` command. They get a per-user Start menu shortcut.
+Optionally add `uri_schemes = ["my-app"]` to handle `my-app://` links; Haps passes
+one URI argument directly to the executable. Schemes must be lowercase ASCII
+letters, digits or hyphens, beginning with a letter; common system schemes are
+reserved. URI registration currently supports Windows only.
+
+Haps updates and removes only its own shortcuts and handlers, scoped to the
+publisher and Haps home. Existing handlers (including a previous installer’s)
+are preserved and block registration; remove or migrate those explicitly first.
+A failed install restores the previous integration. No administrator privileges
+or package-provided installation scripts are used.
+
 Declared commands run directly, with no shell or install hooks.
 
 ## 3. Sign and test locally

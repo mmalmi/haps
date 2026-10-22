@@ -32,6 +32,8 @@ impl Installation {
         fs::create_dir_all(&home)?;
         let desktop_dir = if cfg!(target_os = "linux") {
             dirs::data_dir().map(|p| p.join("applications"))
+        } else if cfg!(windows) {
+            dirs::data_dir().map(|p| p.join("Microsoft/Windows/Start Menu/Programs"))
         } else {
             None
         };
@@ -171,37 +173,51 @@ impl Installation {
         };
         let old = before.cloned().map(Release::verify).transpose()?;
         let new = after.cloned().map(Release::verify).transpose()?;
-        let release = new
-            .as_ref()
-            .or(old.as_ref())
-            .context("missing desktop release")?;
-        let mut old_text = old
-            .as_ref()
-            .map(|r| self.render_desktop(r))
-            .transpose()?
-            .flatten();
-        let new_text = new
-            .as_ref()
-            .map(|r| self.render_desktop(r))
-            .transpose()?
-            .flatten();
-        let path = directory.join(crate::desktop::filename(&self.home, release));
-        // Migrate only an exact launcher previously generated for this signed
-        // release. User edits still fail the transaction's ownership check.
-        if let Some(previous) = old.as_ref().or(new.as_ref()) {
-            let existing = fs::read_to_string(&path).ok();
-            for legacy in crate::desktop::previous_entries(previous, &self.version_dir(previous))?
-                .into_iter()
-                .flatten()
-            {
-                if existing.as_ref() == Some(&legacy) {
-                    old_text = Some(legacy);
-                    break;
+        #[cfg(windows)]
+        return crate::desktop::windows::transaction(
+            &self.home,
+            directory,
+            old.as_ref(),
+            new.as_ref(),
+            |r| self.version_dir(r),
+            commit,
+        );
+        #[cfg(not(windows))]
+        {
+            let release = new
+                .as_ref()
+                .or(old.as_ref())
+                .context("missing desktop release")?;
+            let mut old_text = old
+                .as_ref()
+                .map(|r| self.render_desktop(r))
+                .transpose()?
+                .flatten();
+            let new_text = new
+                .as_ref()
+                .map(|r| self.render_desktop(r))
+                .transpose()?
+                .flatten();
+            let path = directory.join(crate::desktop::filename(&self.home, release));
+            // Migrate only an exact launcher previously generated for this signed
+            // release. User edits still fail the transaction's ownership check.
+            if let Some(previous) = old.as_ref().or(new.as_ref()) {
+                let existing = fs::read_to_string(&path).ok();
+                for legacy in
+                    crate::desktop::previous_entries(previous, &self.version_dir(previous))?
+                        .into_iter()
+                        .flatten()
+                {
+                    if existing.as_ref() == Some(&legacy) {
+                        old_text = Some(legacy);
+                        break;
+                    }
                 }
             }
+            crate::desktop::transaction(&path, old_text.as_deref(), new_text.as_deref(), commit)
         }
-        crate::desktop::transaction(&path, old_text.as_deref(), new_text.as_deref(), commit)
     }
+    #[cfg(not(windows))]
     fn render_desktop(&self, release: &Release) -> Result<Option<String>> {
         let environment = (!release.data.package.dependencies.is_empty())
             .then(|| environment::directory(&self.home, release));
@@ -336,6 +352,7 @@ mod tests {
             dependencies: Vec::new(),
             source: None,
             desktop: Some(DesktopEntry {
+                uri_schemes: Vec::new(),
                 name: "Iris Chat".into(),
                 command: "hello".into(),
                 icon: "icon.svg".into(),
@@ -388,6 +405,7 @@ mod tests {
                     dependencies: Vec::new(),
                     source: None,
                     desktop: Some(DesktopEntry {
+                        uri_schemes: Vec::new(),
                         name: "Iris Chat".into(),
                         command: "iris-chat".into(),
                         icon: "Iris Chat.svg".into(),

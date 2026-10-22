@@ -419,6 +419,7 @@ async fn desktop_launcher_tracks_install_update_rollback_and_removal() -> anyhow
         )
         .unwrap();
         spec.desktop = Some(DesktopEntry {
+            uri_schemes: Vec::new(),
             name: "Hello Desktop".into(),
             command: "hello".into(),
             icon: "icon.svg".into(),
@@ -506,6 +507,7 @@ fn desktop_metadata_rejects_injection_and_undeclared_commands() {
     let mut spec = package(tmp.path(), "1.0.0");
     spec.target = "x86_64-unknown-linux-gnu".into();
     spec.desktop = Some(DesktopEntry {
+        uri_schemes: Vec::new(),
         name: "Hello".into(),
         command: "hello".into(),
         icon: "icon.png".into(),
@@ -518,5 +520,40 @@ fn desktop_metadata_rejects_injection_and_undeclared_commands() {
     assert!(spec.validate().is_err());
     spec.desktop.as_mut().unwrap().command = "hello".into();
     spec.desktop.as_mut().unwrap().icon = "../icon.png".into();
+    assert!(spec.validate().is_err());
+}
+
+#[test]
+fn windows_desktop_metadata_validates_protocols_and_executable() {
+    use haps::model::DesktopEntry;
+    let tmp = tempdir().unwrap();
+    let mut spec = package(tmp.path(), "1.0.0");
+    spec.target = "x86_64-pc-windows-msvc".into();
+    spec.commands.insert("hello".into(), "Hello.exe".into());
+    spec.desktop = Some(DesktopEntry {
+        name: "Hello".into(),
+        command: "hello".into(),
+        icon: "Hello.ico".into(),
+        uri_schemes: vec!["iris-drive".into()],
+    });
+    assert!(spec.validate().is_ok());
+    for schemes in [
+        vec!["https"],
+        vec!["iris/drive"],
+        vec!["iris-drive", "iris-drive"],
+        vec![""],
+        vec!["UPPER"],
+        vec!["iris\nExec=evil"],
+    ] {
+        spec.desktop.as_mut().unwrap().uri_schemes =
+            schemes.into_iter().map(String::from).collect();
+        assert!(spec.validate().is_err());
+    }
+    spec.desktop.as_mut().unwrap().uri_schemes = vec!["iris-drive".into()];
+    spec.commands.insert("hello".into(), "Hello.cmd".into());
+    assert!(spec.validate().is_err());
+    spec.commands.insert("hello".into(), "Hello.exe".into());
+    spec.target = "x86_64-unknown-linux-gnu".into();
+    spec.desktop.as_mut().unwrap().icon = "Hello.png".into();
     assert!(spec.validate().is_err());
 }

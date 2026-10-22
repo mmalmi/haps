@@ -1,4 +1,7 @@
-//! Freedesktop launchers generated only from verified, declarative package metadata.
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) mod windows;
+// Desktop launchers generated only from verified, declarative package metadata.
 use crate::model::{Release, atomic_write};
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
@@ -68,6 +71,7 @@ pub fn render(release: &Release, directory: &Path) -> Result<Option<String>> {
     render_entry(release, directory, Format::Current, None)
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn render_with_environment(
     release: &Release,
     directory: &Path,
@@ -77,6 +81,7 @@ pub(crate) fn render_with_environment(
 }
 
 /// Exact historical formats, used only to recognize launchers owned by Haps.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn previous_entries(release: &Release, directory: &Path) -> Result<[Option<String>; 2]> {
     Ok([
         render_entry(release, directory, Format::EscapedSpaces, None)?,
@@ -85,6 +90,7 @@ pub(crate) fn previous_entries(release: &Release, directory: &Path) -> Result<[O
 }
 
 #[derive(Clone, Copy)]
+#[cfg_attr(windows, allow(dead_code))]
 enum Format {
     Current,
     EscapedSpaces,

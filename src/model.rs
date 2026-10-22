@@ -32,7 +32,7 @@ pub struct PackageSpec {
     /// Relative macOS application bundle path, launched with Launch Services.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub app: Option<String>,
-    /// Linux launcher metadata; commands are declared separately, never shell snippets.
+    /// Desktop launcher metadata; commands are declared separately, never shell snippets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub desktop: Option<DesktopEntry>,
 }
@@ -43,6 +43,8 @@ pub struct DesktopEntry {
     pub name: String,
     pub command: String,
     pub icon: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uri_schemes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -104,8 +106,8 @@ impl PackageSpec {
         }
         if let Some(desktop) = &self.desktop {
             ensure!(
-                self.target.contains("-linux-"),
-                "desktop entries require a Linux target"
+                self.target.contains("-linux-") || self.target.ends_with("-windows-msvc"),
+                "desktop entries require a Linux or Windows target"
             );
             ensure!(
                 !desktop.name.trim().is_empty()
@@ -117,10 +119,50 @@ impl PackageSpec {
                 self.commands.contains_key(&desktop.command),
                 "desktop command is not declared"
             );
+            ensure!(
+                desktop.uri_schemes.is_empty() || self.target.ends_with("-windows-msvc"),
+                "URI schemes currently require Windows"
+            );
+            if self.target.ends_with("-windows-msvc") {
+                ensure!(
+                    self.commands[&desktop.command].ends_with(".exe"),
+                    "Windows desktop command must be an EXE"
+                );
+            }
+            let mut schemes = std::collections::BTreeSet::new();
+            for scheme in &desktop.uri_schemes {
+                ensure!(
+                    scheme.len() >= 2
+                        && scheme.len() <= 64
+                        && scheme.as_bytes()[0].is_ascii_lowercase()
+                        && scheme
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                        && schemes.insert(scheme),
+                    "invalid or duplicate URI scheme"
+                );
+                ensure!(
+                    ![
+                        "http",
+                        "https",
+                        "file",
+                        "ftp",
+                        "mailto",
+                        "shell",
+                        "ms-settings",
+                        "javascript",
+                        "data"
+                    ]
+                    .contains(&scheme.as_str()),
+                    "reserved URI scheme"
+                );
+            }
             safe_path(&desktop.icon)?;
             ensure!(
-                desktop.icon.ends_with(".png") || desktop.icon.ends_with(".svg"),
-                "desktop icon must be PNG or SVG"
+                (self.target.contains("-linux-")
+                    && (desktop.icon.ends_with(".png") || desktop.icon.ends_with(".svg")))
+                    || (self.target.ends_with("-windows-msvc") && desktop.icon.ends_with(".ico")),
+                "desktop icon must be PNG/SVG on Linux or ICO on Windows"
             );
         }
         for (name, path) in &self.commands {
