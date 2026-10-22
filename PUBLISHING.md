@@ -74,6 +74,10 @@ reserved. URI registration currently supports Windows only.
 Haps updates and removes only its own shortcuts and handlers, scoped to the
 publisher and Haps home. Existing handlers (including a previous installer’s)
 are preserved and block registration; remove or migrate those explicitly first.
+Windows desktop declarations are carried in a signed `haps/windows-desktop-v1`
+event tag, so older Haps versions can still read a mixed-platform catalog. New
+clients validate the declaration before using it; older clients install commands
+without registering Windows desktop integration.
 A failed install restores the previous integration. No administrator privileges
 or package-provided installation scripts are used.
 

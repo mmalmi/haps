@@ -1,3 +1,4 @@
+mod desktop_tag;
 use anyhow::{Context, Result, bail, ensure};
 use nostr::{Event, EventBuilder, Keys, Kind, Tag};
 use semver::Version;
@@ -190,11 +191,12 @@ pub struct Release {
 impl Release {
     pub fn verify(event: Event) -> Result<Self> {
         verify_event(&event)?;
-        let data: ReleaseData = serde_json::from_str(&event.content)?;
+        let mut data: ReleaseData = serde_json::from_str(&event.content)?;
         ensure!(
             data.schema == "haps.release.v1",
             "unsupported release schema"
         );
+        desktop_tag::hydrate(&event, &mut data.package)?;
         data.package.validate()?;
         ensure!(
             tag_value(&event, "d")? == release_tag(&data.package),
@@ -224,6 +226,11 @@ pub fn release_tag(package: &PackageSpec) -> String {
         "haps/release/{}/{}/{}",
         package.name, package.version, package.target
     )
+}
+
+/// Sign release metadata with backward-readable platform extensions.
+pub fn sign_release(keys: &Keys, data: &ReleaseData) -> Result<Event> {
+    desktop_tag::sign_release(keys, data)
 }
 
 pub fn sign(keys: &Keys, identifier: &str, content: &impl Serialize) -> Result<Event> {

@@ -282,7 +282,7 @@ impl Repository {
             );
             return Ok(existing);
         }
-        let event = sign(keys, &release_tag(&spec), &data)?;
+        let event = sign_release(keys, &data)?;
         let release = Release::verify(event.clone())?;
         let cid = self.put_json(&event).await?;
         let card = sign(
