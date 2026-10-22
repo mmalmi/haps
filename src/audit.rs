@@ -4,6 +4,8 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, process::Command};
 
+pub const REVIEW_SCOPE: &str = "Inspect the exact source, recipe, and direct/transitive runtime and build dependencies, including install hooks and build scripts. Read pinned dependency source independently; do not run npm install, builds, hooks, or project/dependency scripts during review. Check that downloads are content-pinned and verified before use. Record dependency versions, sources, findings, unreviewed parts, and OS/toolchain assumptions; a hash alone is not a code audit.";
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reviewer {
@@ -159,6 +161,7 @@ fn review_with_progress(
             interactive,
             "manual audits need a terminal; use haps attest --audited to record a completed review"
         );
+        eprintln!("{REVIEW_SCOPE}");
         let passed = dialoguer::Confirm::new()
             .with_prompt("Review this source and recipe. Mark the review passed and run the build with your user permissions?")
             .default(false).interact()?;

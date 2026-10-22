@@ -59,6 +59,7 @@ pub(super) async fn run(
             println!(
                 "Preparation has not executed build commands. Review the source, project instructions, and optional haps.toml build section; keep the checkout unchanged."
             );
+            println!("{}", haps::audit::REVIEW_SCOPE);
             println!(
                 "After review, run with the same Haps home: haps audit finish {} --note \"What you checked\"",
                 directory

@@ -504,8 +504,9 @@ local source build or verification of the published binary:
 2. Haps clones the exact source commit into a private temporary directory and
    prints its location and resolved build instructions. `haps.toml` is preferred;
    `haps-build.toml` is supported for older projects. Source preparation does
-   not run build commands. Agent review uses a restricted invocation and sends
-   the supplied source snapshot to the agent's configured service.
+   not run build commands. Agent review sends the supplied source snapshot to the
+   selected agent's configured service. The reviewer can read public dependency
+   source online, but has no shell, local-file, editing, or execution tools.
 3. After a passing review, Haps runs the recipe **with your user permissions**.
    Builds are not sandboxed. Source installation keeps the local output. Binary
    verification compares every packaged file, its bytes, and executable metadata
@@ -538,7 +539,7 @@ For a separate person or agent to review at their own pace:
 
 ```sh
 haps audit prepare alice/hello --version 1.0.0
-# Inspect the printed source, project instructions, and optional haps.toml build section.
+# Inspect source, build instructions, and pinned dependencies without running scripts.
 # Use the printed session name and the same Haps home:
 haps audit finish SESSION --note "What I reviewed" --publish false
 haps install alice/hello --version 1.0.0
@@ -571,13 +572,33 @@ can prevent identical output; Haps does not strip differences to manufacture a
 match. A match connects the reviewed source and build inputs to the payload; it
 does not prove the code safe or independently verify the compiler and dependencies.
 
-The built-in agent adapter inventories up to 20,000 tracked files and reads at
+Human and agent reviewers should include the exact direct and transitive dependency
+tree used by the selected platform and features: runtime and build dependencies,
+install hooks, build scripts, procedural macros, and native code. Follow manifests
+and lockfiles to independently inspect pinned dependency source. During review,
+do not run `npm install`, builds, hooks, or project/dependency scripts. Check every
+build-time download for a content hash or exact commit that the build verifies
+before use. Mutable URLs or tags, skipped checksums, and a hash fetched alongside
+the file from the same mutable source do not bind a build to reviewed bytes.
+Block unverified downloads; report incomplete when the pin or verification cannot
+be established. Hash verification and a clean vulnerability report do not replace
+source inspection. Record dependency versions and source references, findings,
+unreviewed or inaccessible parts, and OS/toolchain assumptions in the review note.
+
+Haps's integration with the installed agent inventories up to 20,000 tracked files and reads at
 most 512 KiB of text from pinned Git objects. For large trees it starts with build
 metadata and project instructions, then lets the reviewer request more tracked
 files for up to six inspection rounds within ten minutes. It never follows source
 symlinks or grants access to host files. Binary contents and omitted files are
-explicit in the inventory; every review records its coverage. Insufficient or
-failed reviews stop without approval. Manual/external review remains available.
+explicit in the inventory; every review records its checkout snapshot coverage.
+Codex can use live web reads/search and Claude Code can use only WebFetch/WebSearch
+to inspect external dependency source. Fetched content is untrusted evidence;
+it cannot authorize execution. Build planning remains tool-free. These tools do
+not clone arbitrary repositories or unpack archives, and a web page does not
+prove that its source matches a locked package's bytes. The reviewer must report
+such gaps rather than claim complete dependency verification. Haps records those
+claims but does not independently verify external dependency coverage. Insufficient
+or failed reviews stop without approval. Manual/external review remains available.
 `haps build ... --execute --install` also requires a selected source reviewer;
 its result is marked as a local build with no publisher-binary comparison.
 
