@@ -32,6 +32,7 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          python3 scripts/sync-legacy-recipe.py --check
           python3 - <<'PY'
           import os, tomllib
           with open('Cargo.toml', 'rb') as file:

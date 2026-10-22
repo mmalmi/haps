@@ -1,5 +1,6 @@
 """The source recipe must describe the same package as each published bundle."""
 import json
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -16,6 +17,9 @@ import bundle
 
 
 class ReleaseRecipeTest(unittest.TestCase):
+    def test_legacy_self_upgrade_recipe_is_an_exact_generated_copy(self):
+        subprocess.run([sys.executable, str(ROOT / 'scripts/sync-legacy-recipe.py'), '--check'], check=True)
+
     @unittest.skipUnless(tomllib, 'Recipe metadata validation needs Python 3.11+')
     def test_recipe_matches_every_published_platform(self):
         recipe = tomllib.loads((ROOT / 'haps.toml').read_text())

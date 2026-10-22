@@ -411,6 +411,13 @@ maps. Additional packages in the same repository use `[packages.NAME.package]`,
 `haps build ... --package NAME`, `haps manifest ... --package NAME`, or `haps pack ... --package NAME --target TRIPLE`
 to select one. Add `# https://haps.hashtree.cc` as a helpful header comment.
 
+Haps itself temporarily includes a generated `haps-build.toml` so clients through
+0.1.17 retain their recipe-based self-update path. `haps.toml` is its only editable source;
+after changing it (including a release version bump), run
+`python3 scripts/sync-legacy-recipe.py`. Release checks reject a stale copy.
+The 0.1.17 automatic reviewer still rejects repositories larger than 512 KiB;
+use its manual review flow or update through Cargo/the installer for those repositories.
+
 Build commands can invoke Cargo, CMake, npm, or any existing project tooling.
 For Arch recipes, `[build] builder = "makepkg"` uses the pinned checkout's
 `PKGBUILD` with `makepkg --holdver --log --noarchive`; omit `build.commands` and
@@ -418,7 +425,10 @@ map the declared files/directories under `pkg/` into Haps artifacts. Install the
 Arch build tools and declared system dependencies first. Haps does not run pacman
 installation hooks or treat an AUR listing as an audit. Keeping `PKGBUILD`, its
 supporting files, and `haps.toml` in the same pinned repository also lets Hashtree
-store and distribute the recipe without requiring AUR to be online.
+store and distribute the recipe without requiring AUR to be online. This first
+makepkg integration expects the primary application source in the audited checkout;
+an imported AUR recipe alone does not audit source downloaded later. Automatic AUR
+import and separate downloaded-source review are not implemented.
 
 Without a declared build section, a selected agent can propose commands and output
 paths from the project's existing instructions. This proposal executes nothing;
