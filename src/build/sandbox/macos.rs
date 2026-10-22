@@ -26,6 +26,7 @@ pub(super) fn command(runner: &Runner, args: &[String]) -> Result<Command> {
 ; Arbitrary sysctls can disclose other processes' arguments and environment.
 (allow sysctl-read (sysctl-name-prefix "hw.") (sysctl-name-prefix "machdep.cpu.")
   (sysctl-name "kern.argmax") (sysctl-name "kern.maxfilesperproc")
+  (sysctl-name "kern.hostname") ; uname(), including Python's ctypes startup
   (sysctl-name "kern.maxproc") (sysctl-name "kern.osproductversion")
   (sysctl-name "kern.osrelease") (sysctl-name "kern.ostype")
   (sysctl-name "kern.osvariant_status") (sysctl-name "kern.osversion")

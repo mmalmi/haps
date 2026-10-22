@@ -49,6 +49,7 @@ artifacts={output="output"}
         f = self.fixture
         (f.source / 'escape').symlink_to(self.secret)
         self.build(f'''import os, pathlib, shutil, subprocess, sys
+assert os.uname().sysname  # Python 3.15 ctypes startup requires this too.
 for key in ('HAPS_BUILD_SECRET','SSH_AUTH_SOCK','DOCKER_HOST','NODE_OPTIONS'):
     assert key not in os.environ, key
 assert pathlib.Path.home() != pathlib.Path({str(Path.home())!r})
