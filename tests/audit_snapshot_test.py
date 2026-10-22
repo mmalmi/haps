@@ -45,6 +45,19 @@ class Snapshot(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'outside'):
             snapshot.read('../private')
 
+    def test_omitted_binary_blobs_still_consume_the_read_budget(self):
+        (self.root / 'README.one').write_bytes(b'\0' * (ADAPTER.MAX_SOURCE // 2))
+        (self.root / 'README.two').write_bytes(b'\0' * (ADAPTER.MAX_SOURCE // 2))
+        (self.root / 'code.txt').write_text('not yet inspected')
+        self.commit()
+        snapshot = ADAPTER.SourceSnapshot(self.root, {})
+        with patch.object(snapshot, 'git', wraps=snapshot.git) as git:
+            snapshot.read('README.two')
+            snapshot.read('code.txt')
+        self.assertEqual(git.call_count, 1, 'binary files must consume the raw read budget')
+        self.assertIn('budget', snapshot.files['code.txt']['omitted'])
+        self.assertEqual(snapshot.coverage()['reviewed_bytes'], 0)
+
     def test_reads_committed_bytes_and_never_follows_host_symlink(self):
         (self.root / 'README.md').write_text('committed source')
         if os.name != 'nt':

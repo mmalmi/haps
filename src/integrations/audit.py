@@ -77,6 +77,7 @@ class SourceSnapshot:
         for key in ('GIT_CONFIG_COUNT', 'GIT_CONFIG_PARAMETERS', 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE'):
             self.env.pop(key, None)
         self.entries, self.files, self.size = {}, {}, 0
+        self.inspected_bytes = 0
         for entry in filter(None, self.git('ls-tree', '-rlz', 'HEAD').split(b'\0')):
             metadata, path = entry.split(b'\t', 1)
             mode, kind, oid, length = metadata.split()
@@ -99,7 +100,7 @@ class SourceSnapshot:
                         len(Path(path).parts), path)
             names = [p for p in sorted(self.entries, key=priority) if priority(p)[0] < 3]
         for path in names:
-            if self.size + self.entries[path]['size'] <= MAX_SOURCE // (2 if total > MAX_SOURCE else 1):
+            if self.inspected_bytes + self.entries[path]['size'] <= MAX_SOURCE // (2 if total > MAX_SOURCE else 1):
                 self.read(path)
 
     def git(self, *args):
@@ -114,10 +115,11 @@ class SourceSnapshot:
         if entry['kind'] != 'blob' or entry['mode'] not in ('100644', '100755'):
             self.files[path] = {'path': path, 'omitted': 'symlink or submodule; target not followed'}
             return
-        if self.size + entry['size'] > MAX_SOURCE:
+        if self.inspected_bytes + entry['size'] > MAX_SOURCE:
             self.files[path] = {'path': path, 'omitted': 'source review byte budget exceeded'}
             return
         raw = self.git('cat-file', 'blob', entry['oid'])
+        self.inspected_bytes += len(raw)
         try:
             content = raw.decode('utf-8')
             if '\0' in content:
