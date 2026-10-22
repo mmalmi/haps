@@ -47,6 +47,7 @@ artifacts={output="output"}
 
     def test_host_reads_writes_symlinks_environment_and_descendants_are_confined(self):
         f = self.fixture
+        child_outside = f.root / 'child-outside-write'
         (f.source / 'escape').symlink_to(self.secret)
         self.build(f'''import os, pathlib, shutil, subprocess, sys
 assert os.uname().sysname  # Python 3.15 ctypes startup requires this too.
@@ -66,9 +67,11 @@ else: raise AssertionError('linked a host file into the writable build root')
 for name in ({str(self.outside)!r}, {str(self.secret)!r}):
     try: pathlib.Path(name).write_text('changed')
     except OSError: pass
-    else: raise AssertionError('host write allowed: ' + name)
-child = subprocess.run(['sh','-c','printf child > "$1"','sh',{str(self.outside)!r}])
-assert child.returncode != 0
+    else: assert sys.platform == 'linux', 'host write allowed: ' + name
+# Linux can write these pathnames in private /tmp; the parent checks host files.
+child = subprocess.run(['sh','-c','printf child > "$1"','sh',{str(child_outside)!r}])
+if sys.platform != 'linux':
+    assert child.returncode != 0
 if shutil.which('sudo'):
     try: sudo = subprocess.run(['sudo','-n','touch',{str(self.outside)!r}], stdin=subprocess.DEVNULL, capture_output=True)
     except OSError: pass
@@ -93,6 +96,7 @@ pathlib.Path('output').write_text('isolated artifact')
 ''')
         self.assertEqual(self.secret.read_text(), 'host credential canary')
         self.assertFalse(self.outside.exists())
+        self.assertFalse(child_outside.exists(), 'child modified the host filesystem')
 
     def test_host_control_socket_is_unavailable_even_when_network_is_allowed(self):
         address = self.fixture.root / 'control.sock'
@@ -157,10 +161,12 @@ pathlib.Path('output').write_bytes(content)
     def test_failed_build_never_retries_with_host_permissions(self):
         self.fixture.env['HAPS_ALLOW_HOST_BUILD'] = 'true'
         result = self.build(f'''import pathlib
-pathlib.Path({str(self.outside)!r}).write_text('must stay blocked')
-pathlib.Path('output').write_text('must not succeed')
+try: pathlib.Path({str(self.outside)!r}).write_text('host retry detected')
+except OSError: pass
+raise SystemExit('intentional build failure after write attempt')
 ''', success=False)
         self.assertFalse(self.outside.exists())
+        self.assertIn('intentional build failure after write attempt', result.stderr)
         self.assertIn('No broader permissions were granted', result.stderr)
 
     def test_child_cannot_signal_a_host_process(self):

@@ -374,7 +374,7 @@ haps build htree://npub1.../project --rev FULL_COMMIT_HASH --execute --install
 The first command previews the optional `[build]` section in the pinned `haps.toml`.
 The older `haps-build.toml` format remains supported. Building requires
 `--execute`. Builds use an OS sandbox with a private home, temporary files, and
-cache. Only the checkout and build scratch space are writable; installed system
+cache. Host writes are limited to the checkout and build scratch space; installed system
 tools and supported toolchains are readable. Host credentials, environment
 variables, and filesystem control sockets are not passed through. Linux requires bubblewrap
 with unprivileged namespaces; macOS uses `sandbox-exec`. Unsupported or unavailable
