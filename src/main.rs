@@ -1460,6 +1460,23 @@ async fn main() -> ExitCode {
 
 async fn execute(mut cli: Cli) -> Result<u8> {
     let non_interactive = cli.non_interactive || cli.command.json();
+    let bootstrap = if matches!(&cli.command, Command::Update { package, .. } if package == "haps")
+    {
+        let installer = haps::bootstrap::Installer::current()?;
+        if installer.is_none() && haps::bootstrap::cargo_installation()? {
+            anyhow::bail!(
+                "This Haps installation is managed by Cargo. To update it, run `cargo install haps --locked`. No changes made."
+            );
+        }
+        installer
+    } else {
+        None
+    };
+    if bootstrap.is_some()
+        && let Command::Update { package, .. } = &mut cli.command
+    {
+        *package = haps::bootstrap::package()?;
+    }
     let (progress, _reporter) = haps::progress::Progress::stderr(
         !cli.command.json()
             && matches!(
@@ -2352,17 +2369,30 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             audit_review,
             json,
         } => {
-            let receipt = installation.receipt(&package)?;
-            let current = Release::verify(receipt.current)?;
+            let (identity, minimum_attestations) = if bootstrap.is_some() {
+                let receipts = installation.receipts()?;
+                (
+                    package.clone(),
+                    receipts
+                        .get(&package)
+                        .map_or(1, |r| r.minimum_attestations.max(1)),
+                )
+            } else {
+                let receipt = installation.receipt(&package)?;
+                (
+                    Release::verify(receipt.current)?.identity(),
+                    receipt.minimum_attestations.max(1),
+                )
+            };
             progress.stage("Reading package catalogs");
-            let choices = candidates(&home, &mut config, None, Some(&current.identity())).await?;
+            let choices = candidates(&home, &mut config, None, Some(&identity)).await?;
             let releases: Vec<_> = choices.iter().map(|c| c.release.clone()).collect();
             progress.stage("Checking release attestations and warnings");
             refresh_feedback(&home, &config, &mut trust, &releases).await?;
             progress.clear();
             let candidate = select(
                 choices,
-                &current.identity(),
+                &identity,
                 None,
                 &config.aliases,
                 &trust,
@@ -2373,6 +2403,9 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     confirm_install: false,
                 },
             )?;
+            if let Some(installer) = &bootstrap {
+                installer.validate_release(&candidate.release)?;
+            }
             ensure_audited(
                 &home,
                 &mut config,
@@ -2385,7 +2418,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     allow_untrusted: allow_untrusted || package.contains('/'),
                     allow_warnings,
                     allow_unaudited,
-                    minimum: receipt.minimum_attestations.max(1),
+                    minimum: minimum_attestations,
                 },
             )
             .await?;
@@ -2402,9 +2435,13 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 .install_with_policy(
                     &candidate.repository,
                     &candidate.release,
-                    receipt.minimum_attestations.max(1),
+                    minimum_attestations,
                 )
                 .await?;
+            if let Some(installer) = &bootstrap {
+                progress.stage("Switching to Haps-managed updates");
+                installation.adopt_installer(&identity, installer)?;
+            }
             progress.clear();
             print_installed(&candidate.release, &trust, &config.aliases, json)?;
         }

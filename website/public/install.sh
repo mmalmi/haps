@@ -44,7 +44,7 @@ main() {
                 bin_dir=${existing%/*}
             else
                 update_advice "$existing"
-                printf 'No changes made. To install a separate copy, rerun with --bin-dir DIR.\n'
+                printf 'Haps was not updated. To install a separate copy, rerun with --bin-dir DIR.\n'
                 return
             fi
         fi

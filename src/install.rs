@@ -85,19 +85,22 @@ impl Installation {
         let mut bindings = crate::links::bindings(&self.home)?;
         if let Some(old) = bindings.get(&release.identity()) {
             ensure!(
-                old == &directory,
+                old.directory() == directory,
                 "package already linked in {}",
-                old.display()
+                old.directory().display()
             );
         }
         crate::links::transaction(
             &self.home,
-            &directory,
+            &crate::links::Binding::Directory(directory.clone()),
             None,
             Some(&release),
             |r| self.version_dir(r),
             || {
-                bindings.insert(release.identity(), directory.clone());
+                bindings.insert(
+                    release.identity(),
+                    crate::links::Binding::Directory(directory.clone()),
+                );
                 atomic_write(
                     &self.home.join("linked.json"),
                     &serde_json::to_vec_pretty(&bindings)?,
@@ -105,6 +108,38 @@ impl Installation {
             },
         )?;
         Ok(directory)
+    }
+    /// Activate a verified package at the exact command owned by the installer.
+    /// A failed activation retains the old bundle and restores its symlink.
+    pub fn adopt_installer(
+        &self,
+        name: &str,
+        installer: &crate::bootstrap::Installer,
+    ) -> Result<()> {
+        let _guard = lock(&self.home.join(".install.lock"))?;
+        let release = Release::verify(self.receipt(name)?.current)?;
+        let mut bindings = crate::links::bindings(&self.home)?;
+        ensure!(
+            bindings
+                .get(&release.identity())
+                .is_none_or(|binding| binding.directory() == installer.directory()),
+            "Haps is already linked in a different directory"
+        );
+        let binding = installer.binding(&release)?;
+        crate::links::adopt_installer(
+            &self.home,
+            installer,
+            &binding,
+            &release,
+            |r| self.version_dir(r),
+            || {
+                bindings.insert(release.identity(), binding.clone());
+                atomic_write(
+                    &self.home.join("linked.json"),
+                    &serde_json::to_vec_pretty(&bindings)?,
+                )
+            },
+        )
     }
     fn save_desktop_change(
         &self,

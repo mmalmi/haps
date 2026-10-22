@@ -64,6 +64,17 @@ choose `--bin-dir DIR` to install a separate copy. Replacing an unmanaged comman
 at the destination requires `--force`. The installer explains when another copy
 still takes precedence on `PATH`. Use `--force` to repair a script-managed install.
 
+From 0.1.16, `haps update haps` migrates an installer-managed copy to a normal
+Haps package. It pins the official publisher, applies the usual signature and
+audit checks, and switches the existing command only after installation succeeds.
+Future updates and rollback use the normal package receipts. Installer-owned
+`htree` and `git-remote-htree` commands follow managed updates; separately installed
+helpers are preserved. The old installer bundle stays available; the initial
+migration does not create a signed rollback receipt for the old bootstrap binary. Older Haps copies
+need one installer update to gain this command. Cargo-installed copies instead
+explain that you should run `cargo install haps --locked`; Haps never starts a
+Cargo build automatically.
+
 To inspect first or pin a version:
 
 ```sh
