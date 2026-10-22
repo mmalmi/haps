@@ -36,7 +36,7 @@ pub(super) fn preflight() -> Result<()> {
     });
     if let Err(error) = result {
         anyhow::bail!(
-            "build isolation could not start: {}. Enable bubblewrap and unprivileged namespaces, or explicitly use --allow-host-build for a trusted build. No source was executed",
+            "build isolation could not start: {}. Enable bubblewrap and unprivileged namespaces (including the distribution's bwrap AppArmor profile on Ubuntu), or explicitly use --allow-host-build for a trusted build. No source was executed",
             error.escape_debug()
         );
     }

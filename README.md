@@ -379,6 +379,10 @@ tools and supported toolchains are readable. Host credentials, environment
 variables, and filesystem control sockets are not passed through. Linux requires bubblewrap
 with unprivileged namespaces; macOS uses `sandbox-exec`. Unsupported or unavailable
 isolation stops the build; Haps never silently falls back to host execution.
+On Ubuntu with AppArmor user-namespace restrictions, the administrator must also
+enable the distribution's `bwrap-userns-restrict` profile for `/usr/bin/bwrap`
+(provided by `apparmor-profiles` on Ubuntu 24.04).
+Haps does not change host security policy; its preflight reports setup failures.
 
 Network is disabled by default. If the reviewed build needs downloads, add
 `--allow-build-network`. This retains file/environment isolation but allows network
