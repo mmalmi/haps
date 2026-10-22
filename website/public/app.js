@@ -1,6 +1,26 @@
 let noticeTimer;
 for (const button of document.querySelectorAll('[data-copy]')) {
-  button.addEventListener('click', async () => {
+  let pointerStart;
+  let keyboardActivation = false;
+  button.addEventListener('pointerdown', (event) => {
+    pointerStart = { x: event.clientX, y: event.clientY };
+    keyboardActivation = false;
+  });
+  button.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      pointerStart = undefined;
+      keyboardActivation = true;
+    }
+  });
+  button.addEventListener('click', async (event) => {
+    const start = pointerStart;
+    const fromKeyboard = keyboardActivation;
+    pointerStart = undefined;
+    keyboardActivation = false;
+    if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 5) return;
+    const selection = window.getSelection();
+    if (!start && !fromKeyboard && selection && !selection.isCollapsed &&
+        (button.contains(selection.anchorNode) || button.contains(selection.focusNode))) return;
     const text = document.getElementById(button.dataset.copy).textContent.trim();
     const notice = document.getElementById('notice');
     try {
