@@ -3,6 +3,30 @@ mod audit;
 use std::{fs, path::Path, process::Command};
 use tempfile::tempdir;
 
+#[test]
+fn execution_permissions_are_explicit_and_unsupported_platforms_fail_closed() {
+    use haps::build::sandbox::Execution;
+    assert!(
+        Execution {
+            allow_host: true,
+            allow_network: true
+        }
+        .preflight()
+        .is_err()
+    );
+    assert!(
+        Execution {
+            allow_host: true,
+            allow_network: false
+        }
+        .preflight()
+        .is_ok()
+    );
+    if !cfg!(any(target_os = "linux", target_os = "macos")) {
+        assert!(Execution::default().preflight().is_err());
+    }
+}
+
 fn git(root: &Path, args: &[&str]) -> String {
     let result = Command::new("git")
         .arg("-C")
@@ -119,7 +143,11 @@ commands = [["rustc", "hello.rs", "-o", "hello{exe}"]]
             .success()
     );
     assert!(!home.join("built-packages").exists());
-    let build = run(&["build", &url, "--rev", &rev, "--execute"]);
+    let mut args = vec!["build", &url, "--rev", &rev, "--execute"];
+    if cfg!(windows) {
+        args.push("--allow-host-build");
+    }
+    let build = run(&args);
     assert!(
         build.status.success(),
         "{}",

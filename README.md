@@ -373,7 +373,28 @@ haps build htree://npub1.../project --rev FULL_COMMIT_HASH --execute --install
 
 The first command previews the optional `[build]` section in the pinned `haps.toml`.
 The older `haps-build.toml` format remains supported. Building requires
-`--execute`; recipes run with your user permissions and are **not sandboxed**.
+`--execute`. Builds use an OS sandbox with a private home, temporary files, and
+cache. Only the checkout and build scratch space are writable; installed system
+tools and supported toolchains are readable. Host credentials, environment
+variables, and filesystem control sockets are not passed through. Linux requires bubblewrap
+with unprivileged namespaces; macOS uses `sandbox-exec`. Unsupported or unavailable
+isolation stops the build; Haps never silently falls back to host execution.
+
+Network is disabled by default. If the reviewed build needs downloads, add
+`--allow-build-network`. This retains file/environment isolation but allows network
+access **including services on the host and local network** (and Linux abstract
+Unix sockets). It does not verify
+downloaded dependencies; the reviewer must check pinned inputs and enforced hashes.
+For a trusted build needing host access, signing credentials, or an unsupported
+platform, `--allow-host-build` explicitly runs with the host environment and user
+permissions. These permissions are user choices, never recipe or agent settings;
+the selected mode is included in local-build and reproduction audit evidence.
+
+Isolation contains build commands and their children; it does not sandbox the
+installed app, establish that reviewed code is safe, or isolate the kernel like a
+VM. Resource exhaustion is not contained. Audits tied to exact content remain the
+basis for deciding whether to install. Install system tools and dependencies
+separately; build recipes are not a way to run privileged host installers.
 Haps delegates `htree://` Git transport to `git-remote-htree` and also accepts HTTPS
 and local `file://` Git URLs. Full commit hashes are required; moving branches and
 tags are not sufficient build pins. Toolchains must already be available. Submodule
@@ -507,8 +528,8 @@ local source build or verification of the published binary:
    not run build commands. Agent review sends the supplied source snapshot to the
    selected agent's configured service. The reviewer can read public dependency
    source online, but has no shell, local-file, editing, or execution tools.
-3. After a passing review, Haps runs the recipe **with your user permissions**.
-   Builds are not sandboxed. Source installation keeps the local output. Binary
+3. After a passing review, Haps runs the recipe in the build sandbox, with network
+   disabled unless you explicitly allowed it. Source installation keeps the local output. Binary
    verification compares every packaged file, its bytes, and executable metadata
    with the signed published payload. Mismatches, failed
    builds, unavailable agents, or incomplete reviews stop without approval or
@@ -929,7 +950,10 @@ attributes, and installer packages are rejected or unsupported. OS integration
 is currently limited to Linux desktop launchers and the optional Omarchy menu.
 Only bundles whose required files and metadata fit this format can be published;
 verify each installed macOS bundle with `codesign --verify --deep --strict`.
-Native code and build recipes are not sandboxed. Ordinary binary installation runs no build or install hooks. `rollback` restores a retained local version only after checking its current audit and warning policy.
+Installed native code is not sandboxed by Haps. Build commands use the containment
+described above unless you explicitly select host execution. Ordinary binary
+installation runs no build or install hooks. `rollback` restores a retained local
+version only after checking its current audit and warning policy.
 
 ## Package discovery and event catalogs
 

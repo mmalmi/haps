@@ -163,8 +163,11 @@ fn review_with_progress(
         );
         eprintln!("{REVIEW_SCOPE}");
         let passed = dialoguer::Confirm::new()
-            .with_prompt("Review this source and recipe. Mark the review passed and run the build with your user permissions?")
-            .default(false).interact()?;
+            .with_prompt(
+                "Review this source and recipe. Pass the review and continue to the build?",
+            )
+            .default(false)
+            .interact()?;
         ensure!(passed, "audit not approved; nothing installed");
         let note = dialoguer::Input::<String>::new()
             .with_prompt("What did you check?")
@@ -184,7 +187,7 @@ fn review_with_progress(
             "supported audit agents: codex, claude, manual"
         );
         eprintln!(
-            "Reviewing with {agent}; source is sent to its configured service. A passing review permits the build recipe to run with your user permissions."
+            "Reviewing with {agent}; source is sent to its configured service. A passing review permits a separate build step."
         );
         progress.stage(format!("Reviewing source with {agent}"));
         let input = tempfile::NamedTempFile::new()?;
@@ -229,7 +232,9 @@ pub async fn review_and_rebuild(
     agent: &str,
     model: Option<&str>,
     interactive: bool,
+    execution: crate::build::sandbox::Execution,
 ) -> Result<(Evidence, String)> {
+    execution.preflight()?;
     let source = release.data.package.source.clone().context("this release has no pinned source; Audit and install cannot reproduce it. A reviewer can record an explicit audit with provenance instead")?;
     let (progress, _reporter) = Progress::stderr(true)?;
     progress.stage("Fetching pinned source for audit");
@@ -246,7 +251,15 @@ pub async fn review_and_rebuild(
     let manifest: crate::model::Manifest = repository.json(&release.data.manifest).await?;
     manifest.validate(&release.data.package)?;
     let review = review_with_progress(&checkout, agent, model, interactive, &progress)?;
-    let evidence = rebuild(home, release, &checkout, review.reviewer, &progress).await?;
+    let evidence = rebuild(
+        home,
+        release,
+        &checkout,
+        review.reviewer,
+        &progress,
+        execution,
+    )
+    .await?;
     Ok((evidence, review.note))
 }
 
@@ -256,7 +269,9 @@ async fn rebuild(
     checkout: &crate::build::Checkout,
     reviewer: Reviewer,
     progress: &Progress,
+    execution: crate::build::sandbox::Execution,
 ) -> Result<Evidence> {
+    execution.preflight()?;
     if crate::security::enabled(home) {
         progress.stage("Scanning source before the audit build");
         let report = crate::security::scan_source(
@@ -272,7 +287,7 @@ async fn rebuild(
         crate::security::bind_report(home, release, report)?;
     }
     progress.stage("Rebuilding the audited source");
-    let payload = checkout.execute()?;
+    let payload = checkout.execute_with(execution)?;
     progress.stage("Comparing rebuilt files with the published package");
     let rebuilt_repo =
         crate::repository::Repository::local(checkout.root().parent().unwrap().join("comparison"))?;
@@ -289,7 +304,7 @@ async fn rebuild(
         schema: "haps.audit.v1".into(),
         method: format!("{}-review-and-rebuild", reviewer.agent),
         provenance: format!(
-            "Reviewed pinned source {}; rebuilt with the committed recipe and local toolchain. Complete payload manifest matches {}. Dependencies and toolchain are not independently verified.",
+            "Reviewed pinned source {}; rebuilt with the committed recipe and local toolchain. {} Complete payload manifest matches {}. Dependencies and toolchain are not independently verified.",
             release
                 .data
                 .package
@@ -297,6 +312,7 @@ async fn rebuild(
                 .as_ref()
                 .context("source missing")?
                 .rev,
+            execution.description(),
             release.data.manifest
         ),
         binary_match: true,
@@ -377,6 +393,7 @@ pub async fn finish(
     session: &str,
     note: &str,
     reviewer: Reviewer,
+    execution: crate::build::sandbox::Execution,
 ) -> Result<(crate::model::Release, Evidence)> {
     ensure!(
         !session.is_empty()
@@ -416,7 +433,7 @@ pub async fn finish(
             checkout.recipe.package == release.data.package,
             "source recipe does not describe the exact published package"
         );
-        rebuild(home, &release, &checkout, reviewer, &progress).await?
+        rebuild(home, &release, &checkout, reviewer, &progress, execution).await?
     } else {
         Evidence {
             schema: "haps.audit.v1".into(),

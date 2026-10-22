@@ -2,6 +2,7 @@
 //! its installed remote helpers. Recipes run only after `--execute` is supplied.
 mod artifacts;
 pub mod manifest;
+pub mod sandbox;
 
 use crate::model::{MAX_METADATA, PackageSpec, SourceInfo, safe_path, target};
 use anyhow::{Context, Result, ensure};
@@ -311,28 +312,21 @@ impl Checkout {
     }
 
     pub fn execute(&self) -> Result<PathBuf> {
+        self.execute_with(sandbox::Execution::default())
+    }
+
+    pub fn execute_with(&self, execution: sandbox::Execution) -> Result<PathBuf> {
         let root = self.source.root();
         self.ensure_pristine()?;
+        let runner = sandbox::Runner::new(&root, execution)?;
+        eprintln!("{}", execution.description());
         if self.recipe.build.builder == Builder::Makepkg {
-            let status = Command::new("makepkg")
-                .args(["--holdver", "--log", "--noarchive"])
-                .current_dir(&root)
-                .stdout(std::io::stderr())
-                .status()
-                .context("makepkg is required for this recipe; install the Arch build tools and declared dependencies first")?;
-            ensure!(
-                status.success(),
-                "makepkg failed; check its output for missing dependencies or build errors"
-            );
+            runner.run(&["makepkg", "--holdver", "--log", "--noarchive"].map(String::from))
+                .context("makepkg failed; install the Arch build tools and declared dependencies separately")?;
         }
         for args in &self.recipe.build.commands {
             eprintln!("Building: {}", args.join(" "));
-            let status = Command::new(&args[0])
-                .args(&args[1..])
-                .current_dir(&root)
-                .stdout(std::io::stderr())
-                .status()?;
-            ensure!(status.success(), "build command failed: {}", args[0]);
+            runner.run(args)?;
         }
         let payload = self.source.directory.path().join("payload");
         artifacts::copy(&root, &payload, &self.recipe.build.artifacts)?;

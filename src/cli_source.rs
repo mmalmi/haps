@@ -17,6 +17,7 @@ pub(super) async fn from_release(
     recipe_file: Option<&Path>,
     non_interactive: bool,
 ) -> Result<Candidate> {
+    options.build_execution.execution().preflight()?;
     let (progress, _reporter) = Progress::stderr(true)?;
     progress.stage("Fetching pinned source to build locally");
     let source = upstream
@@ -80,6 +81,8 @@ pub(super) async fn build(
     options: &AuditReviewArgs,
     non_interactive: bool,
 ) -> Result<Candidate> {
+    let execution = options.build_execution.execution();
+    execution.preflight()?;
     let interactive =
         !non_interactive && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
     let agent = audit_agent(
@@ -118,7 +121,7 @@ pub(super) async fn build(
     let recipe_bytes = serde_json::to_vec(&checkout.recipe)?;
     let recipe_hash = hex::encode(Sha256::digest(&recipe_bytes));
     progress.stage("Building reviewed source");
-    let payload = checkout.execute()?;
+    let payload = checkout.execute_with(execution)?;
     progress.stage("Recording the local build");
     let repo = Repository::local(home.join("built-packages"))?;
     let source_name = format!("local-builds-{}", &keys.public_key().to_hex()[..16]);
@@ -147,7 +150,7 @@ pub(super) async fn build(
         schema: "haps.audit.v1".into(),
         method: format!("{}-review-local-build", review.reviewer.agent),
         provenance: format!(
-            "Built locally from reviewed pinned source {} and recipe {} (SHA-256 {}). No publisher binary was compared. Dependencies and toolchain are not independently verified.",
+            "Built locally from reviewed pinned source {} and recipe {} (SHA-256 {}). {} No publisher binary was compared. Dependencies and toolchain are not independently verified.",
             checkout
                 .recipe
                 .package
@@ -156,11 +159,13 @@ pub(super) async fn build(
                 .context("source missing")?
                 .rev,
             recipe_cid,
-            recipe_hash
+            recipe_hash,
+            execution.description()
         ),
         binary_match: false,
         reviewer: Some(review.reviewer),
     };
+
     if let Some(scan) = scan {
         haps::security::bind_report(home, &release, scan)?;
     }
@@ -217,6 +222,10 @@ pub(super) async fn execute_build(
     else {
         unreachable!("build dispatcher")
     };
+
+    if execute {
+        audit_review.build_execution.execution().preflight()?;
+    }
 
     ensure!(
         install
@@ -319,7 +328,7 @@ pub(super) async fn execute_build(
         } else {
             None
         };
-        let payload = checkout.execute()?;
+        let payload = checkout.execute_with(audit_review.build_execution.execution())?;
         let repo = Repository::local(home.join("built-packages"))?;
         let release = repo
             .publish(&keys, checkout.recipe.package.clone(), &payload)
@@ -330,7 +339,7 @@ pub(super) async fn execute_build(
         println!("Built {} {}", release.identity(), release.event.id);
     } else {
         println!(
-            "Preview only. Add --execute to run these commands with your user permissions; add --install to activate the result. Build recipes are not sandboxed."
+            "Preview only. Add --execute to build in isolation with network disabled; add --install to review and activate the result. Downloads require --allow-build-network."
         );
     }
     Ok(())

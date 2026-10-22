@@ -68,6 +68,25 @@ struct ClaimArgs {
 }
 
 #[derive(Args, Clone, Default)]
+struct BuildExecutionArgs {
+    /// Allow build downloads and access to host/local-network services; files remain isolated.
+    #[arg(long, conflicts_with = "allow_host_build")]
+    allow_build_network: bool,
+    /// Run a trusted build with full host permissions and environment, without isolation.
+    #[arg(long)]
+    allow_host_build: bool,
+}
+
+impl BuildExecutionArgs {
+    fn execution(&self) -> haps::build::sandbox::Execution {
+        haps::build::sandbox::Execution {
+            allow_host: self.allow_host_build,
+            allow_network: self.allow_build_network,
+        }
+    }
+}
+
+#[derive(Args, Clone, Default)]
 struct AuditReviewArgs {
     /// Reviewer: codex, claude, or manual (defaults to your audit settings).
     #[arg(long)]
@@ -78,6 +97,8 @@ struct AuditReviewArgs {
     /// Publish this audit, overriding the saved preference for this operation.
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
     publish_audit: Option<bool>,
+    #[command(flatten)]
+    build_execution: BuildExecutionArgs,
 }
 
 #[derive(Subcommand)]
@@ -101,6 +122,8 @@ enum AuditAction {
         model: Option<String>,
         #[arg(long, num_args = 0..=1, default_missing_value = "true")]
         publish: Option<bool>,
+        #[command(flatten)]
+        build_execution: BuildExecutionArgs,
     },
     /// Show or set review and publication defaults. Use --model default to clear it.
     Settings {
@@ -211,7 +234,7 @@ enum Command {
         /// Select an additional package declared in the project manifest.
         #[arg(long)]
         package: Option<String>,
-        /// Run the recipe with your user permissions. Builds are not sandboxed.
+        /// Run the recipe in a build sandbox, with network access disabled by default.
         #[arg(long)]
         execute: bool,
         /// Install the locally signed build after it succeeds.
@@ -799,6 +822,7 @@ async fn ensure_audited(
         &agent,
         model.as_deref(),
         interactive,
+        options.review.build_execution.execution(),
     )
     .await?;
     record_audit(

@@ -15,6 +15,7 @@ class Makepkg(unittest.TestCase):
     def test_reviewed_pkgbuild_builds_installs_and_runs_without_publisher_binary(self):
         f = audit_test.Audits('runTest')
         f.setUp()
+        f.allow_host_build = False
         self.addCleanup(f.doCleanups)
         source = '#include <stdio.h>\nint main(void) { puts("Built with makepkg"); return 0; }\n'
         (f.source / 'hello.c').write_text(source)

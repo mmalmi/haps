@@ -73,12 +73,17 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
                         PATH=str(self.bin) + os.pathsep + os.environ['PATH'],
                         AGENT_CALLED=str(self.root / 'agent-called'), HTREE_CONFIG_DIR=str(self.root / 'htree'))
         self.env.pop('NOSTR_RELAYS', None)
+        # These workflow fixtures deliberately write external markers. Their
+        # host permission is explicit; build_isolation_test covers the default.
+        self.allow_host_build = True
         self.author = self.run_cli('identity', 'init', home=self.publisher).stdout.strip()
         self.package = f'{self.author}/hello'
         self.run_cli('identity', 'init')
         self.run_cli('follow', self.author)
 
     def run_cli(self, *args, home=None, success=True):
+        if self.allow_host_build and (args[0] in ('install', 'update', 'build') or args[:2] == ('audit', 'finish')):
+            args = (*args, '--allow-host-build')
         out = subprocess.run([str(BINARY), '--home', str(home or self.home), *args],
                              env=self.env, capture_output=True, text=True, timeout=60)
         self.assertEqual(out.returncode == 0, success, (args, out.stdout, out.stderr))
@@ -224,7 +229,7 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         with tempfile.TemporaryFile(mode='w+') as stdout:
             process = subprocess.Popen(
                 [str(BINARY), '--home', str(self.home), 'install', self.package,
-                 '--audit-agent', 'codex', '--json'], env=self.env,
+                 '--audit-agent', 'codex', '--json', '--allow-host-build'], env=self.env,
                 stdout=stdout, stderr=subprocess.PIPE, text=True)
 
             def read_stderr():
@@ -330,7 +335,7 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         fixture = self
         class Adapter:
             def args(self, _, *args):
-                return [str(BINARY), '--home', str(fixture.home), *args]
+                return [str(BINARY), '--home', str(fixture.home), *args, '--allow-host-build']
             def env(self, _):
                 return {**fixture.env, 'HAPS_NON_INTERACTIVE': 'false', 'TERM': 'xterm-256color'}
         declined = Terminal(Adapter(), 'install', 'hello', '--audit-agent', 'codex')

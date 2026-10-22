@@ -24,6 +24,9 @@ jobs:
           components: rustfmt, clippy
       - name: Check formatting
         run: cargo fmt --all --check
+      - name: Install Linux build isolation
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
       - name: Check all targets with Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test native installation and package lifecycle
@@ -37,6 +40,14 @@ jobs:
       - name: Test the interactive chooser in a macOS terminal
         if: runner.os == 'macOS'
         run: python3 -m unittest discover -s tests -p chooser_test.py
+      - name: Verify macOS build containment
+        if: runner.os == 'macOS'
+        run: python3 -m unittest discover -s tests -p build_isolation_test.py
+      - name: Build a locked dependency with explicit network access
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        env:
+          HAPS_LIVE_BUILD_NETWORK: '1'
+        run: python3 -m unittest discover -s tests -p build_isolation_test.py -k locked_cargo
       - name: Launch a desktop entry through GIO
         if: runner.os == 'Linux'
         run: HAPS_TEST_DESKTOP=1 cargo test --locked desktop_launcher_tracks_install_update_rollback_and_removal

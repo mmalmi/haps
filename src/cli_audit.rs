@@ -79,6 +79,7 @@ pub(super) async fn run(
             reviewer,
             model,
             publish,
+            build_execution,
         } => {
             use std::io::IsTerminal;
             let interactive = !non_interactive
@@ -95,7 +96,9 @@ pub(super) async fn run(
             validation.validate()?;
             let keys = publishing_keys(home, config)?;
             *trust = load_trust(home, config)?;
-            let (release, evidence) = haps::audit::finish(home, &session, &note, reviewer).await?;
+            let (release, evidence) =
+                haps::audit::finish(home, &session, &note, reviewer, build_execution.execution())
+                    .await?;
             record_audit(
                 home,
                 config,

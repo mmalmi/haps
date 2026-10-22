@@ -975,6 +975,7 @@ dependencies = [
  "nostr-pubsub-relay",
  "nostr-social-graph",
  "reqwest",
+ "rustix",
  "semver",
  "serde",
  "serde_json",

@@ -2,13 +2,23 @@ use crate::model::{MAX_FILES, MAX_PACKAGE_BYTES, safe_path};
 use anyhow::{Result, ensure};
 use std::{collections::BTreeMap, fs, path::Path};
 
+#[cfg(unix)]
+mod unix;
+
 /// Stage declared outputs, including app bundles, without escaping the checkout.
 pub(super) fn copy(
     root: &Path,
     payload: &Path,
     artifacts: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let root = root.canonicalize()?;
+    #[cfg(unix)]
+    let directory = unix::Root::open(root)?;
+    #[cfg(unix)]
+    let root = directory.path();
+    #[cfg(not(unix))]
+    let canonical_root = root.canonicalize()?;
+    #[cfg(not(unix))]
+    let root = canonical_root.as_path();
     fs::create_dir(payload)?;
     let mut pending = Vec::new();
     for (destination, input) in artifacts {
@@ -25,9 +35,17 @@ pub(super) fn copy(
         ensure!(entries <= MAX_FILES, "too many build artifacts");
         let source = source.canonicalize()?;
         ensure!(
-            source.starts_with(&root),
+            source.starts_with(root),
             "build artifact escapes the checkout"
         );
+        // Canonicalization permits links within the checkout. Reopen every
+        // component relative to the held root without following links: a build
+        // child may still be running and replacing names during collection.
+        #[cfg(unix)]
+        let input = directory.open_resolved(&source)?;
+        #[cfg(unix)]
+        let metadata = input.metadata()?;
+        #[cfg(not(unix))]
         let metadata = fs::metadata(&source)?;
         if metadata.is_dir() {
             ensure!(
@@ -36,11 +54,15 @@ pub(super) fn copy(
             );
             ancestors.push(source.clone());
             fs::create_dir_all(&destination)?;
-            for entry in fs::read_dir(&source)? {
-                let entry = entry?;
+            #[cfg(unix)]
+            let names = unix::names(&input)?;
+            #[cfg(not(unix))]
+            let names = fs::read_dir(&source)?.map(|entry| entry.map(|entry| entry.file_name()));
+            for name in names {
+                let name = name?;
                 pending.push((
-                    entry.path(),
-                    destination.join(entry.file_name()),
+                    source.join(&name),
+                    destination.join(name),
                     ancestors.clone(),
                 ));
                 ensure!(
@@ -63,6 +85,9 @@ pub(super) fn copy(
                 "overlapping build artifact destinations"
             );
             fs::create_dir_all(destination.parent().unwrap())?;
+            #[cfg(unix)]
+            unix::copy_file(input, &destination, &metadata)?;
+            #[cfg(not(unix))]
             fs::copy(source, destination)?;
         }
     }
