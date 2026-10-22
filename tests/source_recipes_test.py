@@ -126,10 +126,80 @@ class SourceRecipes(unittest.TestCase):
         self.assertFalse(evidence['binary_match'])
         self.assertIn('SHA-256', evidence['provenance'])
 
-    def test_unified_manifest_does_not_approve_mismatching_publisher_binary(self):
+    def test_audit_installs_its_local_build_without_approving_mismatching_publisher_binary(self):
         f = self.fixture
         f.publish(matches=False, recipe_style='unified')
-        f.run_cli('install', f.package, '--audit-agent', 'codex', success=False)
+        f.run_cli('install', f.package, '--audit-agent', 'codex')
+        receipt = next(iter(json.loads((f.home / 'installed.json').read_text()).values()))
+        self.assertNotEqual(receipt['current']['pubkey'], f.author)
+        info = json.loads(f.run_cli('info', f.package, '--json').stdout)
+        self.assertEqual(info['audits'], [])
+        build = info['source_reviews'][0]['evidence']['build']
+        self.assertNotEqual(build['manifest'], json.loads(f.release['content'])['manifest'])
+        self.assertEqual(len(build['recipe_sha256']), 64)
+
+    def test_another_reader_builds_the_exact_recipe_from_a_trusted_source_review(self):
+        f = self.fixture
+        f.publish(matches=False, recipe_style='unified')
+        f.run_cli('install', f.package, '--audit-agent', 'codex')
+        info = json.loads(f.run_cli('info', f.package, '--json').stdout)
+        event = info['source_reviews'][0]['event']
+        shared = f.root / 'shared-audit.json'
+        shared.write_text(json.dumps(event))
+        reader = f.root / 'other-reader'
+        f.run_cli('identity', 'init', home=reader)
+        f.run_cli('follow', f.author, home=reader)
+        f.run_cli('follow', event['pubkey'], home=reader)
+        f.run_cli('source', 'add', 'publisher', str(f.root / 'repo'), '--author', f.author, home=reader)
+        f.run_cli('import', str(shared), home=reader)
+        (f.root / 'agent-called').unlink()
+        (f.root / 'build-called').unlink()
+        f.run_cli('install', f.package, home=reader)
+        self.assertFalse((f.root / 'agent-called').exists())
+        self.assertTrue((f.root / 'build-called').exists())
+        receipt = next(iter(json.loads((reader / 'installed.json').read_text()).values()))
+        self.assertNotEqual(receipt['current']['pubkey'], f.author)
+
+    def test_trusted_source_review_does_not_authorize_a_changed_recipe(self):
+        f = self.fixture
+        f.publish(matches=False, recipe_style='unified')
+        f.run_cli('install', f.package, '--audit-agent', 'codex')
+        recipe = f.root / 'changed.toml'
+        recipe.write_text((f.source / 'haps.toml').read_text().replace('"build.py"', '"different.py"'))
+        (f.root / 'agent-called').unlink()
+        (f.root / 'build-called').unlink()
+        result = f.run_cli('install', f.package, '--from-source', '--recipe-file', str(recipe), success=False)
+        self.assertIn('exact build instructions', result.stderr)
+        self.assertFalse((f.root / 'agent-called').exists())
+        self.assertFalse((f.root / 'build-called').exists())
+
+    def test_mismatch_cannot_replace_required_independent_binary_audits(self):
+        f = self.fixture
+        f.publish(matches=False, recipe_style='unified')
+        reviewer = f.root / 'independent-reviewer'
+        key = f.run_cli('identity', 'init', home=reviewer).stdout.strip()
+        f.run_cli('follow', key)
+        claim = f.root / 'independent-audit.json'
+        f.run_cli('attest', f.release['id'], '--audited', '--provenance', 'Reviewed fixture payload',
+                  '--note', 'Independent fixture review', '--out', str(claim), home=reviewer)
+        f.run_cli('import', str(claim))
+        result = f.run_cli('install', f.package, '--require-attestations', '2', '--audit-agent', 'codex', success=False)
+        self.assertIn('independent audit count', result.stderr)
+        self.assertFalse((f.home / 'installed.json').exists())
+        info = json.loads(f.run_cli('info', f.package, '--json').stdout)
+        self.assertEqual(len(info['audits']), 1)
+        self.assertEqual(len(info['source_reviews']), 1)
+
+    def test_explicit_source_install_never_substitutes_an_audited_binary_without_source(self):
+        f = self.fixture
+        f.publish(recipe_style='unified')
+        spec = f.root / 'haps.toml'
+        spec.write_text(spec.read_text().split('[source]')[0].replace('1.0.0', '1.1.0'))
+        release = json.loads(f.run_cli('pack', str(spec), '--payload', str(f.root / 'payload'),
+                            '--out', str(f.root / 'repo'), home=f.publisher).stdout)
+        f.run_cli('attest', release['id'], '--audited', '--provenance', 'Reviewed fixture bytes', '--note', 'Fixture')
+        result = f.run_cli('install', f.package, '--from-source', success=False)
+        self.assertIn('does not declare pinned source', result.stderr)
         self.assertFalse((f.home / 'installed.json').exists())
 
     def test_same_manifest_can_be_packed_without_a_separate_package_file(self):

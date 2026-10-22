@@ -3,6 +3,8 @@ use crate::progress::Progress;
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, process::Command};
+mod failure;
+pub use failure::{Finding, retain_failed};
 
 pub const REVIEW_SCOPE: &str = "Inspect the exact source, recipe, and direct/transitive runtime and build dependencies, including install hooks and build scripts. Read pinned dependency source independently; do not run npm install, builds, hooks, or project/dependency scripts during review. Check that downloads are content-pinned and verified before use. Record dependency versions, sources, findings, unreviewed parts, and OS/toolchain assumptions; a hash alone is not a code audit.";
 
@@ -32,6 +34,21 @@ pub struct Evidence {
     pub binary_match: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<Reviewer>,
+    /// Exact reviewed recipe and the complete output manifest, including file modes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildIdentity>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildIdentity {
+    pub recipe_sha256: String,
+    pub manifest: String,
+}
+
+pub fn recipe_sha256(recipe: &crate::build::Recipe) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    Ok(hex::encode(Sha256::digest(serde_json::to_vec(recipe)?)))
 }
 
 fn runner() -> Command {
@@ -210,10 +227,16 @@ fn review_with_progress(
         let report: Review = serde_json::from_slice(&output.stdout)
             .context("agent returned an invalid audit report")?;
         ensure!(
-            report.verdict == "pass",
-            "audit did not pass: {}",
-            report.note.escape_debug()
+            !report.note.trim().is_empty() && report.note.len() <= 4096,
+            "audit needs a review note of at most 4096 bytes"
         );
+        if report.verdict != "pass" {
+            return Err(Finding {
+                verdict: report.verdict,
+                note: report.note,
+            }
+            .into());
+        }
         report
     };
     ensure!(
@@ -243,24 +266,28 @@ pub async fn review_and_rebuild(
         &home.join("audits/work"),
         Some(&release.data.package.name),
     )?;
-    ensure!(
-        checkout.recipe.package == release.data.package,
-        "source recipe does not describe the exact published package"
-    );
-    progress.stage("Checking published package manifest");
-    let manifest: crate::model::Manifest = repository.json(&release.data.manifest).await?;
-    manifest.validate(&release.data.package)?;
-    let review = review_with_progress(&checkout, agent, model, interactive, &progress)?;
-    let evidence = rebuild(
-        home,
-        release,
-        &checkout,
-        review.reviewer,
-        &progress,
-        execution,
-    )
-    .await?;
-    Ok((evidence, review.note))
+    let result = async {
+        ensure!(
+            checkout.recipe.package == release.data.package,
+            "source recipe does not describe the exact published package"
+        );
+        progress.stage("Checking published package manifest");
+        let manifest: crate::model::Manifest = repository.json(&release.data.manifest).await?;
+        manifest.validate(&release.data.package)?;
+        let review = review_with_progress(&checkout, agent, model, interactive, &progress)?;
+        let evidence = rebuild(
+            home,
+            release,
+            &checkout,
+            review.reviewer,
+            &progress,
+            execution,
+        )
+        .await?;
+        Ok((evidence, review.note))
+    }
+    .await;
+    result.map_err(|error| retain_failed(checkout, error))
 }
 
 async fn rebuild(
@@ -287,6 +314,7 @@ async fn rebuild(
         crate::security::bind_report(home, release, report)?;
     }
     progress.stage("Rebuilding the audited source");
+    progress.clear(); // Build commands own the terminal while they run.
     let payload = checkout.execute_with(execution)?;
     progress.stage("Comparing rebuilt files with the published package");
     let rebuilt_repo =
@@ -294,17 +322,25 @@ async fn rebuild(
     let rebuilt = rebuilt_repo
         .pack_payload(&release.data.package, &payload)
         .await?;
-    ensure!(
-        rebuilt == release.data.manifest,
-        "rebuilt payload does not match the published release (files, bytes, or executable metadata differ). No audit approval was recorded and nothing was installed"
-    );
+    let binary_match = rebuilt == release.data.manifest;
     progress.clear();
-    eprintln!("Rebuilt payload matches the published release.");
+    eprintln!(
+        "{}",
+        if binary_match {
+            "Rebuilt payload matches the published release."
+        } else {
+            "Published binary differs from the audited build; only the source review is recorded."
+        }
+    );
     Ok(Evidence {
         schema: "haps.audit.v1".into(),
-        method: format!("{}-review-and-rebuild", reviewer.agent),
+        method: if binary_match {
+            format!("{}-review-and-rebuild", reviewer.agent)
+        } else {
+            "source-review".into()
+        },
         provenance: format!(
-            "Reviewed pinned source {}; rebuilt with the committed recipe and local toolchain. {} Complete payload manifest matches {}. Dependencies and toolchain are not independently verified.",
+            "Reviewed pinned source {}; rebuilt with the committed recipe and local toolchain. {} Built payload manifest: {}. Publisher binary match: {binary_match}. Dependencies and toolchain are not independently verified.",
             release
                 .data
                 .package
@@ -313,10 +349,14 @@ async fn rebuild(
                 .context("source missing")?
                 .rev,
             execution.description(),
-            release.data.manifest
+            rebuilt
         ),
-        binary_match: true,
+        binary_match,
         reviewer: Some(reviewer),
+        build: Some(BuildIdentity {
+            recipe_sha256: recipe_sha256(&checkout.recipe)?,
+            manifest: rebuilt,
+        }),
     })
 }
 
@@ -444,6 +484,7 @@ pub async fn finish(
             ),
             binary_match: false,
             reviewer: Some(reviewer),
+            build: None,
         }
     };
     Ok((release, evidence))
@@ -457,12 +498,24 @@ impl Evidence {
             provenance,
             binary_match: false,
             reviewer: None,
+            build: None,
         };
         value.validate()?;
         Ok(value)
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(build) = &self.build {
+            ensure!(
+                build.recipe_sha256.len() == 64
+                    && build
+                        .recipe_sha256
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+                "invalid audited recipe hash"
+            );
+            hashtree_core::Cid::parse(&build.manifest)?;
+        }
         if let Some(reviewer) = &self.reviewer {
             for value in std::iter::once(&reviewer.agent)
                 .chain(reviewer.requested_model.iter())

@@ -110,6 +110,13 @@ impl Repository {
         let event: Event = self.metadata("catalog.json").await?;
         self.verify_catalog(event, author).await
     }
+    /// Verify a catalog whose bytes the caller has already pinned by content hash.
+    /// Its signer is authenticated, but is not automatically trusted.
+    pub async fn signed_catalog(&self) -> Result<Snapshot> {
+        let event: Event = self.metadata("catalog.json").await?;
+        let author = event.pubkey.to_hex();
+        self.verify_catalog(event, &author).await
+    }
     /// Read bounded metadata from the same immutable directory as its blocks.
     pub async fn metadata<T: serde::de::DeserializeOwned>(&self, name: &str) -> Result<T> {
         safe_path(name)?;

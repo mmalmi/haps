@@ -201,6 +201,12 @@ Alternatively, readers can require release attestations from keys they already
 trust. See [release attestations](README.md#social-discovery-and-release-attestations).
 Adding a source or alias alone does not authorize installing its packages.
 
+You can also share the immutable Hashtree hash of the uploaded directory catalog:
+`haps install nhash1…` (or `htree://nhash1…`). A catalog containing several
+packages needs `--select PACKAGE_KEY/my-app`. This pins the catalog contents;
+normal signatures, audit requirements, and release warnings still apply. Share
+the package directory hash, not the Nostr event-index root or a bare payload hash.
+
 Share `haps install PACKAGE_KEY/my-app`. Discovery uses preset indexes and
 signed announcements, with results ranked by the reader's social graph. No
 manual catalog setup is required. A relay or index may not have every package;

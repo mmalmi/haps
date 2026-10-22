@@ -23,6 +23,7 @@ pub(super) async fn install(
     root: &Candidate,
     options: AuditOptions<'_>,
     allow_foreign_untrusted: bool,
+    pinned_candidates: &[Candidate],
 ) -> Result<()> {
     let mut found = BTreeMap::from([(root.release.event.id.to_hex(), root.clone())]);
     let mut pending = VecDeque::from(root.release.data.package.dependencies.clone());
@@ -42,6 +43,13 @@ pub(super) async fn install(
             pins.insert(identity.clone(), dependency.release.clone());
         }
         if found.contains_key(&dependency.release) {
+            continue;
+        }
+        if let Some(candidate) = pinned_candidates.iter().find(|c| {
+            c.release.event.id.to_hex() == dependency.release && c.release.identity() == identity
+        }) {
+            pending.extend(candidate.release.data.package.dependencies.clone());
+            found.insert(dependency.release, candidate.clone());
             continue;
         }
         let (publisher, name) = identity

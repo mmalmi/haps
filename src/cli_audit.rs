@@ -1,6 +1,69 @@
 //! Auditing has a separate poll frame from unrelated command handlers.
 use crate::*;
 
+/// Publishing a failed review is separate from the install decision and from
+/// the saved preference for successful audit publication.
+pub(super) async fn offer_warning(
+    home: &Path,
+    config: &mut Config,
+    trust: &mut Trust,
+    release: &Release,
+    error: &anyhow::Error,
+    interactive: bool,
+) -> Result<()> {
+    let Some(finding) = error.downcast_ref::<haps::audit::Finding>() else {
+        return Ok(());
+    };
+    if !interactive || finding.verdict != "block" {
+        return Ok(());
+    }
+    let mut note = format!("Source review blocked this release: {}", finding.note);
+    while note.len() > 4096 {
+        note.pop();
+    }
+    eprintln!(
+        "Public warning preview for {} {}:\n{}",
+        release.data.package.name,
+        release.data.package.version,
+        terminal_text(&note)
+    );
+    eprintln!(
+        "This will be signed with your identity and shared with your configured relays. Check that the text contains no private information."
+    );
+    if !dialoguer::Confirm::new()
+        .with_prompt("Publish this warning?")
+        .default(false)
+        .interact()?
+    {
+        return Ok(());
+    }
+    let keys = publishing_keys(home, config)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_millis();
+    let mut at = u64::try_from(now)?;
+    for event in trust.events().iter().filter(|event| {
+        event.pubkey == keys.public_key()
+            && parse_attestation(event)
+                .is_ok_and(|claim| claim.release == release.event.id.to_hex())
+    }) {
+        at = at.max(
+            attestation_time_ms(event)?
+                .checked_add(1000)
+                .context("warning timestamp overflow")?,
+        );
+    }
+    let event = haps::trust::warn_at(&keys, release.event.id, true, note, at)?;
+    trust.ingest(event.clone())?;
+    save_trust(home, trust)?;
+    atomic_write(
+        &home.join("attestations").join(format!("{}.json", event.id)),
+        &serde_json::to_vec_pretty(&event)?,
+    )?;
+    publish_feedback(home, config, &event).await?;
+    Ok(())
+}
+
 pub(super) async fn run(
     home: &Path,
     config: &mut Config,

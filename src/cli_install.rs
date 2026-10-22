@@ -12,7 +12,8 @@ pub(super) async fn install(
 ) -> Result<()> {
     let Command::Install {
         package,
-        mut from_source,
+        select_package,
+        from_source,
         recipe_file,
         version,
         allow_untrusted,
@@ -27,8 +28,31 @@ pub(super) async fn install(
         unreachable!("install dispatcher")
     };
 
+    let immutable = cli_hash::reference(&package)?;
+    ensure!(
+        immutable.is_some() || select_package.is_none(),
+        "--select is only used when installing by hash"
+    );
     progress.stage("Reading package catalogs");
-    let choices = candidates(home, config, None, Some(&package)).await?;
+    let choices = if let Some(reference) = &immutable {
+        cli_hash::candidates(home, reference).await?
+    } else {
+        candidates(home, config, None, Some(&package)).await?
+    };
+    let package = if immutable.is_some() {
+        let selected = select_package
+            .as_deref()
+            .map(|name| resolve_package(config, name))
+            .transpose()?;
+        cli_hash::package(&choices, selected.as_deref(), version.as_ref())?
+    } else {
+        package
+    };
+    let pinned_candidates = if immutable.is_some() {
+        choices.clone()
+    } else {
+        Vec::new()
+    };
     let releases: Vec<_> = choices.iter().map(|c| c.release.clone()).collect();
     progress.stage("Checking release attestations and warnings");
     refresh_feedback(home, config, trust, &releases).await?;
@@ -46,6 +70,10 @@ pub(super) async fn install(
             confirm_install: true,
         },
     )?;
+    ensure!(
+        !from_source || candidate.release.data.package.source.is_some(),
+        "this release does not declare pinned source"
+    );
     let require_attestations = require_attestations.max(1).max(
         installation
             .receipts()?
@@ -53,30 +81,40 @@ pub(super) async fn install(
             .map_or(0, |r| r.minimum_attestations),
     );
     use std::io::IsTerminal;
+    let requested =
+        audit || audit_review.audit_agent.is_some() || audit_review.audit_model.is_some();
+    let enough = trust.audits(&candidate.release).len() >= require_attestations;
+    let reuse_review = !requested
+        && !allow_unaudited
+        && !enough
+        && trust.source_build_reviews(&candidate.release).len() >= require_attestations;
     if !from_source
-        && !audit
+        && !requested
+        && !reuse_review
         && !allow_unaudited
         && !non_interactive
         && !json
         && std::io::stdin().is_terminal()
         && std::io::stderr().is_terminal()
-        && trust.audits(&candidate.release).len() < require_attestations
+        && !enough
         && candidate.release.data.package.source.is_some()
     {
-        let choice = dialoguer::Select::new()
-            .with_prompt("Audit and install: choose what to install")
-            .items([
-                "Build reviewed source",
-                "Verify the published binary",
-                "Cancel",
-            ])
-            .default(0)
+        audit = dialoguer::Confirm::new()
+            .with_prompt("This release needs an audit. Audit and install?")
+            .default(false)
             .interact()?;
-        ensure!(choice != 2, "installation cancelled");
-        from_source = choice == 0;
-        audit = choice == 1;
+        if !audit {
+            trust.authorize_install(
+                &candidate.release,
+                allow_untrusted || package.contains('/'),
+                require_attestations,
+                allow_warnings,
+            )?;
+        }
     }
-    let candidate = if from_source {
+    let built = candidate.release.data.package.source.is_some()
+        && (from_source || requested || audit || reuse_review);
+    let candidate = if built {
         trust.authorize_with_policy(
             &candidate.release,
             allow_untrusted || package.contains('/'),
@@ -84,10 +122,19 @@ pub(super) async fn install(
             allow_warnings,
         )?;
         ensure!(
-            require_attestations == 1,
-            "a local source build provides one source review; this policy requires more independent reviews"
+            !from_source || require_attestations == 1,
+            "a local source build provides one reviewer; more independent audits are required by this installation's policy"
         );
-        cli_source::from_release(
+        let other_audits = trust
+            .audits(&candidate.release)
+            .into_iter()
+            .filter(|event| Some(event.pubkey.to_hex()) != config.identity)
+            .count();
+        ensure!(
+            other_audits + 1 >= require_attestations,
+            "a self-audit adds one reviewer; more independent audits are required by this installation's policy"
+        );
+        let result = cli_source::from_release(
             home,
             config,
             trust,
@@ -95,8 +142,34 @@ pub(super) async fn install(
             &audit_review,
             recipe_file.as_deref(),
             non_interactive,
+            cli_source::InstallMode {
+                prefer_published: !from_source,
+                reuse_review,
+                allow_source_fallback: require_attestations == 1,
+            },
         )
-        .await?
+        .await;
+        match result {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                if let Err(publication_error) = cli_audit::offer_warning(
+                    home,
+                    config,
+                    trust,
+                    &candidate.release,
+                    &error,
+                    !non_interactive
+                        && !json
+                        && std::io::stdin().is_terminal()
+                        && std::io::stderr().is_terminal(),
+                )
+                .await
+                {
+                    eprintln!("Warning publication did not complete: {publication_error:#}");
+                }
+                return Err(error);
+            }
+        }
     } else {
         candidate
     };
@@ -107,8 +180,8 @@ pub(super) async fn install(
         trust,
         &candidate,
         AuditOptions {
-            requested: audit && !from_source,
-            review: if from_source {
+            requested: !built && requested,
+            review: if built {
                 &completed_review
             } else {
                 &audit_review
@@ -150,6 +223,7 @@ pub(super) async fn install(
             minimum: require_attestations,
         },
         allow_untrusted,
+        &pinned_candidates,
     )
     .await?;
     progress.clear();

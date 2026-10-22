@@ -498,6 +498,29 @@ rules, not a safety guarantee. Scanner telemetry and version checks are disabled
 Scans do not audit unvendored dependencies, sandbox builds, or establish binary
 provenance. Agent source review and rebuild comparison are described below. A scan alone does not satisfy the audit requirement.
 
+### Install by immutable hash
+
+Use a shared Haps catalog’s Hashtree hash instead of package lookup:
+
+```sh
+haps install nhash1…
+haps install htree://nhash1…
+# If the hash contains several packages:
+haps install nhash1… --select PUBLISHER/my-app
+# Optionally choose an older version within that exact catalog:
+haps install nhash1… --version 1.2.3
+```
+
+Haps verifies the immutable directory, signed catalog, release signatures, and
+payload. It selects your platform and the newest stable version within that hash;
+it never substitutes a newer named catalog. The hash must contain Haps catalog
+metadata, not just executable bytes, a raw payload manifest, or an event index.
+The publisher is explicit in the pinned metadata, as with `publisher/name`;
+audits, mutes, warnings, and dependency checks still apply. Supplying a hash does
+not count as an audit. Exact dependency releases contained in the same catalog
+are usable without name discovery. Installed packages retain their normal
+publisher/name identity for subsequent commands.
+
 ### Release audits
 
 By default, every install, update, and rollback requires at least one **explicit audit of the
@@ -519,8 +542,7 @@ This records no audit and preserves your configured threshold for future operati
 Signatures, payload integrity, social filtering, direct mutes, and release warnings
 still apply. It cannot be combined with audit-review options.
 
-When an interactive install lacks an audit, **Audit and install** offers a reviewed
-local source build or verification of the published binary:
+When an interactive install lacks an audit, Haps asks **Audit and install? y/N**:
 
 1. Choose an installed Codex or Claude Code agent, or review the source yourself.
    On Omarchy, its supported default agent is shown first. Lazy mise launchers are
@@ -533,15 +555,35 @@ local source build or verification of the published binary:
    selected agent's configured service. The reviewer can read public dependency
    source online, but has no shell, local-file, editing, or execution tools.
 3. After a passing review, Haps runs the recipe in the build sandbox, with network
-   disabled unless you explicitly allowed it. Source installation keeps the local output. Binary
-   verification compares every packaged file, its bytes, and executable metadata
-   with the signed published payload. Mismatches, failed
-   builds, unavailable agents, or incomplete reviews stop without approval or
-   installation. Temporary checkouts are cleaned up.
+   disabled unless you explicitly allowed it. Haps records the exact recipe hash and
+   built payload hash, covering every packaged file, its bytes, and executable metadata.
+   If that output matches the publisher’s payload, Haps can install the published
+   binary. Otherwise it installs the reviewed local output as a separately signed
+   local release; it never approves the different publisher bytes. `--from-source`
+   always keeps the local build. Higher audit thresholds still require independent
+   reviews of the exact output; one local review cannot satisfy them.
+   Failed builds, unavailable agents, and blocked or incomplete reviews stop installation.
 4. Haps signs the result and installs only after the audit policy is satisfied.
    On first interactive completion, it asks whether to publish this and future
    audits. It remembers the answer. Without a saved choice, non-interactive
    audits stay local.
+
+Another reader who trusts a matching binary audit can install that exact published
+payload. A trusted source review with a recorded build recipe hash can instead be
+reused to build the same pinned source and recipe locally without another agent
+review. A changed or unavailable recipe requires a fresh review. Manual source
+reviews without build identity cannot authorize this automatic build. Dependency
+release pins are never replaced by differently signed local builds. Local source
+builds belong to your own publishing key and include a `+haps.…` build identifier.
+To build a later upstream version, repeat `haps install ORIGINAL_PUBLISHER/app
+--audit`; `haps update` on the local identity checks your local build catalog.
+
+Failed automatic reviews retain their checkout and `audit-failure.json` under
+`HAPS_HOME/audits/work`; Haps prints the location. Successful temporary checkouts
+are removed. Retained source and findings stay local. After a blocking finding,
+an interactive install displays the proposed public warning and separately asks
+**Publish this warning? y/N**. No is the default, even when successful audit
+publication is enabled. Non-interactive failures never publish warnings.
 
 ```sh
 haps install alice/hello --audit --audit-agent codex
@@ -573,9 +615,11 @@ haps install alice/hello --version 1.0.0
 Prepared checkouts remain in `HAPS_HOME/audits/pending` until you remove them.
 They are private directories, **not execution sandboxes**. Keep the source
 unchanged. `finish` compares it with a fresh checkout of the pinned commit,
-rebuilds from that fresh checkout when instructions are declared, and requires
-the published payload to match before approving the binary. With no recipe it
-records only a source review; that review cannot authorize a binary installation.
+rebuilds from that fresh checkout when instructions are declared, and approves
+the published binary only if the payload matches. A mismatch records a source
+review with the recipe and output hashes for a subsequent source installation.
+With no recipe it records only a source review; that review cannot authorize a
+binary installation or an automatic build.
 External agents can use `--reviewer NAME --model MODEL`; these are recorded as
 user-supplied metadata. They cannot set `binary_match` without Haps doing the
 comparison. Haps does not automatically install after `finish`.
@@ -609,6 +653,23 @@ Block unverified downloads; report incomplete when the pin or verification canno
 be established. Hash verification and a clean vulnerability report do not replace
 source inspection. Record dependency versions and source references, findings,
 unreviewed or inaccessible parts, and OS/toolchain assumptions in the review note.
+
+To make a package reviewable, include its application source and `haps.toml`, commit
+dependency lockfiles, and use locked installs or builds. Every input downloaded by
+the selected build must have an expected hash or full commit fixed in the reviewed
+source and checked before use. If that build uses a container, pin its image by
+digest and pin and verify the packages it downloads; a mutable image tag or an
+unconstrained package install is not a content pin. List tools and system libraries
+that must already be installed as prerequisites instead of installing them with
+privileged commands in the recipe.
+
+Reviewers follow the selected platform's commands and reachable dependencies.
+A development Dockerfile referenced only for its prerequisite list does not become
+part of a native Cargo build. Report unrelated workflow concerns separately;
+uncertain reachability needs investigation. Malicious or compromised inputs and
+serious exploitable vulnerabilities block installation. Findings should identify
+the pinned version, evidence or advisory, reachable path, impact, and uncertainty.
+Passing is a review result, not something a manifest or checksum can guarantee.
 
 Haps's integration with the installed agent inventories up to 20,000 tracked files and reads at
 most 512 KiB of text from pinned Git objects. For large trees it starts with build

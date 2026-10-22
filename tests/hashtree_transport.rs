@@ -240,8 +240,159 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
     );
     assert_eq!(root_requests.load(Ordering::Relaxed), 1);
     assert_eq!(
-        fs::read(Installation::new(cli_home)?.command("hello", None)?)?,
+        fs::read(Installation::new(cli_home.clone())?.command("hello", None)?)?,
         b"verified app payload"
+    );
+    // Immutable installs need neither named-root discovery nor a configured source.
+    let hash = hashtree_core::nhash_encode_full(&hashtree_core::NHashData {
+        hash: root.hash,
+        decrypt_key: root.key,
+    })?;
+    let named_requests = root_requests.load(Ordering::Relaxed);
+    for reference in [hash.clone(), format!("htree://{hash}")] {
+        let home = temp.path().join(if reference.starts_with("htree:") {
+            "hash-url"
+        } else {
+            "bare-hash"
+        });
+        let run_hash = |args: &[&str]| {
+            std::process::Command::new(env!("CARGO_BIN_EXE_haps"))
+                .env("HAPS_HOME", &home)
+                .env("HAPS_NO_DEFAULTS", "true")
+                .env("HAPS_NON_INTERACTIVE", "true")
+                .env("HTREE_CONFIG_DIR", &config_dir)
+                .env("HTREE_PREFER_LOCAL_DAEMON", "false")
+                .env_remove("NOSTR_RELAYS")
+                .env("XDG_DATA_HOME", home.join("data"))
+                .args(args)
+                .output()
+        };
+        assert!(run_hash(&["identity", "init"])?.status.success());
+        let denied = run_hash(&["install", &reference, "--json"])?;
+        assert!(!denied.status.success(), "a hash is not an audit");
+        assert!(!home.join("installed.json").exists());
+        audit::local(&home, release.event.id)?;
+        let installed = run_hash(&["install", &reference, "--json"])?;
+        assert!(
+            installed.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&installed.stdout),
+            String::from_utf8_lossy(&installed.stderr)
+        );
+        assert_eq!(
+            fs::read(Installation::new(home.clone())?.command("hello", None)?)?,
+            b"verified app payload"
+        );
+        let config: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join("config.json"))?)?;
+        assert!(config["sources"].as_object().unwrap().is_empty());
+        assert!(
+            run_hash(&[
+                "warn",
+                &release.event.id.to_hex(),
+                "--note",
+                "Blocking fixture finding"
+            ])?
+            .status
+            .success()
+        );
+        assert!(
+            !run_hash(&["install", &reference, "--json"])?
+                .status
+                .success(),
+            "hash installs must honor release warnings"
+        );
+    }
+    assert_eq!(root_requests.load(Ordering::Relaxed), named_requests);
+
+    let mut other = release.data.package.clone();
+    other.name = "second".into();
+    other.commands = BTreeMap::from([("helper".into(), "bin/hello".into())]);
+    let helper = local.publish(&publisher, other, &payload).await?;
+    let multiple = add_directory(&tree, &repo_dir).await?;
+    let multiple = hashtree_core::nhash_encode_full(&hashtree_core::NHashData {
+        hash: multiple.hash,
+        decrypt_key: multiple.key,
+    })?;
+    let ambiguity = run(&["install", &multiple, "--json"])?;
+    assert!(!ambiguity.status.success());
+    assert!(
+        format!(
+            "{} {}",
+            String::from_utf8_lossy(&ambiguity.stdout),
+            String::from_utf8_lossy(&ambiguity.stderr)
+        )
+        .contains("--select publisher/name")
+    );
+    assert!(
+        run(&["install", &multiple, "--select", "hello", "--json"])?
+            .status
+            .success()
+    );
+    // Resolve exact dependency pins from the same hash, without registering a
+    // named source or accepting a dependency merely because the parent is audited.
+    let mut dependent = release.data.package.clone();
+    dependent.version = "1.1.0".parse()?;
+    dependent.dependencies = vec![haps::dependencies::Dependency {
+        package: helper.identity(),
+        release: helper.event.id.to_hex(),
+    }];
+    let dependent = local.publish(&publisher, dependent, &payload).await?;
+    let closure = add_directory(&tree, &repo_dir).await?;
+    let closure = hashtree_core::nhash_encode_full(&hashtree_core::NHashData {
+        hash: closure.hash,
+        decrypt_key: closure.key,
+    })?;
+    let dependency_home = temp.path().join("hash-dependencies");
+    let run_dependency = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_haps"))
+            .env("HAPS_HOME", &dependency_home)
+            .env("HAPS_NO_DEFAULTS", "true")
+            .env("HAPS_NON_INTERACTIVE", "true")
+            .env_remove("NOSTR_RELAYS")
+            .env("HTREE_CONFIG_DIR", &config_dir)
+            .env("HTREE_PREFER_LOCAL_DAEMON", "false")
+            .env("XDG_DATA_HOME", dependency_home.join("data"))
+            .args(args)
+            .output()
+    };
+    assert!(run_dependency(&["identity", "init"])?.status.success());
+    audit::local(&dependency_home, dependent.event.id)?;
+    let install_args = ["install", &closure, "--select", "hello", "--json"];
+    assert!(
+        !run_dependency(&install_args)?.status.success(),
+        "dependency still needs its own audit"
+    );
+    assert!(!dependency_home.join("installed.json").exists());
+    audit::local(&dependency_home, helper.event.id)?;
+    let installed = run_dependency(&install_args)?;
+    assert!(
+        installed.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&installed.stdout),
+        String::from_utf8_lossy(&installed.stderr)
+    );
+    assert_eq!(Installation::new(dependency_home)?.receipts()?.len(), 2);
+    // Hash verification does not replace signature verification: these bytes
+    // have a valid content address, but a forged catalog signature.
+    let catalog_path = repo_dir.join("catalog.json");
+    let mut forged: Event = serde_json::from_slice(&fs::read(&catalog_path)?)?;
+    forged.content.push(' ');
+    fs::write(&catalog_path, serde_json::to_vec(&forged)?)?;
+    let forged = add_directory(&tree, &repo_dir).await?;
+    let forged = hashtree_core::nhash_encode_full(&hashtree_core::NHashData {
+        hash: forged.hash,
+        decrypt_key: forged.key,
+    })?;
+    assert!(
+        !run(&["install", &forged, "--allow-unaudited", "--json"])?
+            .status
+            .success()
+    );
+    assert!(
+        !run(&["install", "nhash1invalid", "--allow-unaudited", "--json"])?
+            .status
+            .success()
     );
     task.abort();
     Ok(())

@@ -54,6 +54,7 @@ async fn installation_requires_an_exact_current_audit_even_with_trust_overrides(
         provenance: "Reviewed pinned source; binary not verified".into(),
         binary_match: false,
         reviewer: None,
+        build: None,
     };
     let source_review = attest_audit_at(
         &reviewer,
@@ -118,5 +119,78 @@ async fn installation_requires_an_exact_current_audit_even_with_trust_overrides(
             .sign_with_keys(&reader)?,
     )?;
     assert!(trust.authorize_install(&next, true, 0, true).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn recorded_output_must_match_before_it_can_approve_a_binary() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let keys = Keys::generate();
+    let publisher = Keys::generate();
+    let payload = tmp.path().join("payload");
+    fs::create_dir(&payload)?;
+    fs::write(payload.join("data"), "fixture")?;
+    let repo = Repository::local(tmp.path().join("repo"))?;
+    let spec = PackageSpec {
+        name: "hello".into(),
+        version: "1.0.0".parse()?,
+        target: target().into(),
+        description: "Audit identity fixture".into(),
+        commands: BTreeMap::new(),
+        dependencies: vec![],
+        source: Some(haps::model::SourceInfo {
+            git: "https://example.invalid/source".into(),
+            rev: "a".repeat(40),
+        }),
+        app: None,
+        desktop: None,
+    };
+    let release = repo.publish(&publisher, spec, &payload).await?;
+    let mut trust = Trust::new(keys.public_key().to_hex());
+    let mut evidence = Evidence::manual("Reviewed source and built output".into())?;
+    evidence.method = "agent-review-and-rebuild".into();
+    evidence.binary_match = true;
+    evidence.build = Some(haps::audit::BuildIdentity {
+        recipe_sha256: "a".repeat(64),
+        manifest: repo.put_json(&"different output").await?,
+    });
+    trust.ingest(attest_audit_at(
+        &keys,
+        release.event.id,
+        "Contradictory output".into(),
+        &evidence,
+        1000,
+    )?)?;
+    assert!(trust.audits(&release).is_empty());
+    evidence.build.as_mut().unwrap().manifest = release.data.manifest.clone();
+    trust.ingest(attest_audit_at(
+        &keys,
+        release.event.id,
+        "Matching output".into(),
+        &evidence,
+        2000,
+    )?)?;
+    assert_eq!(trust.audits(&release).len(), 1);
+    evidence.method = "source-review".into();
+    evidence.binary_match = false;
+    trust.ingest(attest_audit_at(
+        &keys,
+        release.event.id,
+        "Source only".into(),
+        &evidence,
+        3000,
+    )?)?;
+    assert!(trust.audits(&release).is_empty());
+    assert_eq!(trust.source_build_reviews(&release).len(), 1);
+    trust.ingest(attest_at(
+        &keys,
+        release.event.id,
+        false,
+        "Withdrawn".into(),
+        4000,
+    )?)?;
+    assert!(trust.source_build_reviews(&release).is_empty());
+    evidence.build.as_mut().unwrap().recipe_sha256 = "not a hash".into();
+    assert!(evidence.validate().is_err());
     Ok(())
 }

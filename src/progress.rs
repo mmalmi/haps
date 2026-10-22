@@ -1,6 +1,6 @@
 //! Optional CLI progress. A separate reporter stays responsive during blocking I/O too.
 use std::{
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     sync::{Arc, Condvar, Mutex},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -22,6 +22,8 @@ struct State {
     phase: Option<Phase>,
     last_output: Instant,
     stopped: bool,
+    inline: bool,
+    line_visible: bool,
 }
 
 struct Phase {
@@ -47,6 +49,8 @@ impl Progress {
                 phase: None,
                 last_output: Instant::now(),
                 stopped: false,
+                inline: io::stderr().is_terminal(),
+                line_visible: false,
             }),
             wake: Condvar::new(),
         });
@@ -81,6 +85,7 @@ impl Progress {
     fn set(&self, phase: Option<Phase>) {
         if let Some(shared) = &self.0 {
             let mut state = shared.state.lock().unwrap();
+            finish_line(&mut state);
             state.phase = phase;
             emit(&mut state);
             shared.wake.notify_one();
@@ -121,7 +126,11 @@ impl Progress {
 impl Drop for Reporter {
     fn drop(&mut self) {
         if let Some((shared, worker)) = self.0.take() {
-            shared.state.lock().unwrap().stopped = true;
+            {
+                let mut state = shared.state.lock().unwrap();
+                state.stopped = true;
+                finish_line(&mut state);
+            }
             shared.wake.notify_one();
             let _ = worker.join();
         }
@@ -150,9 +159,23 @@ fn emit(state: &mut State) {
         if elapsed > 0 {
             line.push_str(&format!(" ({elapsed}s elapsed)"));
         }
-        let _ = writeln!(io::stderr().lock(), "  {line}");
+        let mut stderr = io::stderr().lock();
+        if state.inline {
+            let _ = write!(stderr, "\r\x1b[2K  {line}");
+            let _ = stderr.flush();
+            state.line_visible = true;
+        } else {
+            let _ = writeln!(stderr, "  {line}");
+        }
     }
     state.last_output = Instant::now();
+}
+
+fn finish_line(state: &mut State) {
+    if state.line_visible {
+        let _ = writeln!(io::stderr().lock());
+        state.line_visible = false;
+    }
 }
 
 fn bytes(value: u64) -> String {

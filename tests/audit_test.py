@@ -264,20 +264,27 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
                 reader.join(timeout=2)
                 process.stderr.close()
 
-    def test_mismatching_rebuild_never_approves_or_installs(self):
+    def test_mismatching_rebuild_installs_only_the_audited_local_output(self):
         self.publish(matches=False)
-        out = self.run_cli('install', self.package, '--audit', '--audit-agent', 'codex', success=False)
-        self.assertIn('does not match', out.stderr)
-        self.assertFalse((self.home / 'installed.json').exists())
-        info = json.loads(self.run_cli('info', 'hello', '--json').stdout)
+        out = self.run_cli('install', self.package, '--audit', '--audit-agent', 'codex')
+        self.assertIn('installing the local source build', out.stderr)
+        receipt = next(iter(json.loads((self.home / 'installed.json').read_text()).values()))
+        self.assertNotEqual(receipt['current']['pubkey'], self.author)
+        info = json.loads(self.run_cli('info', self.package, '--json').stdout)
         self.assertEqual(info['audits'], [])
+        self.assertEqual(len(info['source_reviews']), 1)
 
     def test_incomplete_review_never_executes_build(self):
         self.publish()
         self.env['AUDIT_VERDICT'] = 'incomplete'
-        self.run_cli('install', self.package, '--audit', '--audit-agent', 'codex', success=False)
+        result = self.run_cli('install', self.package, '--audit', '--audit-agent', 'codex', success=False)
         self.assertFalse((self.root / 'build-called').exists())
         self.assertFalse((self.home / 'installed.json').exists())
+        reports = list(self.home.glob('audits/work/*/audit-failure.json'))
+        self.assertEqual(len(reports), 1)
+        self.assertTrue((reports[0].parent / 'repo/build.py').is_file())
+        self.assertIn('audit source retained', result.stderr)
+        self.assertFalse((self.home / 'discovery/outbox').exists())
 
     def test_enabled_source_scanner_still_blocks_an_audit_build(self):
         self.publish()
@@ -328,6 +335,78 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         self.assertFalse((self.root / 'build-called').exists())
         self.run_cli('install', self.package, success=False)
 
+    def terminal(self, *args):
+        from chooser_test import Terminal
+        fixture = self
+        class Adapter:
+            def args(self, _, *arguments):
+                return [str(BINARY), '--home', str(fixture.home), *arguments, '--allow-host-build']
+            def env(self, _):
+                return {**fixture.env, 'HAPS_NON_INTERACTIVE': 'false', 'TERM': 'xterm-256color'}
+        term = Terminal(Adapter(), *args)
+        self.addCleanup(term.close)
+        return term
+
+    def test_noninteractive_block_never_uses_successful_audit_publication_preference(self):
+        self.publish()
+        self.run_cli('audit', 'settings', '--publish', 'true')
+        self.env['AUDIT_VERDICT'] = 'block'
+        self.run_cli('install', self.package, '--audit-agent', 'codex', success=False)
+        self.assertFalse((self.home / 'discovery/outbox').exists())
+        self.assertFalse((self.root / 'build-called').exists())
+        self.assertEqual(len(list(self.home.glob('audits/work/*/audit-failure.json'))), 1)
+
+    def blocked_warning(self, answer):
+        self.publish()
+        self.run_cli('audit', 'settings', '--publish', 'true')
+        self.env['AUDIT_VERDICT'] = 'block'
+        term = self.terminal('install', self.package, '--audit-agent', 'codex')
+        term.read_until(b'Publish this warning?', timeout=30)
+        self.assertIn(b'Public warning preview for hello 1.0.0', term.output)
+        self.assertIn(b'Source review blocked this release: Reviewed the fixture source and build recipe.', term.output)
+        self.assertFalse((self.home / 'discovery/outbox').exists())
+        term.send(answer)
+        code, output = term.finish()
+        self.assertNotEqual(code, 0, output)
+        self.assertFalse((self.root / 'build-called').exists())
+        self.assertFalse((self.home / 'installed.json').exists())
+        self.assertEqual(len(list(self.home.glob('audits/work/*/audit-failure.json'))), 1)
+        return json.loads(self.run_cli('info', self.package, '--json').stdout)
+
+    @unittest.skipUnless(os.name == 'posix', 'requires a terminal')
+    def test_public_warning_defaults_to_no_even_when_passing_audits_are_published(self):
+        info = self.blocked_warning(b'\n')
+        self.assertEqual(info['warnings'], [])
+        self.assertFalse((self.home / 'discovery/outbox').exists())
+
+    @unittest.skipUnless(os.name == 'posix', 'requires a terminal')
+    def test_public_warning_is_signed_only_after_explicit_yes(self):
+        info = self.blocked_warning(b'y')
+        self.assertEqual(len(info['warnings']), 1)
+        event = info['warnings'][0]['event']
+        self.assertIn(self.release['id'], json.dumps(event))
+        self.assertTrue(any((self.home / 'discovery/outbox').iterdir()))
+
+    @unittest.skipUnless(os.name == 'posix', 'requires a terminal')
+    def test_terminal_review_progress_updates_in_place(self):
+        self.publish()
+        gate = self.root / 'continue-review'
+        agent = self.bin / 'codex'
+        agent.write_text(agent.read_text().replace('out.write_text(',
+            f'import time\nwhile not pathlib.Path({str(gate)!r}).exists(): time.sleep(0.02)\nout.write_text('))
+        term = self.terminal('install', self.package, '--audit-agent', 'codex', '--publish-audit', 'false')
+        term.read_until(b'Reviewing source with codex', timeout=30)
+        start = term.output.index(b'Reviewing source with codex')
+        try:
+            term.read_until(b'5s elapsed', timeout=10)
+            interval = term.output[start:]
+            self.assertIn(b'\r\x1b[2K', interval)
+            self.assertNotIn(b'\n', interval)
+        finally:
+            gate.touch()
+        code, output = term.finish(timeout=30)
+        self.assertEqual(code, 0, output)
+
     @unittest.skipUnless(os.name == 'posix', 'requires a terminal')
     def test_terminal_first_audit_offers_review_and_remembers_publication_choice(self):
         from chooser_test import Terminal
@@ -355,13 +434,15 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         self.assertFalse((self.root / 'build-called').exists())
         term.send(b'y')
         term.read_until(b'Audit and install')
-        term.send(b'\x1b[B\n')
+        term.send(b'y')
         term.read_until(b'Choose how to audit')
         term.send(b'\n')
         term.read_until(b'Publish this and future audits', timeout=30)
         term.send(b'n')
         code, output = term.finish()
         self.assertEqual(code, 0, output)
+        self.assertNotIn('Build reviewed source', output)
+        self.assertNotIn('Verify the published binary', output)
         self.assertFalse(json.loads(self.run_cli('audit', 'settings').stdout)['publish'])
         self.assertIn('Rebuilt payload matches', output)
 

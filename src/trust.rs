@@ -454,7 +454,13 @@ impl Trust {
                     && self.relevant_signer(&author)
                     && parse_attestation(event)
                         .is_ok_and(|a| a.release == release.event.id.to_hex())
-                    && parse_audit(event).is_ok_and(|audit| audit.method != "source-review")
+                    && parse_audit(event).is_ok_and(|audit| {
+                        audit.method != "source-review"
+                            && audit.build.as_ref().is_none_or(|build| {
+                                build.manifest == release.data.manifest
+                                    && release.data.package.source.is_some()
+                            })
+                    })
             })
             .collect()
     }
@@ -468,6 +474,19 @@ impl Trust {
                     && parse_attestation(event)
                         .is_ok_and(|claim| claim.release == release.event.id.to_hex())
                     && parse_source_review(event).is_ok()
+            })
+            .collect()
+    }
+
+    /// Reviews usable for a local build, never approval of different publisher bytes.
+    pub fn source_build_reviews(&self, release: &Release) -> Vec<&Event> {
+        self.source_reviews(release)
+            .into_iter()
+            .filter(|event| {
+                let author = event.pubkey.to_hex();
+                (author != release.author() || author == self.root)
+                    && release.data.package.source.is_some()
+                    && parse_source_review(event).is_ok_and(|audit| audit.build.is_some())
             })
             .collect()
     }

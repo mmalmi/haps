@@ -1,6 +1,7 @@
 mod cli_audit;
 mod cli_catalogs;
 mod cli_dependencies;
+mod cli_hash;
 mod cli_install;
 mod cli_source;
 
@@ -268,9 +269,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Install a package. An explicit publisher/name can bypass the social filter.
+    /// Install by name, publisher/name, or immutable nhash / htree://nhash.
     Install {
         package: String,
+        /// Select a package when an immutable hash contains several packages.
+        #[arg(long = "select", value_name = "PUBLISHER/NAME")]
+        select_package: Option<String>,
         /// Build and install reviewed source instead of downloading the publisher's binary.
         #[arg(long, conflicts_with = "allow_unaudited")]
         from_source: bool,
@@ -290,7 +294,7 @@ enum Command {
         /// Bypass the audit threshold for this operation only; preserve the saved policy.
         #[arg(long, conflicts_with_all = ["audit", "audit_agent", "audit_model", "publish_audit"])]
         allow_unaudited: bool,
-        /// Review source, run its build with your user permissions, and require a matching payload.
+        /// Audit source and build it; install matching published bytes or the reviewed local output.
         #[arg(long)]
         audit: bool,
         #[command(flatten)]
@@ -785,10 +789,19 @@ async fn ensure_audited(
     let interactive = !options.non_interactive
         && std::io::stdin().is_terminal()
         && std::io::stderr().is_terminal();
-    if !requested && (!interactive || !dialoguer::Confirm::new()
-            .with_prompt("This release needs an audit. Audit and install (review source, run the build recipe, and require a binary match)?")
-            .default(false).interact()?) {
-            return trust.authorize_install(release, options.allow_untrusted, options.minimum, options.allow_warnings);
+    if !requested
+        && (!interactive
+            || !dialoguer::Confirm::new()
+                .with_prompt("This release needs an audit. Audit and install?")
+                .default(false)
+                .interact()?)
+    {
+        return trust.authorize_install(
+            release,
+            options.allow_untrusted,
+            options.minimum,
+            options.allow_warnings,
+        );
     }
     let agent = audit_agent(
         options
@@ -815,7 +828,7 @@ async fn ensure_audited(
         other_audits + 1 >= options.minimum.max(1),
         "a self-audit adds one reviewer; more independent audits are required by this installation's policy"
     );
-    let (evidence, note) = haps::audit::review_and_rebuild(
+    let result = haps::audit::review_and_rebuild(
         home,
         release,
         &candidate.repository,
@@ -824,7 +837,18 @@ async fn ensure_audited(
         interactive,
         options.review.build_execution.execution(),
     )
-    .await?;
+    .await;
+    let (evidence, note) = match result {
+        Ok(report) => report,
+        Err(error) => {
+            if let Err(publication_error) =
+                cli_audit::offer_warning(home, config, trust, release, &error, interactive).await
+            {
+                eprintln!("Warning publication did not complete: {publication_error:#}");
+            }
+            return Err(error);
+        }
+    };
     record_audit(
         home,
         config,
@@ -1636,6 +1660,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
     }
     let mut trust = load_trust(&home, &config)?;
     match &mut cli.command {
+        Command::Install { package, .. } if cli_hash::reference(package)?.is_some() => {}
         Command::Install { package, .. }
         | Command::Info { package, .. }
         | Command::Update { package, .. }
@@ -1650,6 +1675,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         _ => {}
     }
     match &cli.command {
+        Command::Install { package, .. } if cli_hash::reference(package)?.is_some() => {}
         Command::Install { package, .. }
         | Command::Info { package, .. }
         | Command::Update { package, .. }
@@ -2141,6 +2167,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     minimum: minimum_attestations,
                 },
                 allow_untrusted,
+                &[],
             )
             .await?;
             if let Some(installer) = &bootstrap {

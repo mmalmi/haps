@@ -7,6 +7,12 @@ use haps::{
 use sha2::{Digest, Sha256};
 use std::{io::IsTerminal, path::Path, sync::Arc};
 
+pub(super) struct InstallMode {
+    pub prefer_published: bool,
+    pub reuse_review: bool,
+    pub allow_source_fallback: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn from_release(
     home: &Path,
@@ -16,10 +22,11 @@ pub(super) async fn from_release(
     options: &AuditReviewArgs,
     recipe_file: Option<&Path>,
     non_interactive: bool,
+    mode: InstallMode,
 ) -> Result<Candidate> {
     options.build_execution.execution().preflight()?;
     let (progress, _reporter) = Progress::stderr(true)?;
-    progress.stage("Fetching pinned source to build locally");
+    progress.stage("Fetching pinned source for audit");
     let source = upstream
         .release
         .data
@@ -27,7 +34,7 @@ pub(super) async fn from_release(
         .source
         .clone()
         .context("this release does not declare pinned source")?;
-    let source = haps::build::SourceCheckout::fetch(source, &home.join("builds"))?;
+    let source = haps::build::SourceCheckout::fetch(source, &home.join("audits/work"))?;
     let mut options = options.clone();
     let recipe = if let Some(path) = recipe_file {
         ensure!(
@@ -45,6 +52,10 @@ pub(super) async fn from_release(
     {
         recipe
     } else {
+        ensure!(
+            !mode.reuse_review,
+            "the reviewed build recipe is not in this source; supply the exact --recipe-file with --from-source or use --audit for a fresh review"
+        );
         progress.clear();
         let interactive =
             !non_interactive && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
@@ -65,12 +76,24 @@ pub(super) async fn from_release(
         recipe
     };
     let checkout = Checkout::with_recipe(source, recipe)?;
+    let result = async {
     ensure!(
         checkout.recipe.package == upstream.release.data.package,
         "source manifest does not describe the selected package"
     );
     progress.clear();
-    build(home, config, trust, checkout, &options, non_interactive).await
+    let trusted = if mode.reuse_review {
+        let hash = haps::audit::recipe_sha256(&checkout.recipe)?;
+        let previous = trust.source_build_reviews(&upstream.release).into_iter().find_map(|event| {
+            let evidence = haps::trust::parse_source_review(event).ok()?;
+            (evidence.build.as_ref()?.recipe_sha256 == hash).then(|| (event.id.to_hex(), evidence))
+        }).context("the available source audit does not cover these exact build instructions; run again with --audit to review them")?;
+        Some(previous)
+    } else { None };
+    build_reviewed(home, config, trust, &checkout, &options, non_interactive,
+        Some(upstream), mode.prefer_published, mode.allow_source_fallback, trusted).await
+    }.await;
+    result.map_err(|error| haps::audit::retain_failed(checkout, error))
 }
 
 pub(super) async fn build(
@@ -81,27 +104,79 @@ pub(super) async fn build(
     options: &AuditReviewArgs,
     non_interactive: bool,
 ) -> Result<Candidate> {
+    let result = build_reviewed(
+        home,
+        config,
+        trust,
+        &checkout,
+        options,
+        non_interactive,
+        None,
+        false,
+        true,
+        None,
+    )
+    .await;
+    result.map_err(|error| haps::audit::retain_failed(checkout, error))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_reviewed(
+    home: &Path,
+    config: &mut Config,
+    trust: &mut Trust,
+    checkout: &Checkout,
+    options: &AuditReviewArgs,
+    non_interactive: bool,
+    upstream: Option<&Candidate>,
+    prefer_published: bool,
+    allow_source_fallback: bool,
+    trusted: Option<(String, Evidence)>,
+) -> Result<Candidate> {
     let execution = options.build_execution.execution();
     execution.preflight()?;
     let interactive =
         !non_interactive && std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
-    let agent = audit_agent(
-        options
-            .audit_agent
-            .as_deref()
-            .or(config.audit.agent.as_deref()),
-        interactive,
-    )?;
-    let model = options.audit_model.clone().or_else(|| {
-        (agent != "manual")
-            .then(|| config.audit.model.clone())
-            .flatten()
-    });
     let keys = publishing_keys(home, config)?;
-    let review = haps::audit::review(&checkout, &agent, model.as_deref(), interactive)?;
-    eprintln!(
-        "Reviewed source and build instructions; building locally. No publisher binary will be installed."
-    );
+    *trust = crate::load_trust(home, config)?;
+    if let (Some(upstream), Some((event_id, _))) = (upstream, trusted.as_ref()) {
+        ensure!(
+            trust
+                .source_build_reviews(&upstream.release)
+                .iter()
+                .any(|event| event.id.to_hex() == *event_id),
+            "the selected source review is no longer trusted"
+        );
+    }
+    let reused_review = trusted.is_some();
+    let (reviewer, note, reviewed_by) = if let Some((event_id, _)) = trusted {
+        eprintln!("Using a trusted audit of this exact source and build recipe.");
+        (
+            None,
+            format!("Built from source and recipe reviewed in signed audit {event_id}."),
+            format!("Source review reused from signed audit {event_id}."),
+        )
+    } else {
+        let agent = audit_agent(
+            options
+                .audit_agent
+                .as_deref()
+                .or(config.audit.agent.as_deref()),
+            interactive,
+        )?;
+        let model = options.audit_model.clone().or_else(|| {
+            (agent != "manual")
+                .then(|| config.audit.model.clone())
+                .flatten()
+        });
+        let review = haps::audit::review(checkout, &agent, model.as_deref(), interactive)?;
+        (
+            Some(review.reviewer),
+            review.note,
+            "Source and build recipe reviewed before execution.".into(),
+        )
+    };
+    eprintln!("Reviewed source and build instructions; building and recording the output hash.");
     let (progress, _reporter) = Progress::stderr(true)?;
     let scan = if haps::security::enabled(home) {
         progress.stage("Scanning reviewed source before building");
@@ -121,6 +196,7 @@ pub(super) async fn build(
     let recipe_bytes = serde_json::to_vec(&checkout.recipe)?;
     let recipe_hash = hex::encode(Sha256::digest(&recipe_bytes));
     progress.stage("Building reviewed source");
+    progress.clear(); // Build commands own the terminal while they run.
     let payload = checkout.execute_with(execution)?;
     progress.stage("Recording the local build");
     let repo = Repository::local(home.join("built-packages"))?;
@@ -140,6 +216,68 @@ pub(super) async fn build(
     }
     let mut package = checkout.recipe.package.clone();
     let manifest = repo.pack_payload(&package, &payload).await?;
+    let method = reviewer
+        .as_ref()
+        .map_or("trusted-source-build".to_owned(), |r| {
+            format!("{}-review-and-rebuild", r.agent)
+        });
+    if let Some(upstream) = upstream {
+        let binary_match = manifest == upstream.release.data.manifest;
+        let evidence = Evidence {
+            schema: "haps.audit.v1".into(),
+            method: if binary_match {
+                method.clone()
+            } else {
+                "source-review".into()
+            },
+            provenance: format!(
+                "{reviewed_by} Built pinned source {} using recipe SHA-256 {recipe_hash}. {} Built payload manifest: {manifest}. Publisher binary match: {binary_match}. Dependencies and toolchain are not independently verified.",
+                checkout
+                    .recipe
+                    .package
+                    .source
+                    .as_ref()
+                    .context("source missing")?
+                    .rev,
+                execution.description()
+            ),
+            binary_match,
+            reviewer: reviewer.clone(),
+            build: Some(haps::audit::BuildIdentity {
+                recipe_sha256: recipe_hash.clone(),
+                manifest: manifest.clone(),
+            }),
+        };
+        progress.clear();
+        if !reused_review || binary_match {
+            record_audit(
+                home,
+                config,
+                trust,
+                &keys,
+                &upstream.release,
+                (&evidence, note.clone()),
+                (options.publish_audit, interactive),
+            )
+            .await?;
+        }
+        if binary_match && prefer_published {
+            if let Some(scan) = scan {
+                haps::security::bind_report(home, &upstream.release, scan)?;
+            }
+            eprintln!("Rebuilt payload matches the published release.");
+            return Ok(upstream.clone());
+        }
+        if !binary_match {
+            ensure!(
+                allow_source_fallback,
+                "published binary differs from the reviewed build; installing a different local payload cannot satisfy the required independent audit count"
+            );
+            eprintln!(
+                "Published binary differs from the audited build; installing the local source build."
+            );
+        }
+    }
     // Include both inputs and output so two local builds cannot silently replace
     // one immutable release when a toolchain or dependency changes its output.
     let build_id = hex::encode(Sha256::digest(format!("{recipe_hash}:{manifest}")));
@@ -148,9 +286,13 @@ pub(super) async fn build(
     let recipe_cid = repo.put_json(&checkout.recipe).await?;
     let evidence = Evidence {
         schema: "haps.audit.v1".into(),
-        method: format!("{}-review-local-build", review.reviewer.agent),
+        method: reviewer
+            .as_ref()
+            .map_or("trusted-source-build".to_owned(), |r| {
+                format!("{}-review-local-build", r.agent)
+            }),
         provenance: format!(
-            "Built locally from reviewed pinned source {} and recipe {} (SHA-256 {}). {} No publisher binary was compared. Dependencies and toolchain are not independently verified.",
+            "{reviewed_by} Built locally from reviewed pinned source {} and recipe {} (SHA-256 {}). {} This audit approves only this local payload. Dependencies and toolchain are not independently verified.",
             checkout
                 .recipe
                 .package
@@ -163,7 +305,11 @@ pub(super) async fn build(
             execution.description()
         ),
         binary_match: false,
-        reviewer: Some(review.reviewer),
+        reviewer,
+        build: Some(haps::audit::BuildIdentity {
+            recipe_sha256: recipe_hash,
+            manifest: release.data.manifest.clone(),
+        }),
     };
 
     if let Some(scan) = scan {
@@ -176,7 +322,7 @@ pub(super) async fn build(
         trust,
         &keys,
         &release,
-        (&evidence, review.note),
+        (&evidence, note),
         (options.publish_audit, interactive),
     )
     .await?;
@@ -291,6 +437,7 @@ pub(super) async fn execute_build(
                 minimum: 1,
             },
             false,
+            &[],
         )
         .await?;
         if attest_scan {

@@ -76,7 +76,7 @@ class LiveAudit(unittest.TestCase):
         terminal.read_until(b'Install this package?')
         terminal.send(b'y')
         terminal.read_until(b'Audit and install')
-        terminal.send(b'\x1b[B\n')
+        terminal.send(b'y')
         terminal.read_until(b'Choose how to audit')
         terminal.send(b'\n')
         terminal.read_until(b'Publish this and future audits', timeout=240)
