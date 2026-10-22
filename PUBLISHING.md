@@ -94,7 +94,9 @@ audit of the exact release by default (`--allow-unaudited` bypasses it for one o
 your publisher self-audit only counts for your own installation. Provide pinned
 source and a matching `[build]` section in the same `haps.toml` to support automatic binary reproduction (legacy `haps-build.toml` is also accepted). Source installation audits and builds the pinned source without requiring a publisher-binary match. See the
 [audit workflow](README.md#release-audits) for source review,
-rebuild comparison, and approvals with unverified reproducibility stated.
+rebuild comparison, and approvals with unverified reproducibility stated. Before
+sharing, follow [Preparing a package for audit](README.md#preparing-a-package-for-audit)
+for dependency locks, verified downloads, prerequisites, and review coverage.
 
 ## Managed event catalogs
 

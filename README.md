@@ -641,6 +641,8 @@ can prevent identical output; Haps does not strip differences to manufacture a
 match. A match connects the reviewed source and build inputs to the payload; it
 does not prove the code safe or independently verify the compiler and dependencies.
 
+#### Preparing a package for audit
+
 Human and agent reviewers should include the exact direct and transitive dependency
 tree used by the selected platform and features: runtime and build dependencies,
 install hooks, build scripts, procedural macros, and native code. Follow manifests
