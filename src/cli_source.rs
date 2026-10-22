@@ -192,3 +192,146 @@ pub(super) async fn build(
         release,
     })
 }
+
+/// Keep command dispatch's poll frame small enough for the Windows entry stack.
+pub(super) async fn execute_build(
+    home: &Path,
+    config: &mut Config,
+    trust: &mut Trust,
+    installation: &crate::Installation,
+    command: crate::Command,
+    non_interactive: bool,
+) -> Result<()> {
+    use crate::*;
+    let Command::Build {
+        repository,
+        rev,
+        recipe,
+        recipe_file,
+        package,
+        execute,
+        install,
+        audit_review,
+        attest_scan,
+    } = command
+    else {
+        unreachable!("build dispatcher")
+    };
+
+    ensure!(
+        install
+            || (audit_review.audit_agent.is_none()
+                && audit_review.audit_model.is_none()
+                && audit_review.publish_audit.is_none()),
+        "audit options for build require --install"
+    );
+    let source = haps::build::SourceCheckout::fetch(
+        SourceInfo {
+            git: repository,
+            rev,
+        },
+        &home.join("builds"),
+    )?;
+    let recipe = if let Some(path) = recipe_file {
+        ensure!(
+            fs::metadata(&path)?.len() <= MAX_METADATA as u64,
+            "build manifest is too large"
+        );
+        haps::build::manifest::Manifest::select(
+            &fs::read_to_string(path)?,
+            target(),
+            package.as_deref(),
+        )?
+        .recipe()?
+    } else {
+        source
+            .recipe_for(recipe.as_deref(), package.as_deref())?
+            .context(
+                "no build instructions declared; add [build] to haps.toml or supply --recipe-file",
+            )?
+    };
+    let checkout = haps::build::Checkout::with_recipe(source, recipe)?;
+    println!("{}", serde_json::to_string_pretty(&checkout.recipe)?);
+    if execute && install {
+        ensure!(
+            !attest_scan || haps::security::enabled(home),
+            "enable source scans with haps security --rules FILE first"
+        );
+        let candidate = cli_source::build(
+            home,
+            config,
+            trust,
+            checkout,
+            &audit_review,
+            non_interactive,
+        )
+        .await?;
+        cli_dependencies::install(
+            home,
+            config,
+            trust,
+            installation,
+            &candidate,
+            AuditOptions {
+                requested: false,
+                review: &audit_review,
+                non_interactive,
+                allow_untrusted: true,
+                allow_warnings: false,
+                allow_unaudited: false,
+                minimum: 1,
+            },
+            false,
+        )
+        .await?;
+        if attest_scan {
+            let keys = own_keys(home, config)?;
+            let report = haps::model::read_json(
+                &home
+                    .join("security/releases")
+                    .join(format!("{}.json", candidate.release.event.id)),
+            )?;
+            publish_scan(
+                home,
+                config,
+                haps::security::attestation(&keys, &candidate.release, &report)?,
+            )
+            .await?;
+        }
+        println!(
+            "Built {} {}",
+            candidate.release.identity(),
+            candidate.release.event.id
+        );
+    } else if execute {
+        let keys = own_keys(home, config)?;
+        let scan = if haps::security::enabled(home) {
+            Some(haps::security::scan_source(
+                home,
+                checkout
+                    .recipe
+                    .package
+                    .source
+                    .as_ref()
+                    .context("source is missing")?,
+                &checkout.root(),
+            )?)
+        } else {
+            None
+        };
+        let payload = checkout.execute()?;
+        let repo = Repository::local(home.join("built-packages"))?;
+        let release = repo
+            .publish(&keys, checkout.recipe.package.clone(), &payload)
+            .await?;
+        if let Some(report) = scan {
+            haps::security::bind_report(home, &release, report)?;
+        }
+        println!("Built {} {}", release.identity(), release.event.id);
+    } else {
+        println!(
+            "Preview only. Add --execute to run these commands with your user permissions; add --install to activate the result. Build recipes are not sandboxed."
+        );
+    }
+    Ok(())
+}

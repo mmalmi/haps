@@ -1,4 +1,7 @@
+mod cli_audit;
+mod cli_catalogs;
 mod cli_dependencies;
+mod cli_install;
 mod cli_source;
 
 use anyhow::{Context, Result, ensure};
@@ -1648,116 +1651,16 @@ async fn execute(mut cli: Cli) -> Result<u8> {
     let installation = Installation::new(home.clone())?.with_progress(progress.clone());
     let is_warning = matches!(&cli.command, Command::Warn(_));
     match cli.command {
-        Command::Audit { action } => match action {
-            AuditAction::Settings {
-                agent,
-                model,
-                publish,
-            } => {
-                if let Some(agent) = agent {
-                    config.audit.agent = Some(audit_agent(Some(&agent), false)?);
-                }
-                if let Some(model) = model {
-                    ensure!(
-                        !model.trim().is_empty()
-                            && model.len() <= 200
-                            && !model.chars().any(char::is_control),
-                        "invalid audit model"
-                    );
-                    config.audit.model = (model != "default").then_some(model);
-                }
-                if publish.is_some() {
-                    config.audit.publish = publish;
-                }
-                save_config(&home, &config)?;
-                println!("{}", serde_json::to_string_pretty(&config.audit)?);
-            }
-            AuditAction::Prepare { package, version } => {
-                let package = resolve_package(&config, &package)?;
-                let choices = candidates(&home, &mut config, None, Some(&package)).await?;
-                let releases = choices
-                    .iter()
-                    .map(|c| c.release.clone())
-                    .collect::<Vec<_>>();
-                refresh_feedback(&home, &config, &mut trust, &releases).await?;
-                let candidate = select(
-                    choices,
-                    &package,
-                    version.as_ref(),
-                    &config.aliases,
-                    &trust,
-                    target(),
-                    Selection {
-                        non_interactive,
-                        include_untrusted: package.contains('/'),
-                        confirm_install: false,
-                    },
-                )?;
-                let directory = haps::audit::prepare(&home, &candidate.release)?;
-                println!("Source to review: {}", directory.join("repo").display());
-                println!("Pinned release: {}", candidate.release.event.id);
-                println!(
-                    "Preparation has not executed build commands. Review the source, project instructions, and optional haps.toml build section; keep the checkout unchanged."
-                );
-                println!(
-                    "After review, run with the same Haps home: haps audit finish {} --note \"What you checked\"",
-                    directory
-                        .file_name()
-                        .context("session name missing")?
-                        .to_string_lossy()
-                );
-                println!(
-                    "With a recipe, finishing rebuilds and compares the published binary. Without one it records only a source review, which cannot approve a binary installation. Package: {} version {}.",
-                    release_label(&candidate.release, &config.aliases),
-                    candidate.release.data.package.version
-                );
-            }
-            AuditAction::Finish {
-                session,
-                note,
-                reviewer,
-                model,
-                publish,
-            } => {
-                use std::io::IsTerminal;
-                let interactive = !non_interactive
-                    && std::io::stdin().is_terminal()
-                    && std::io::stderr().is_terminal();
-                let reviewer = haps::audit::Reviewer {
-                    agent: reviewer,
-                    requested_model: model,
-                    reported_model: None,
-                };
-                // Validate metadata and signing capability before running a build.
-                let mut validation = haps::audit::Evidence::manual("External review".into())?;
-                validation.reviewer = Some(reviewer.clone());
-                validation.validate()?;
-                let keys = publishing_keys(&home, &mut config)?;
-                trust = load_trust(&home, &config)?;
-                let (release, evidence) =
-                    haps::audit::finish(&home, &session, &note, reviewer).await?;
-                record_audit(
-                    &home,
-                    &mut config,
-                    &mut trust,
-                    &keys,
-                    &release,
-                    (&evidence, note),
-                    (publish, interactive),
-                )
-                .await?;
-                println!(
-                    "Reviewed {} ({}): {}.",
-                    release_label(&release, &config.aliases),
-                    release.event.id,
-                    if evidence.binary_match {
-                        "rebuilt binary matches; ready to install"
-                    } else {
-                        "source reviewed; binary has not been verified"
-                    }
-                );
-            }
-        },
+        Command::Audit { action } => {
+            Box::pin(cli_audit::run(
+                &home,
+                &mut config,
+                &mut trust,
+                action,
+                non_interactive,
+            ))
+            .await?;
+        }
         Command::Target | Command::Init(_) => unreachable!(),
         Command::Add {
             package,
@@ -1792,144 +1695,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             println!("Added to catalog {catalog}. Publish with: haps catalog publish {catalog}");
         }
         Command::Catalog { action } => {
-            use haps::event_catalog::{IndexAnnouncement, directory};
-            match action {
-                CatalogAction::Discover => {
-                    refresh_discovery(&home, &mut config, &mut trust, None, None, None).await?;
-                    println!("{}", serde_json::to_string_pretty(&config.indexes)?);
-                }
-                CatalogAction::List => {
-                    let path = home.join("catalogs");
-                    let mut own = Vec::new();
-                    if path.exists() {
-                        for entry in fs::read_dir(path)? {
-                            let entry = entry?;
-                            if entry.file_type()?.is_dir() {
-                                own.push(entry.file_name().to_string_lossy().into_owned());
-                            }
-                        }
-                    }
-                    own.sort();
-                    println!(
-                        "{}",
-                        serde_json::json!({"own": own, "indexes": config.indexes})
-                    );
-                }
-                CatalogAction::Show { name } => {
-                    let path = directory(&home, &name)?;
-                    ensure!(path.exists(), "catalog does not exist");
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &Discovery::open(&path)?
-                                .events(vec![nostr::Filter::new()])
-                                .await?
-                        )?
-                    );
-                }
-                CatalogAction::Remove { package, catalog } => {
-                    let package = resolve_package(&config, &package)?;
-                    let path = directory(&home, &catalog)?;
-                    ensure!(path.exists(), "catalog does not exist");
-                    let selected = Discovery::open(&path)?;
-                    let events = selected.events(vec![nostr::Filter::new()]).await?;
-                    let identity = |event: &Event| -> Option<String> {
-                        if let Ok(a) = Announcement::verify(event.clone()) {
-                            Some(format!("{}/{}", a.author(), a.name))
-                        } else {
-                            Release::verify(event.clone()).ok().map(|r| r.identity())
-                        }
-                    };
-                    let matches: BTreeSet<_> = events
-                        .iter()
-                        .filter_map(identity)
-                        .filter(|id| {
-                            *id == package || id.rsplit('/').next() == Some(package.as_str())
-                        })
-                        .collect();
-                    ensure!(
-                        matches.len() == 1,
-                        "package is missing or ambiguous; use publisher/name"
-                    );
-                    selected
-                        .replace_events(events.into_iter().filter(|event| {
-                            !identity(event).is_some_and(|id| matches.contains(&id))
-                        }))
-                        .await?;
-                    println!("Removed from catalog {catalog}");
-                }
-                CatalogAction::Add {
-                    name,
-                    location,
-                    author,
-                } => {
-                    safe_name(&name)?;
-                    ensure!(!config.indexes.contains_key(&name), "index already exists");
-                    let author = resolve_key(&config, &author)?;
-                    Discovery::open(&home)?
-                        .import_index(&location, &author)
-                        .await?;
-                    config.indexes.insert(
-                        name,
-                        Source {
-                            location,
-                            author,
-                            sequence: 0,
-                            event_id: String::new(),
-                        },
-                    );
-                    save_config(&home, &config)?;
-                }
-                CatalogAction::Publish { name } => {
-                    let path = directory(&home, &name)?;
-                    ensure!(path.exists(), "catalog does not exist; add a package first");
-                    let keys = publishing_keys(&home, &mut config)?;
-                    let selected = Discovery::open(&path)?;
-                    // Local package records are built once; public indexes retain
-                    // original signatures for packages curated from elsewhere.
-                    let selected_events = selected.events(vec![nostr::Filter::new()]).await?;
-                    let selected_ids: BTreeSet<_> = selected_events
-                        .iter()
-                        .filter_map(|e| Release::verify(e.clone()).ok().map(|r| r.identity()))
-                        .collect();
-                    let mut package_events = Vec::new();
-                    if path.join("packages/catalog.json").exists() {
-                        package_events = haps::event_catalog::package_events(
-                            &home,
-                            &path.join("packages"),
-                            &keys,
-                            None,
-                        )
-                        .await?;
-                        package_events.retain(|event| {
-                            if let Ok(a) = Announcement::verify(event.clone()) {
-                                selected_ids.contains(&format!("{}/{}", a.author(), a.name))
-                            } else {
-                                Release::verify(event.clone())
-                                    .is_ok_and(|r| selected_ids.contains(&r.identity()))
-                            }
-                        });
-                        selected.ingest(package_events.clone()).await?;
-                    }
-                    let location = haps::event_catalog::upload_index(
-                        &home,
-                        &selected.events(vec![nostr::Filter::new()]).await?,
-                    )?;
-                    drop(selected);
-                    let discovery = Discovery::open(&home)?;
-                    let previous = discovery.events(vec![nostr::Filter::new()]).await?;
-                    let announcement = haps::event_catalog::advance(
-                        &keys,
-                        IndexAnnouncement::sign(&keys, &name, &location)?,
-                        &previous,
-                    )?;
-                    package_events.push(announcement);
-                    discovery.queue(&package_events)?;
-                    discovery.ingest(package_events.clone()).await?;
-                    flush_discovery(&home, &discovery, &package_events).await?;
-                    println!("Published catalog {name}: {location}");
-                }
-            }
+            Box::pin(cli_catalogs::run(&home, &mut config, &mut trust, action)).await?;
         }
         Command::StartingPoint { public_key, clear } => {
             if clear {
@@ -2151,128 +1917,16 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 );
             }
         },
-        Command::Build {
-            repository,
-            rev,
-            recipe,
-            recipe_file,
-            package,
-            execute,
-            install,
-            audit_review,
-            attest_scan,
-        } => {
-            ensure!(
-                install
-                    || (audit_review.audit_agent.is_none()
-                        && audit_review.audit_model.is_none()
-                        && audit_review.publish_audit.is_none()),
-                "audit options for build require --install"
-            );
-            let source = haps::build::SourceCheckout::fetch(
-                SourceInfo {
-                    git: repository,
-                    rev,
-                },
-                &home.join("builds"),
-            )?;
-            let recipe = if let Some(path) = recipe_file {
-                ensure!(
-                    fs::metadata(&path)?.len() <= MAX_METADATA as u64,
-                    "build manifest is too large"
-                );
-                haps::build::manifest::Manifest::select(
-                    &fs::read_to_string(path)?,
-                    target(),
-                    package.as_deref(),
-                )?
-                .recipe()?
-            } else {
-                source.recipe_for(recipe.as_deref(), package.as_deref())?.context("no build instructions declared; add [build] to haps.toml or supply --recipe-file")?
-            };
-            let checkout = haps::build::Checkout::with_recipe(source, recipe)?;
-            println!("{}", serde_json::to_string_pretty(&checkout.recipe)?);
-            if execute && install {
-                ensure!(
-                    !attest_scan || haps::security::enabled(&home),
-                    "enable source scans with haps security --rules FILE first"
-                );
-                let candidate = cli_source::build(
-                    &home,
-                    &mut config,
-                    &mut trust,
-                    checkout,
-                    &audit_review,
-                    non_interactive,
-                )
-                .await?;
-                cli_dependencies::install(
-                    &home,
-                    &mut config,
-                    &mut trust,
-                    &installation,
-                    &candidate,
-                    AuditOptions {
-                        requested: false,
-                        review: &audit_review,
-                        non_interactive,
-                        allow_untrusted: true,
-                        allow_warnings: false,
-                        allow_unaudited: false,
-                        minimum: 1,
-                    },
-                    false,
-                )
-                .await?;
-                if attest_scan {
-                    let keys = own_keys(&home, &config)?;
-                    let report = haps::model::read_json(
-                        &home
-                            .join("security/releases")
-                            .join(format!("{}.json", candidate.release.event.id)),
-                    )?;
-                    publish_scan(
-                        &home,
-                        &config,
-                        haps::security::attestation(&keys, &candidate.release, &report)?,
-                    )
-                    .await?;
-                }
-                println!(
-                    "Built {} {}",
-                    candidate.release.identity(),
-                    candidate.release.event.id
-                );
-            } else if execute {
-                let keys = own_keys(&home, &config)?;
-                let scan = if haps::security::enabled(&home) {
-                    Some(haps::security::scan_source(
-                        &home,
-                        checkout
-                            .recipe
-                            .package
-                            .source
-                            .as_ref()
-                            .context("source is missing")?,
-                        &checkout.root(),
-                    )?)
-                } else {
-                    None
-                };
-                let payload = checkout.execute()?;
-                let repo = Repository::local(home.join("built-packages"))?;
-                let release = repo
-                    .publish(&keys, checkout.recipe.package.clone(), &payload)
-                    .await?;
-                if let Some(report) = scan {
-                    haps::security::bind_report(&home, &release, report)?;
-                }
-                println!("Built {} {}", release.identity(), release.event.id);
-            } else {
-                println!(
-                    "Preview only. Add --execute to run these commands with your user permissions; add --install to activate the result. Build recipes are not sandboxed."
-                );
-            }
+        command @ Command::Build { .. } => {
+            Box::pin(cli_source::execute_build(
+                &home,
+                &mut config,
+                &mut trust,
+                &installation,
+                command,
+                non_interactive,
+            ))
+            .await?;
         }
         Command::Source { action } => match action {
             SourceAction::Add {
@@ -2364,146 +2018,17 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             )?;
             print_release(&candidate.release, &trust, &config.aliases)?;
         }
-        Command::Install {
-            package,
-            mut from_source,
-            recipe_file,
-            version,
-            allow_untrusted,
-            allow_warnings,
-            require_attestations,
-            allow_unaudited,
-            mut audit,
-            audit_review,
-            json,
-        } => {
-            progress.stage("Reading package catalogs");
-            let choices = candidates(&home, &mut config, None, Some(&package)).await?;
-            let releases: Vec<_> = choices.iter().map(|c| c.release.clone()).collect();
-            progress.stage("Checking release attestations and warnings");
-            refresh_feedback(&home, &config, &mut trust, &releases).await?;
-            progress.clear();
-            let candidate = select(
-                choices,
-                &package,
-                version.as_ref(),
-                &config.aliases,
-                &trust,
-                target(),
-                Selection {
-                    non_interactive,
-                    include_untrusted: allow_untrusted,
-                    confirm_install: true,
-                },
-            )?;
-            let require_attestations = require_attestations.max(1).max(
-                installation
-                    .receipts()?
-                    .get(&candidate.release.identity())
-                    .map_or(0, |r| r.minimum_attestations),
-            );
-            use std::io::IsTerminal;
-            if !from_source
-                && !audit
-                && !allow_unaudited
-                && !non_interactive
-                && !json
-                && std::io::stdin().is_terminal()
-                && std::io::stderr().is_terminal()
-                && trust.audits(&candidate.release).len() < require_attestations
-                && candidate.release.data.package.source.is_some()
-            {
-                let choice = dialoguer::Select::new()
-                    .with_prompt("Audit and install: choose what to install")
-                    .items([
-                        "Build reviewed source",
-                        "Verify the published binary",
-                        "Cancel",
-                    ])
-                    .default(0)
-                    .interact()?;
-                ensure!(choice != 2, "installation cancelled");
-                from_source = choice == 0;
-                audit = choice == 1;
-            }
-            let candidate = if from_source {
-                trust.authorize_with_policy(
-                    &candidate.release,
-                    allow_untrusted || package.contains('/'),
-                    0,
-                    allow_warnings,
-                )?;
-                ensure!(
-                    require_attestations == 1,
-                    "a local source build provides one source review; this policy requires more independent reviews"
-                );
-                cli_source::from_release(
-                    &home,
-                    &mut config,
-                    &mut trust,
-                    &candidate,
-                    &audit_review,
-                    recipe_file.as_deref(),
-                    non_interactive,
-                )
-                .await?
-            } else {
-                candidate
-            };
-            let completed_review = AuditReviewArgs::default();
-            ensure_audited(
-                &home,
-                &mut config,
-                &mut trust,
-                &candidate,
-                AuditOptions {
-                    requested: audit && !from_source,
-                    review: if from_source {
-                        &completed_review
-                    } else {
-                        &audit_review
-                    },
-                    non_interactive,
-                    allow_untrusted: allow_untrusted || package.contains('/'),
-                    allow_warnings,
-                    allow_unaudited,
-                    minimum: require_attestations,
-                },
-            )
-            .await?;
-            if !trust.socially_trusted(&candidate.release) {
-                eprintln!(
-                    "Warning: {} is not authored or vouched for by your social graph (or its author/vouchers are overmuted); proceeding with your explicit choice.",
-                    release_label(&candidate.release, &config.aliases)
-                );
-            }
-            if !json {
-                print_install_start(&candidate.release, &trust, &config.aliases);
-            }
-            cli_dependencies::install(
+        command @ Command::Install { .. } => {
+            Box::pin(cli_install::install(
                 &home,
                 &mut config,
                 &mut trust,
                 &installation,
-                &candidate,
-                AuditOptions {
-                    requested: audit && !from_source,
-                    review: if from_source {
-                        &completed_review
-                    } else {
-                        &audit_review
-                    },
-                    non_interactive,
-                    allow_untrusted: allow_untrusted || package.contains('/'),
-                    allow_warnings,
-                    allow_unaudited,
-                    minimum: require_attestations,
-                },
-                allow_untrusted,
-            )
+                &progress,
+                command,
+                non_interactive,
+            ))
             .await?;
-            progress.clear();
-            print_installed(&candidate.release, &trust, &config.aliases, json)?;
         }
         Command::Update {
             package,
@@ -3249,4 +2774,26 @@ async fn refresh_discovery(
         source.location = announcement.location;
     }
     save_config(home, config)
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+
+    #[test]
+    fn command_dispatch_runs_on_a_small_stack() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cli = Cli::parse_from(["haps", "--no-defaults", "target"]);
+        // Runtime construction and argument parsing are separate from dispatch.
+        let code = std::thread::Builder::new()
+            .stack_size(768 * 1024)
+            .spawn(move || runtime.block_on(Box::pin(execute(cli))).unwrap())
+            .unwrap()
+            .join()
+            .unwrap();
+        assert_eq!(code, 0);
+    }
 }
