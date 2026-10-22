@@ -104,9 +104,12 @@ impl Checkout {
                 .args(["checkout", "--detach", &commit]),
         )?;
         let path = root
-            .join(recipe_path)
+            .join(&recipe_path)
             .canonicalize()
-            .context("build recipe is missing")?;
+            .with_context(|| format!(
+                "build recipe {} is missing at the pinned source revision. Automatic auditing requires a committed recipe and a matching rebuilt payload. Record a completed manual audit with explicit provenance if the source-to-binary relationship is unverified",
+                recipe_path.display()
+            ))?;
         ensure!(
             path.starts_with(root.canonicalize()?),
             "recipe escapes checkout"

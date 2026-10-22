@@ -1,4 +1,5 @@
 """Include unchanged, checksum-pinned Hashtree release executables."""
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -62,5 +63,20 @@ def stage_helpers(target, destination, cache):
     shutil.copyfile(ROOT / 'hashtree-LICENSE', destination / 'hashtree-LICENSE')
     return {'hashtree': lock['tag'], 'archive_sha256': asset['sha256']}
 
+def stage_bundle(target, destination, cache):
+    metadata = stage_helpers(target, destination / 'libexec', cache)
+    (destination / 'bundle.json').write_text(json.dumps(metadata, indent=2) + '\n')
+
+
 if __name__ == '__main__':
-    check_release()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--target')
+    parser.add_argument('--destination', type=Path)
+    parser.add_argument('--cache', type=Path, default=Path('work/hashtree-bundle'))
+    args = parser.parse_args()
+    if args.target or args.destination:
+        if not args.target or not args.destination:
+            parser.error('--target and --destination must be supplied together')
+        stage_bundle(args.target, args.destination, args.cache)
+    else:
+        check_release()

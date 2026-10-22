@@ -5,10 +5,19 @@ target = "host"
 description = "Hashtree Package System"
 
 [package.commands]
-haps = "bin/haps{exe}"
+haps = "haps{exe}"
+htree = "libexec/htree{exe}"
+git-remote-htree = "libexec/git-remote-htree{exe}"
 
 [build]
-commands = [["cargo", "build", "--release", "--locked"]]
+commands = [
+    ["cargo", "build", "--release", "--locked", "--target", "{target}"],
+    ["python3", "scripts/bundle.py", "--target", "{target}", "--destination", "target/audit-bundle"],
+]
 
 [build.artifacts]
-"bin/haps{exe}" = "target/release/haps{exe}"
+"haps{exe}" = "target/{target}/release/haps{exe}"
+"libexec/htree{exe}" = "target/audit-bundle/libexec/htree{exe}"
+"libexec/git-remote-htree{exe}" = "target/audit-bundle/libexec/git-remote-htree{exe}"
+"libexec/hashtree-LICENSE" = "target/audit-bundle/libexec/hashtree-LICENSE"
+"bundle.json" = "target/audit-bundle/bundle.json"

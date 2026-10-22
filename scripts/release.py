@@ -11,7 +11,7 @@ import subprocess
 import tarfile
 import tempfile
 import zipfile
-from bundle import stage_helpers
+from bundle import stage_bundle
 
 TARGETS = [
     'x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu',
@@ -36,8 +36,7 @@ def package(tag, target, output):
         stage = Path(temp)
         shutil.copyfile(binary, stage / name)
         (stage / name).chmod(0o755)
-        metadata = stage_helpers(target, stage / 'libexec', Path('work/hashtree-bundle'))
-        (stage / 'bundle.json').write_text(json.dumps(metadata, indent=2) + '\n')
+        stage_bundle(target, stage, Path('work/hashtree-bundle'))
         files = sorted(p for p in stage.rglob('*') if p.is_file())
         if 'windows' in target:
             with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:

@@ -19,6 +19,44 @@ fn git(root: &Path, args: &[&str]) -> String {
 }
 
 #[test]
+fn missing_recipe_explains_manual_provenance_without_building() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("source");
+    fs::create_dir(&root).unwrap();
+    git(&root, &["init"]);
+    git(&root, &["config", "user.name", "Test"]);
+    git(&root, &["config", "user.email", "test@example.invalid"]);
+    fs::write(
+        root.join("README"),
+        "Source without a reproducible build recipe",
+    )
+    .unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "Source fixture"]);
+    let source = haps::model::SourceInfo {
+        git: reqwest::Url::from_directory_path(&root)
+            .unwrap()
+            .to_string(),
+        rev: git(&root, &["rev-parse", "HEAD"]),
+    };
+    let error =
+        match haps::build::Checkout::fetch(source, "haps-build.toml", &tmp.path().join("work")) {
+            Ok(_) => panic!("missing recipe must not be treated as a completed audit"),
+            Err(error) => error,
+        };
+    let message = error.to_string();
+    assert!(
+        message.contains("build recipe haps-build.toml is missing"),
+        "{message}"
+    );
+    assert!(
+        message.contains("completed manual audit with explicit provenance"),
+        "{message}"
+    );
+    assert!(message.contains("unverified"), "{message}");
+}
+
+#[test]
 fn pinned_source_preview_build_and_install() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("source");
