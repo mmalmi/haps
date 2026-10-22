@@ -151,7 +151,7 @@ impl Installation {
             },
         )
     }
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fn save_desktop_change(
         &self,
         before: Option<&Event>,
