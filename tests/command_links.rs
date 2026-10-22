@@ -24,6 +24,7 @@ async fn manager_launcher_tracks_update_rollback_and_removal() -> anyhow::Result
         target: target().into(),
         description: "Manager".into(),
         commands: BTreeMap::from([("haps".into(), executable.clone())]),
+        dependencies: Vec::new(),
         source: None,
         app: None,
         desktop: None,

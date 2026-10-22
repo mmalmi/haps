@@ -31,6 +31,8 @@ Implemented:
   one audit from your social graph is required by default; higher thresholds persist on updates.
 - Staged installation, target checks, publisher-preserving updates, previous-version
   rollback, and local removal. Downloads must finish before activation changes.
+- Native package dependencies pinned to a publisher and exact signed release,
+  with transitive installation, per-release audits, and protected update/removal.
 - Signed [NIP-22](https://github.com/nostr-protocol/nips/blob/master/22.md) comments
   and replies on a package or an exact release. Local mutes hide comments; social
   distance is shown. Comments do not automatically authorize installing software.
@@ -314,6 +316,51 @@ haps list --json
 Choose an explicit publisher after inspecting the candidates; Haps never silently
 accepts the first match for an agent. Use public keys for reproducible automation;
 local aliases are conveniences, not global identities.
+
+### Native package dependencies
+
+A package manifest can declare other Haps packages as runtime dependencies:
+
+```toml
+[[dependencies]]
+package = "PUBLISHER_PUBLIC_KEY/helper"
+release = "SIGNED_RELEASE_EVENT_ID"
+```
+
+Replace the placeholders with the publisher's hex public key or `npub`, and the
+64-character hexadecimal release ID shown by `haps info`. Local aliases are not
+accepted in signed dependencies. The release ID pins the version, platform, and
+content manifest; Haps never substitutes the newest release. Dependencies must
+target the same platform as their parent. Packages without dependencies keep
+their existing signed representation.
+
+`haps install`, `haps update`, and `haps build --execute --install` discover and
+check the complete dependency graph. Every release needs its own audit under the
+installation's policy. Selecting a publisher explicitly does not automatically
+trust other publishers it references. Explicit trust, warning, and audit bypasses
+apply to the requested operation; they do not weaken saved audit thresholds.
+Build recipes still manage their own build-time toolchains and dependencies.
+
+All payloads are verified before activation. A failed download or registration
+preserves the installed receipt set and restores changed command launchers.
+`haps run`, linked commands, and generated Linux desktop launchers receive a
+private command directory containing the pinned dependencies, including transitive
+dependencies. Dependency commands do not claim names on the user's global PATH;
+ambiguous command names fail explicitly. On macOS, `haps run` also passes this
+PATH when opening an application (an already-running application retains its environment).
+
+There is one active release per publisher/package. An update or removal that
+would break another installed package's pin is rejected. Rollback restores the
+parent and its retained dependency releases together, provided this does not
+break another package. Removing a parent leaves its dependencies installed;
+remove those explicitly when no remaining package uses them.
+
+This first version supports exact native runtime dependencies, up to 128 packages
+and 32 dependency edges in a chain. It rejects cycles, conflicting release pins,
+wrong-platform dependencies, and publisher substitution. Version ranges, optional
+dependencies, system libraries, automatic orphan removal, and Python/Node/Rust
+dependency resolution are not implemented. Older Haps clients reject manifests
+containing dependencies; use a client with dependency support to consume them.
 
 ### Build from a Git repository
 
@@ -787,7 +834,7 @@ Remaining work, in order:
    existing Hashtree transport/resolver libraries; stable software-event interoperability.
 2. Native integration: safe preservation of symlinks and executable metadata,
    broader platform signing/quarantine coverage, installer formats, user command launchers,
-   runtime dependencies, removal/garbage collection, and transactional environment locks.
+   system-library dependencies, garbage collection, and transactional environment locks.
 3. Hapstore discovery UI, app metadata/screenshots, reviewer context, reports,
    and package/release discussion over this core.
 4. Python, Node, and Rust adapters with their own compatibility and resolution tests.

@@ -25,6 +25,8 @@ pub struct PackageSpec {
     pub description: String,
     #[serde(default)]
     pub commands: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<crate::dependencies::Dependency>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<SourceInfo>,
     /// Relative macOS application bundle path, launched with Launch Services.
@@ -81,6 +83,15 @@ impl PackageSpec {
         ensure!(self.version.to_string().len() <= 100, "version is too long");
         ensure!(self.description.len() <= 4096, "description is too long");
         ensure!(self.commands.len() <= 100, "too many commands");
+        ensure!(self.dependencies.len() <= 64, "too many dependencies");
+        let mut dependencies = BTreeSet::new();
+        for dependency in &self.dependencies {
+            dependency.validate()?;
+            ensure!(
+                dependencies.insert(dependency.identity()?),
+                "duplicate dependency identity"
+            );
+        }
         if let Some(source) = &self.source {
             source.validate()?;
         }

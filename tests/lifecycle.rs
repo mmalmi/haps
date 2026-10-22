@@ -17,6 +17,7 @@ fn package(root: &std::path::Path, version: &str) -> PackageSpec {
         target: target().into(),
         description: "Friendly hello tool".into(),
         commands: BTreeMap::from([("hello".into(), "bin/hello".into())]),
+        dependencies: Vec::new(),
         source: None,
         app: None,
         desktop: None,

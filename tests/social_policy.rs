@@ -29,6 +29,7 @@ async fn release(root: &Path, author: &Keys) -> anyhow::Result<haps::model::Rele
                 commands: BTreeMap::new(),
                 app: None,
                 desktop: None,
+                dependencies: Vec::new(),
                 source: None,
             },
             &payload,

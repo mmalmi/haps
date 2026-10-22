@@ -219,6 +219,7 @@ mod tests {
                     ]),
                     app: None,
                     desktop: None,
+                    dependencies: Vec::new(),
                     source: None,
                 },
                 &payload,

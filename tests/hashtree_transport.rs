@@ -113,6 +113,7 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
                 target: target().into(),
                 description: "Friendly transport fixture".into(),
                 commands: BTreeMap::from([("hello".into(), "bin/hello".into())]),
+                dependencies: Vec::new(),
                 source: None,
                 app: None,
                 desktop: None,

@@ -32,6 +32,7 @@ async fn no_op_and_failed_upload_retry_keep_server_scoped_successful_checkpoints
         target: target().into(),
         description: "Upload checkpoint fixture".into(),
         commands: BTreeMap::from([("hello".into(), "hello".into())]),
+        dependencies: Vec::new(),
         source: None,
         app: None,
         desktop: None,

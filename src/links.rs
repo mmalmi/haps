@@ -74,6 +74,11 @@ fn scripts(
             let executable = shell_path(version_dir(release).join(path));
             let executable = executable.to_str().context("command path is not UTF-8")?;
             let home = shell_path(home.to_path_buf());
+            let environment = crate::install::environment::directory(&home, release);
+            let environment = shell_path(environment);
+            let environment = environment
+                .to_str()
+                .context("dependency path is not UTF-8")?;
             let home = home.to_str().context("home path is not UTF-8")?;
             ensure!(
                 !executable.chars().chain(home.chars()).any(char::is_control),
@@ -82,10 +87,15 @@ fn scripts(
             #[cfg(unix)]
             {
                 let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+                let runtime = if release.data.package.dependencies.is_empty() {
+                    String::new()
+                } else {
+                    format!("PATH={}:\"$PATH\" ", quote(environment))
+                };
                 scripts.insert(
                     name.clone(),
                     format!(
-                        "#!/bin/sh\n# Managed by Haps\nHAPS_HOME={} exec {} \"$@\"\n",
+                        "#!/bin/sh\n# Managed by Haps\n{runtime}HAPS_HOME={} exec {} \"$@\"\n",
                         quote(home),
                         quote(executable)
                     ),
@@ -97,7 +107,12 @@ fn scripts(
                     !executable.contains('"') && !home.contains('"'),
                     "invalid launcher path"
                 );
-                scripts.insert(format!("{name}.cmd"), format!("@echo off\r\nsetlocal DisableDelayedExpansion\r\nset \"HAPS_HOME={}\"\r\n\"{}\" %*\r\n", home.replace('%', "%%"), executable.replace('%', "%%")));
+                let runtime = if release.data.package.dependencies.is_empty() {
+                    String::new()
+                } else {
+                    format!("set \"PATH={};%PATH%\"\r\n", environment.replace('%', "%%"))
+                };
+                scripts.insert(format!("{name}.cmd"), format!("@echo off\r\nsetlocal DisableDelayedExpansion\r\n{runtime}set \"HAPS_HOME={}\"\r\n\"{}\" %*\r\n", home.replace('%', "%%"), executable.replace('%', "%%")));
             }
         }
     }
@@ -270,6 +285,7 @@ mod tests {
                     ]),
                     app: None,
                     desktop: None,
+                    dependencies: Vec::new(),
                     source: None,
                 },
                 &payload,

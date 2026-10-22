@@ -1,3 +1,5 @@
+mod cli_dependencies;
+
 use anyhow::{Context, Result, ensure};
 use clap::{Args, Parser, Subcommand};
 use haps::comments::{self, Comments, Scope};
@@ -536,6 +538,7 @@ struct Source {
     event_id: String,
 }
 
+#[derive(Clone)]
 struct Candidate {
     repository: Arc<Repository>,
     package_card: Option<String>,
@@ -683,6 +686,7 @@ async fn record_audit(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct AuditOptions<'a> {
     requested: bool,
     review: &'a AuditReviewArgs,
@@ -2179,7 +2183,29 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     )
                     .await?;
                     trust.authorize_install(&release, true, 1, false)?;
-                    installation.install_with_policy(&repo, &release, 1).await?;
+                    let candidate = Candidate {
+                        repository: Arc::new(repo),
+                        package_card: None,
+                        release: release.clone(),
+                    };
+                    cli_dependencies::install(
+                        &home,
+                        &mut config,
+                        &mut trust,
+                        &installation,
+                        &candidate,
+                        AuditOptions {
+                            requested: false,
+                            review: &audit_review,
+                            non_interactive,
+                            allow_untrusted: true,
+                            allow_warnings: false,
+                            allow_unaudited: false,
+                            minimum: 1,
+                        },
+                        false,
+                    )
+                    .await?;
                 }
                 if let Some(report) = scan {
                     let report = haps::security::bind_report(&home, &release, report)?;
@@ -2350,13 +2376,24 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             if !json {
                 print_install_start(&candidate.release, &trust, &config.aliases);
             }
-            installation
-                .install_with_policy(
-                    &candidate.repository,
-                    &candidate.release,
-                    require_attestations,
-                )
-                .await?;
+            cli_dependencies::install(
+                &home,
+                &mut config,
+                &mut trust,
+                &installation,
+                &candidate,
+                AuditOptions {
+                    requested: audit,
+                    review: &audit_review,
+                    non_interactive,
+                    allow_untrusted: allow_untrusted || package.contains('/'),
+                    allow_warnings,
+                    allow_unaudited,
+                    minimum: require_attestations,
+                },
+                allow_untrusted,
+            )
+            .await?;
             progress.clear();
             print_installed(&candidate.release, &trust, &config.aliases, json)?;
         }
@@ -2431,13 +2468,24 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             if !json {
                 print_install_start(&candidate.release, &trust, &config.aliases);
             }
-            installation
-                .install_with_policy(
-                    &candidate.repository,
-                    &candidate.release,
-                    minimum_attestations,
-                )
-                .await?;
+            cli_dependencies::install(
+                &home,
+                &mut config,
+                &mut trust,
+                &installation,
+                &candidate,
+                AuditOptions {
+                    requested: audit,
+                    review: &audit_review,
+                    non_interactive,
+                    allow_untrusted: allow_untrusted || package.contains('/'),
+                    allow_warnings,
+                    allow_unaudited,
+                    minimum: minimum_attestations,
+                },
+                allow_untrusted,
+            )
+            .await?;
             if let Some(installer) = &bootstrap {
                 progress.stage("Switching to Haps-managed updates");
                 installation.adopt_installer(&identity, installer)?;
@@ -2455,8 +2503,14 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 let release = Release::verify(installation.receipt(&package)?.current)?;
                 if let Some(app) = release.data.package.app {
                     let path = installation.path(&package)?.join(safe_path(&app)?);
+                    let mut process = std::process::Command::new("open");
+                    if let Some(runtime) = installation.runtime_path(&package)? {
+                        let mut value = std::ffi::OsString::from("PATH=");
+                        value.push(runtime);
+                        process.arg("--env").arg(value);
+                    }
                     drop(guard);
-                    let status = std::process::Command::new("open")
+                    let status = process
                         .arg("-a")
                         .arg(path)
                         .arg("--args")
@@ -2467,6 +2521,10 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             }
             let executable = installation.command(&package, command.as_deref())?;
             let mut process = std::process::Command::new(executable);
+            if let Some(path) = installation.runtime_path(&package)? {
+                process.env("PATH", path);
+            }
+            process.env("HAPS_HOME", &home);
             #[cfg(target_os = "linux")]
             process.env(
                 "XDG_DATA_DIRS",
@@ -2520,17 +2578,20 @@ async fn execute(mut cli: Cli) -> Result<u8> {
             package,
             allow_unaudited,
         } => {
-            let receipt = installation.receipt(&package)?;
-            let release =
-                Release::verify(receipt.previous.context("no previous version retained")?)?;
-            refresh_feedback(&home, &config, &mut trust, std::slice::from_ref(&release)).await?;
-            if allow_unaudited {
-                trust.authorize_with_policy(&release, true, 0, false)?;
-                eprintln!("Warning: bypassing the audit requirement for this operation only.");
-            } else {
-                trust.authorize_install(&release, true, receipt.minimum_attestations, false)?;
+            let plan = installation.rollback_plan(&package)?;
+            refresh_feedback(&home, &config, &mut trust, &plan).await?;
+            for release in &plan {
+                let receipt = installation.receipt(&release.identity())?;
+                if allow_unaudited {
+                    trust.authorize_with_policy(release, true, 0, false)?;
+                } else {
+                    trust.authorize_install(release, true, receipt.minimum_attestations, false)?;
+                }
             }
-            installation.rollback(&package)?;
+            if allow_unaudited {
+                eprintln!("Warning: bypassing the audit requirement for this operation only.");
+            }
+            installation.rollback_checked(&package, &plan)?;
             println!("Rolled back {package}");
         }
         Command::Remove { package } => {

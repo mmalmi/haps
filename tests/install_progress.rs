@@ -117,6 +117,7 @@ async fn install_reports_waits_and_verified_download_before_completion() -> anyh
                 description: "Progress fixture".into(),
                 commands: BTreeMap::new(),
                 app: None,
+                dependencies: Vec::new(),
                 source: None,
                 desktop: None,
             },

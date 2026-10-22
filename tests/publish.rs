@@ -39,6 +39,7 @@ async fn publish_checks_catalog_before_using_existing_or_bundled_htree() -> anyh
                 target: target().into(),
                 description: "Publication fixture".into(),
                 commands: BTreeMap::from([("hello".into(), "hello".into())]),
+                dependencies: Vec::new(),
                 source: None,
                 app: None,
                 desktop: None,

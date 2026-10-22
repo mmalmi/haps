@@ -24,6 +24,7 @@ async fn installation_requires_an_exact_current_audit_even_with_trust_overrides(
         target: target().into(),
         description: "Audit fixture".into(),
         commands: BTreeMap::new(),
+        dependencies: Vec::new(),
         source: None,
         app: None,
         desktop: None,

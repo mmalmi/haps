@@ -1,13 +1,15 @@
+pub(crate) mod environment;
+mod graph;
+mod payload;
+pub use graph::InstallRequest;
+
 use crate::{model::*, repository::Repository};
 use anyhow::{Context, Result, bail, ensure};
-use futures::TryStreamExt;
-use hashtree_core::Cid;
 use nostr::Event;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs,
-    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -54,6 +56,14 @@ impl Installation {
         after: Option<&Event>,
         receipts: &BTreeMap<String, Receipt>,
     ) -> Result<()> {
+        self.change(before, after, || self.save(receipts))
+    }
+    fn change(
+        &self,
+        before: Option<&Event>,
+        after: Option<&Event>,
+        commit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         let old = before.cloned().map(Release::verify).transpose()?;
         let new = after.cloned().map(Release::verify).transpose()?;
         let release = new.as_ref().or(old.as_ref()).context("missing release")?;
@@ -64,10 +74,10 @@ impl Installation {
                 old.as_ref(),
                 new.as_ref(),
                 |r| self.version_dir(r),
-                || self.save_desktop_change(before, after, receipts),
+                || self.desktop_change(before, after, commit),
             );
         }
-        self.save_desktop_change(before, after, receipts)
+        self.desktop_change(before, after, commit)
     }
     /// Put stable command launchers in an explicitly selected directory.
     pub fn link(&self, name: &str, directory: Option<&Path>) -> Result<PathBuf> {
@@ -141,14 +151,23 @@ impl Installation {
             },
         )
     }
+    #[cfg(test)]
     fn save_desktop_change(
         &self,
         before: Option<&Event>,
         after: Option<&Event>,
         receipts: &BTreeMap<String, Receipt>,
     ) -> Result<()> {
+        self.desktop_change(before, after, || self.save(receipts))
+    }
+    fn desktop_change(
+        &self,
+        before: Option<&Event>,
+        after: Option<&Event>,
+        commit: impl FnOnce() -> Result<()>,
+    ) -> Result<()> {
         let Some(directory) = &self.desktop_dir else {
-            return self.save(receipts);
+            return commit();
         };
         let old = before.cloned().map(Release::verify).transpose()?;
         let new = after.cloned().map(Release::verify).transpose()?;
@@ -158,12 +177,12 @@ impl Installation {
             .context("missing desktop release")?;
         let mut old_text = old
             .as_ref()
-            .map(|r| crate::desktop::render(r, &self.version_dir(r)))
+            .map(|r| self.render_desktop(r))
             .transpose()?
             .flatten();
         let new_text = new
             .as_ref()
-            .map(|r| crate::desktop::render(r, &self.version_dir(r)))
+            .map(|r| self.render_desktop(r))
             .transpose()?
             .flatten();
         let path = directory.join(crate::desktop::filename(&self.home, release));
@@ -181,9 +200,16 @@ impl Installation {
                 }
             }
         }
-        crate::desktop::transaction(&path, old_text.as_deref(), new_text.as_deref(), || {
-            self.save(receipts)
-        })
+        crate::desktop::transaction(&path, old_text.as_deref(), new_text.as_deref(), commit)
+    }
+    fn render_desktop(&self, release: &Release) -> Result<Option<String>> {
+        let environment = (!release.data.package.dependencies.is_empty())
+            .then(|| environment::directory(&self.home, release));
+        crate::desktop::render_with_environment(
+            release,
+            &self.version_dir(release),
+            environment.as_deref(),
+        )
     }
     pub fn receipts(&self) -> Result<BTreeMap<String, Receipt>> {
         let file = self.home.join("installed.json");
@@ -251,134 +277,26 @@ impl Installation {
         release: &Release,
         minimum_attestations: usize,
     ) -> Result<()> {
-        // Verify again at the installation boundary; caller-owned structs are not trusted.
-        let release = Release::verify(release.event.clone())?;
-        ensure!(
-            release.data.package.target == target(),
-            "release target does not match this machine ({})",
-            target()
-        );
-        let _guard = lock_with_wait(&self.home.join(".install.lock"), || {
-            self.progress
-                .stage("Waiting for another package installation");
-        })?;
-        let mut receipts = self.receipts()?;
-        let id = release.identity();
-        let previous = receipts.get(&id).map(|r| r.current.clone());
-        let minimum_attestations =
-            minimum_attestations.max(receipts.get(&id).map_or(0, |r| r.minimum_attestations));
-        if let Some(previous) = &previous {
-            let old = Release::verify(previous.clone())?;
-            if old.event.id == release.event.id {
-                self.progress
-                    .stage("Package is already current; checking registration");
-                receipts.get_mut(&id).unwrap().minimum_attestations = minimum_attestations;
-                self.save_change(Some(previous), Some(&release.event), &receipts)?;
-                return Ok(());
-            }
-            ensure!(
-                release.data.package.version > old.data.package.version,
-                "refusing downgrade or changed release at the same version; use rollback for the previous installed release"
-            );
-        }
-        self.progress.stage("Reading package manifest");
-        let manifest: Manifest = repo.json(&release.data.manifest).await?;
-        manifest.validate(&release.data.package)?;
-        let final_dir = self.version_dir(&release);
-        let parent = final_dir.parent().context("invalid install directory")?;
-        fs::create_dir_all(parent)?;
-        let stage = tempfile::Builder::new()
-            .prefix(".staging-")
-            .tempdir_in(parent)?;
-        let tree = repo.store.tree();
-        self.progress.download(
-            manifest.files.iter().map(|f| f.size).sum(),
-            manifest.files.len(),
-        );
-        for file in &manifest.files {
-            let output = stage.path().join(safe_path(&file.path)?);
-            fs::create_dir_all(output.parent().unwrap())?;
-            let mut destination = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&output)?;
-            let cid = Cid::parse(&file.cid)?;
-            let mut stream = tree.get_stream(&cid);
-            let mut written = 0u64;
-            while let Some(chunk) = stream.try_next().await? {
-                written = written
-                    .checked_add(chunk.len() as u64)
-                    .context("file size overflow")?;
-                ensure!(written <= file.size, "download exceeds signed file size");
-                destination.write_all(&chunk)?;
-                self.progress.advance(chunk.len() as u64, 0);
-            }
-            ensure!(written == file.size, "incomplete file: {}", file.path);
-            // Check existence even for empty files: a missing root must not masquerade as empty content.
-            use hashtree_core::Store;
-            ensure!(repo.store.has(&cid.hash).await?, "file root is unavailable");
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                destination.set_permissions(fs::Permissions::from_mode(if file.executable {
-                    0o755
-                } else {
-                    0o644
-                }))?;
-            }
-            destination.sync_all()?;
-            self.progress.advance(0, 1);
-        }
-        self.progress.finish_download();
-        self.progress.stage("Registering package");
-        // A previous interrupted install may have left this immutable slot. Never
-        // trust those bytes: replace it only after the fresh verified stage exists.
-        if final_dir.exists() {
-            fs::remove_dir_all(&final_dir)?;
-        }
-        fs::rename(stage.path(), &final_dir)?;
-        receipts.insert(
-            id,
-            Receipt {
-                current: release.event.clone(),
-                previous: previous.clone(),
-                minimum_attestations,
-            },
-        );
-        self.save_change(previous.as_ref(), Some(&release.event), &receipts)?;
-        Ok(())
+        self.install_plan(&[InstallRequest {
+            repository: repo,
+            release,
+            minimum_attestations,
+        }])
+        .await
     }
     pub fn rollback(&self, name: &str) -> Result<()> {
-        let _guard = lock(&self.home.join(".install.lock"))?;
-        let mut receipts = self.receipts()?;
-        let (id, receipt) = Self::find(&receipts, name)?;
-        let id = id.clone();
-        let previous = receipt
-            .previous
-            .clone()
-            .context("no previous version retained")?;
-        let release = Release::verify(previous.clone())?;
-        ensure!(
-            self.version_dir(&release).is_dir(),
-            "previous version is unavailable"
-        );
-        let current = receipt.current.clone();
-        let minimum_attestations = receipt.minimum_attestations;
-        receipts.insert(
-            id,
-            Receipt {
-                current: previous.clone(),
-                previous: Some(current.clone()),
-                minimum_attestations,
-            },
-        );
-        self.save_change(Some(&current), Some(&previous), &receipts)
+        self.rollback_dependencies(name, None)
+    }
+    /// Activate only the exact rollback closure the caller has authorized.
+    pub fn rollback_checked(&self, name: &str, expected: &[Release]) -> Result<()> {
+        self.rollback_dependencies(name, Some(expected))
     }
     pub fn remove(&self, name: &str) -> Result<()> {
         let _guard = lock(&self.home.join(".install.lock"))?;
         let mut receipts = self.receipts()?;
         let id = Self::find(&receipts, name)?.0.clone();
         let removed = receipts.remove(&id).unwrap();
+        Self::validate_receipts(&receipts)?;
         self.save_change(Some(&removed.current), None, &receipts)
     }
 }
@@ -415,6 +333,7 @@ mod tests {
             description: "Launcher migration fixture".into(),
             commands: BTreeMap::from([("hello".into(), "bin/hello".into())]),
             app: None,
+            dependencies: Vec::new(),
             source: None,
             desktop: Some(DesktopEntry {
                 name: "Iris Chat".into(),
@@ -466,6 +385,7 @@ mod tests {
                     description: "Menu name fixture".into(),
                     commands: BTreeMap::from([("iris-chat".into(), "iris-chat".into())]),
                     app: None,
+                    dependencies: Vec::new(),
                     source: None,
                     desktop: Some(DesktopEntry {
                         name: "Iris Chat".into(),

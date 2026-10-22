@@ -21,6 +21,7 @@ fn package() -> PackageSpec {
         target: target().into(),
         description: "Friendly direct package".into(),
         commands: BTreeMap::from([("hello".into(), "hello".into())]),
+        dependencies: Vec::new(),
         source: None,
         app: None,
         desktop: None,

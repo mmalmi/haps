@@ -49,6 +49,7 @@ pub fn create(args: &InitArgs) -> Result<PackageSpec> {
             .unwrap_or_default(),
         app: args.app.clone(),
         desktop: None,
+        dependencies: Vec::new(),
         source: None,
     };
     spec.validate()?;

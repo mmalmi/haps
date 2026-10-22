@@ -3,6 +3,7 @@ pub mod audit;
 pub mod bootstrap;
 pub mod build;
 pub mod comments;
+pub mod dependencies;
 pub mod desktop;
 pub mod discovery;
 pub mod event_catalog;

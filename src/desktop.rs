@@ -65,14 +65,22 @@ pub fn filename(home: &Path, release: &Release) -> String {
 }
 
 pub fn render(release: &Release, directory: &Path) -> Result<Option<String>> {
-    render_entry(release, directory, Format::Current)
+    render_entry(release, directory, Format::Current, None)
+}
+
+pub(crate) fn render_with_environment(
+    release: &Release,
+    directory: &Path,
+    environment: Option<&Path>,
+) -> Result<Option<String>> {
+    render_entry(release, directory, Format::Current, environment)
 }
 
 /// Exact historical formats, used only to recognize launchers owned by Haps.
 pub(crate) fn previous_entries(release: &Release, directory: &Path) -> Result<[Option<String>; 2]> {
     Ok([
-        render_entry(release, directory, Format::EscapedSpaces)?,
-        render_entry(release, directory, Format::LegacyExec)?,
+        render_entry(release, directory, Format::EscapedSpaces, None)?,
+        render_entry(release, directory, Format::LegacyExec, None)?,
     ])
 }
 
@@ -83,7 +91,12 @@ enum Format {
     LegacyExec,
 }
 
-fn render_entry(release: &Release, directory: &Path, format: Format) -> Result<Option<String>> {
+fn render_entry(
+    release: &Release,
+    directory: &Path,
+    format: Format,
+    environment: Option<&Path>,
+) -> Result<Option<String>> {
     let spec = &release.data.package;
     let Some(desktop) = &spec.desktop else {
         return Ok(None);
@@ -93,6 +106,17 @@ fn render_entry(release: &Release, directory: &Path, format: Format) -> Result<O
     let icon = icon.to_str().context("desktop icon path must be UTF-8")?;
     let exec = if matches!(format, Format::LegacyExec) {
         format!("/usr/bin/env -- {}", executable(&command)?)
+    } else if let Some(environment) = environment {
+        crate::launch::linux_data_dirs(directory, None)?;
+        let script =
+            format!("PATH=\"$1${{PATH:+:$PATH}}\"; export PATH; shift; {LINUX_LAUNCH_SCRIPT}");
+        format!(
+            "/bin/sh -c {} haps {} {} {}",
+            argument(&script),
+            executable(environment)?,
+            executable(directory)?,
+            executable(&command)?
+        )
     } else {
         crate::launch::linux_data_dirs(directory, None)?;
         format!(

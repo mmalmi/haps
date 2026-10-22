@@ -31,6 +31,7 @@ async fn fact_snapshots_migrate_legacy_claims_without_double_counting_or_replay(
                 commands: BTreeMap::from([("hello".into(), "hello".into())]),
                 app: None,
                 desktop: None,
+                dependencies: Vec::new(),
                 source: None,
             },
             &payload,
