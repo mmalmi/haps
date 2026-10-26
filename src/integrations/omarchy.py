@@ -1,4 +1,4 @@
-"""Omarchy v4 shell plugin and the menu integration invoked by `haps omarchy`."""
+"""Omarchy package menus, also usable as a standalone terminal picker."""
 import json
 import os
 from pathlib import Path
@@ -58,7 +58,17 @@ def run():
     rows = json.loads(result.stdout)
     if searching:
         target = subprocess.check_output(haps + ['target'], text=True).strip()
-        rows = [row for row in rows if row['package']['target'] == target]
+        latest = {}
+        for row in rows:
+            package = row['package']
+            version = package['version'].split('+', 1)[0]
+            if package['target'] != target or '-' in version:
+                continue
+            order = tuple(int(part) for part in version.split('.'))
+            identity = row['identity']
+            if identity not in latest or order > latest[identity][0]:
+                latest[identity] = (order, row)
+        rows = [entry[1] for entry in latest.values()]
     if not rows:
         print('No packages found for this computer.' if searching else 'No installed packages.')
         return 0
@@ -151,40 +161,19 @@ def find_haps():
             return str(candidate)
     return None
 
-def launch_plugin():
-    command = shlex.join([sys.executable, str(Path(__file__).resolve()), '--menu'])
-    return subprocess.call(['omarchy-launch-or-focus-tui', '--app-id=to.hashtree.haps', command])
-
 def pause():
     try:
         input('\nPress Enter to close.')
     except (EOFError, KeyboardInterrupt):
         pass
 
-def plugin_menu():
-    executable = find_haps()
+def terminal_menu(executable=None, home=None):
+    executable = executable or find_haps()
     if not executable:
-        print('Haps — packages from your social graph.\n')
-        print('Install the prebuilt Haps CLI and Hashtree helpers from haps.hashtree.cc.')
-        print('The installer checks downloads and preserves existing commands. No sudo is used.\n')
-        try:
-            answer = input('Install Haps now? [y/N] ')
-        except EOFError:
-            return 0
-        if answer.strip().lower() not in ('y', 'yes'):
-            return 0
-        installer = Path(__file__).resolve().parents[2] / 'website/public/install.sh'
-        directory = install_directory()
-        result = subprocess.call(['sh', str(installer), '--bin-dir', str(directory)])
-        if result:
-            pause()
-            return result
-        executable = str(directory / 'haps')
-        if not os.access(executable, os.X_OK):
-            raise ValueError('Installation did not create the Haps command. Check the installer output above.')
+        raise ValueError('Install Haps before opening its package menu: https://haps.hashtree.cc')
     if not shutil.which('fzf'):
         raise ValueError('The Haps menu needs fzf. Install it with: omarchy pkg add fzf')
-    return subprocess.call(['bash', '-c', menu_script(executable), 'haps-menu', 'menu'])
+    return subprocess.call(['bash', '-c', menu_script(executable, home), 'haps-menu', 'menu'])
 
 def parse(raw):
     # Match Omarchy v4's supported JSONC: full-line comments and trailing commas.
@@ -274,14 +263,14 @@ def install(executable, home, remove=False):
 if __name__ == '__main__':
     result = 0
     try:
-        if sys.argv[1:] == ['--launch']:
-            result = launch_plugin()
-        elif sys.argv[1:] == ['--menu']:
-            result = plugin_menu()
+        if sys.argv[1:] == ['--menu']:
+            result = terminal_menu()
+        elif len(sys.argv) == 4 and sys.argv[3] == '--menu':
+            result = terminal_menu(sys.argv[1], sys.argv[2])
         elif len(sys.argv) >= 3:
             install(sys.argv[1], sys.argv[2], '--remove' in sys.argv[3:])
         else:
-            raise ValueError('Usage: omarchy.py --launch | --menu | EXECUTABLE HOME [--remove]')
+            raise ValueError('Usage: omarchy.py --menu | EXECUTABLE HOME [--remove]')
     except (OSError, ValueError) as error:
         print(str(error), file=sys.stderr)
         result = 1

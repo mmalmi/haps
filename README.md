@@ -158,6 +158,8 @@ Haps fits alongside those sources in the existing **Install**, **Update**, and
 haps omarchy
 # Undo the menu integration:
 haps omarchy --remove
+# Open the terminal picker directly (also works outside Omarchy):
+haps omarchy --menu
 ```
 
 Choose **Install > Haps** to filter packages for this computer with `fzf`,
@@ -169,50 +171,8 @@ signature, audit, and trust checks. System packages remain managed by Omarchy.
 This integration needs Omarchy v4, Python 3, Bash, and `fzf`. It preserves
 custom menu entries and comments, saves the original as
 `omarchy-menu.jsonc.haps-backup`, and migrates older Haps-owned menu entries.
-It adds no bar button or background updates. The menu and picker changes above
-are available from this source revision; older Haps releases use a top-level
-Haps menu.
-
-#### Optional bar shortcut
-
-For a persistent shortcut, the Omarchy v4 (Quattro) plugin adds **Haps** to the
-bar. Click it to find, install, list, update, or remove packages in a terminal menu.
-It uses the existing Haps CLI and its normal signature, audit, and trust checks.
-
-Once this revision is published to the GitHub mirror, install it with:
-
-```sh
-omarchy plugin add https://github.com/mmalmi/haps.git --enable
-```
-
-The plugin needs Omarchy v4's shell and terminal launcher, Python 3, Bash, and
-`fzf`. It finds Haps on `PATH` or in its usual local/Cargo install directories.
-If Haps is missing, the first click offers to run this repository's
-[`install.sh`](website/public/install.sh). Installation requires a **yes** in
-the terminal and downloads the prebuilt CLI and Hashtree helpers using the
-installer's checksum checks. Declining leaves Haps uninstalled. Existing
-installations and `HAPS_HOME` are respected; no sudo, automatic updates, or
-automatic trust overrides are added. The plugin itself does not edit the
-Omarchy menu extension file.
-
-```sh
-omarchy plugin disable cc.hashtree.haps
-omarchy plugin enable cc.hashtree.haps
-omarchy plugin remove cc.hashtree.haps
-```
-
-Removing the plugin leaves the Haps CLI, installed packages, and trust settings
-intact. Use `haps remove PACKAGE` for packages you also want to uninstall.
-Update plugin code with `omarchy plugin update`; update Haps separately with
-the installation method described below.
-
-The root `manifest.json` makes this repository directly installable as an
-Omarchy plugin. Before submitting it to the
-[Omarchy plugin marketplace](https://plugins.omarchy.org/publish.html), validate
-a clean checkout with `omarchy plugin validate .`, run
-`python3 -m unittest discover -s tests -p omarchy_test.py`, and check the bar
-button, terminal flow, disable/re-enable, and removal on a running Quattro
-desktop. Build directories and local symlinks must stay outside that checkout.
+It adds no bar button or background updates. The package menus are available in Haps 0.1.21 and newer; older releases
+use a top-level Haps menu. The integration was tested on Omarchy 4.0.6.
 
 #### Desktop applications
 

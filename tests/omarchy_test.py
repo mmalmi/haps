@@ -26,36 +26,19 @@ class MenuTests(unittest.TestCase):
         installed = subprocess.run([sys.executable, '-c', omarchy.SEARCH_FORMATTER, 'list'], input='[]', text=True, capture_output=True, check=True)
         self.assertIn('No installed packages.', installed.stdout)
 
-    def test_plugin_launch_quotes_paths_for_omarchy_terminal(self):
-        with patch.object(omarchy.subprocess, 'call', return_value=0) as call:
-            omarchy.launch_plugin()
-        command = call.call_args.args[0]
-        self.assertEqual(command[:2], ['omarchy-launch-or-focus-tui', '--app-id=to.hashtree.haps'])
-        self.assertEqual(shlex.split(command[2]), [sys.executable, str(Path(omarchy.__file__).resolve()), '--menu'])
+    def test_menu_requires_existing_haps_without_bootstrapping(self):
+        with patch.object(omarchy, 'find_haps', return_value=None), \
+             patch.object(omarchy.subprocess, 'call') as call:
+            with self.assertRaisesRegex(ValueError, 'Install Haps'):
+                omarchy.terminal_menu()
+            call.assert_not_called()
 
-    def test_plugin_setup_decline_or_eof_never_installs(self):
-        for answer in ['n', '', 'yes please', EOFError()]:
-            with patch.object(omarchy, 'find_haps', return_value=None), \
-                 patch('builtins.input', side_effect=answer if isinstance(answer, Exception) else [answer]), \
-                 patch.object(omarchy.subprocess, 'call') as call:
-                self.assertEqual(omarchy.plugin_menu(), 0)
-                call.assert_not_called()
-
-    def test_plugin_setup_uses_bundled_installer_and_stops_on_failure(self):
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch.dict(os.environ, {'HOME': tmp, 'HAPS_INSTALL_DIR': tmp + '/custom bin'}), \
-             patch.object(omarchy, 'find_haps', return_value=None), \
-             patch('builtins.input', return_value='y'), \
-             patch.object(omarchy.subprocess, 'call', return_value=9) as call:
-            self.assertEqual(omarchy.plugin_menu(), 9)
-            call.assert_called_once_with(['sh', str(Path(__file__).parents[1] / 'website/public/install.sh'), '--bin-dir', tmp + '/custom bin'])
-
-    def test_plugin_uses_existing_haps_without_installing_or_changing_menu(self):
+    def test_menu_uses_existing_haps_without_installing_or_changing_menu(self):
         with patch.object(omarchy, 'find_haps', return_value='/some path/haps'), \
              patch.object(omarchy.shutil, 'which', return_value='/usr/bin/fzf'), \
              patch.object(omarchy.subprocess, 'call', return_value=0) as call, \
              patch('builtins.input') as prompt:
-            self.assertEqual(omarchy.plugin_menu(), 0)
+            self.assertEqual(omarchy.terminal_menu(), 0)
             prompt.assert_not_called()
             argv = call.call_args.args[0]
             self.assertEqual(argv[:2], ['bash', '-c'])
@@ -63,25 +46,7 @@ class MenuTests(unittest.TestCase):
             self.assertIn("haps=('/some path/haps')", argv[2])
             self.assertNotIn('--home', argv[2])
 
-    def test_plugin_successful_setup_launches_verified_command(self):
-        with tempfile.TemporaryDirectory() as tmp, \
-             patch.dict(os.environ, {'HOME': tmp, 'HAPS_INSTALL_DIR': tmp + '/local bin'}), \
-             patch.object(omarchy, 'find_haps', return_value=None), \
-             patch.object(omarchy.shutil, 'which', return_value='/usr/bin/fzf'), \
-             patch('builtins.input', return_value='yes'):
-            executable = Path(tmp) / 'local bin/haps'
-            def call(argv):
-                if argv[0] == 'sh':
-                    executable.parent.mkdir()
-                    executable.write_text('#!/bin/sh\nexit 0\n')
-                    executable.chmod(0o755)
-                return 0
-            with patch.object(omarchy.subprocess, 'call', side_effect=call) as launch:
-                self.assertEqual(omarchy.plugin_menu(), 0)
-            self.assertEqual(launch.call_count, 2)
-            self.assertIn(shlex.quote(str(executable)), launch.call_args.args[0][2])
-
-    def test_plugin_finds_existing_install_outside_desktop_path(self):
+    def test_menu_finds_existing_install_outside_desktop_path(self):
         with tempfile.TemporaryDirectory() as tmp, \
              patch.dict(os.environ, {'HOME': tmp, 'HAPS_INSTALL_DIR': tmp + '/local bin'}), \
              patch.object(omarchy.shutil, 'which', return_value=None):
@@ -97,8 +62,8 @@ class MenuTests(unittest.TestCase):
             with patch.dict(os.environ, {'HAPS_INSTALL_DIR': ''}):
                 self.assertEqual(omarchy.install_directory(), Path(tmp) / '.local/bin')
 
-    def test_plugin_actions_preserve_arguments_and_failures(self):
-        with tempfile.TemporaryDirectory(prefix="haps plugin ' $ ") as tmp:
+    def test_menu_actions_preserve_arguments_and_failures(self):
+        with tempfile.TemporaryDirectory(prefix="haps menu ' $ ") as tmp:
             root = Path(tmp)
             row = {'identity': 'a' * 64 + '/app', 'label': 'publisher/app',
                    'publisher': 'a' * 64, 'release_id': 'b' * 64,
@@ -139,6 +104,11 @@ class MenuTests(unittest.TestCase):
                  'release_id': 'd' * 64, 'package': {'version': '2.0.0', 'target': 'test-linux', 'description': 'line1\nline2'},
                  'audits': [{}], 'warnings': [{}]},
             ]
+            # Discovery includes history and prereleases. The default picker shows
+            # the newest stable version per publisher, like the CLI's selection.
+            for version in ['1.10.0', '1.9.0', '3.0.0-beta.1']:
+                older = dict(rows[1], package=dict(rows[1]['package'], version=version))
+                rows.append(older)
             executable = root / 'haps'
             executable.write_text('#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\nargs=sys.argv[3:]\nroot=Path(sys.argv[2])\nif args[0]=="search": print((root/"rows").read_text())\nelif args[0]=="target": print("test-linux")\nelse: (root/"installed").write_text(json.dumps(args)); sys.exit(8)\n')
             executable.chmod(0o755)

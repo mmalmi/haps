@@ -390,12 +390,15 @@ enum Command {
     },
     /// Show an installed directory (including native app bundles).
     Path { package: String },
-    /// Add a small Haps submenu to Omarchy v4 (requires Python 3 and fzf).
+    /// Add Haps to Omarchy's package menus (requires Python 3 and fzf).
     #[cfg(target_os = "linux")]
     Omarchy {
         /// Remove only the menu entries installed by Haps.
         #[arg(long)]
         remove: bool,
+        /// Open the terminal package picker without changing desktop menus.
+        #[arg(long, conflicts_with = "remove")]
+        menu: bool,
     },
     List {
         #[arg(long)]
@@ -2267,7 +2270,7 @@ async fn execute(mut cli: Cli) -> Result<u8> {
         }
         Command::Path { package } => println!("{}", installation.path(&package)?.display()),
         #[cfg(target_os = "linux")]
-        Command::Omarchy { remove } => {
+        Command::Omarchy { remove, menu } => {
             let mut process = std::process::Command::new("python3");
             process
                 .arg("-c")
@@ -2276,7 +2279,11 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 .arg(&home);
             if remove {
                 process.arg("--remove");
+            } else if menu {
+                process.arg("--menu");
             }
+            // Picker actions invoke Haps again with the same home.
+            drop(guard);
             ensure!(
                 process.status()?.success(),
                 "Omarchy menu integration failed"
