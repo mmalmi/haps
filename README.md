@@ -148,6 +148,49 @@ State defaults to the operating system's local application-data directory under
 
 ### Linux desktop and Omarchy
 
+#### Omarchy shell plugin
+
+The Omarchy v4 (Quattro) plugin adds **Haps** to the bar. Click it to find,
+install, list, update, or remove packages in a keyboard-driven terminal menu.
+It uses the existing Haps CLI and its normal signature, audit, and trust checks.
+
+Once this revision is published to the GitHub mirror, install it with:
+
+```sh
+omarchy plugin add https://github.com/mmalmi/haps.git --enable
+```
+
+The plugin needs Omarchy v4's shell and terminal launcher, Python 3, Bash, and
+`fzf`. It finds Haps on `PATH` or in its usual local/Cargo install directories.
+If Haps is missing, the first click offers to run this repository's
+[`install.sh`](website/public/install.sh). Installation requires a **yes** in
+the terminal and downloads the prebuilt CLI and Hashtree helpers using the
+installer's checksum checks. Declining leaves Haps uninstalled. Existing
+installations and `HAPS_HOME` are respected; no sudo, automatic updates, or
+automatic trust overrides are added. The plugin itself does not edit the
+Omarchy menu extension file.
+
+```sh
+omarchy plugin disable cc.hashtree.haps
+omarchy plugin enable cc.hashtree.haps
+omarchy plugin remove cc.hashtree.haps
+```
+
+Removing the plugin leaves the Haps CLI, installed packages, and trust settings
+intact. Use `haps remove PACKAGE` for packages you also want to uninstall.
+Update plugin code with `omarchy plugin update`; update Haps separately with
+the installation method described below.
+
+The root `manifest.json` makes this repository directly installable as an
+Omarchy plugin. Before submitting it to the
+[Omarchy plugin marketplace](https://plugins.omarchy.org/publish.html), validate
+a clean checkout with `omarchy plugin validate .`, run
+`python3 -m unittest discover -s tests -p omarchy_test.py`, and check the bar
+button, terminal flow, disable/re-enable, and removal on a running Quattro
+desktop. Build directories and local symlinks must stay outside that checkout.
+
+#### Desktop applications
+
 Linux GUI packages register a launcher in `$XDG_DATA_HOME/applications` (normally
 `~/.local/share/applications`). Omarchy, GNOME, and other desktop launchers can
 then discover them. Updates and rollbacks switch the launcher; removal removes

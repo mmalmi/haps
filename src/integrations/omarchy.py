@@ -1,14 +1,96 @@
-"""Small Omarchy v4 menu integration, invoked by `haps omarchy`."""
+"""Omarchy v4 shell plugin and the menu integration invoked by `haps omarchy`."""
 import json
 import os
 from pathlib import Path
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 
 START = '  // BEGIN HAPS MENU\n'
 END = '  // END HAPS MENU\n'
+
+def menu_script(executable, home=None):
+    command = [executable] + (['--home', home] if home is not None else [])
+    return '#!/usr/bin/env bash\nset -u\nhaps=(' + shlex.join(command) + ')\n' + r'''action=${1:-search}
+if [[ "$action" == menu ]]; then
+  selected=$(printf '%s\n' $'search\tFind packages' $'install\tInstall a package' $'list\tInstalled packages' $'update\tUpdate a package' $'remove\tRemove a package' |
+    fzf --delimiter=$'\t' --with-nth=2 --prompt='Haps > ' --header='Packages from your social graph' --height=12 --layout=reverse) || exit 0
+  action=${selected%%$'\t'*}
+fi
+case "$action" in
+  search) read -r -p 'Find packages: ' package || exit 0; "${haps[@]}" search -- "$package" ;;
+  install) read -r -p 'Package (name or publisher/name): ' package || exit 0; [[ -n "$package" ]] || exit 0; "${haps[@]}" install -- "$package" ;;
+  list) "${haps[@]}" list ;;
+  update|remove)
+    packages=$("${haps[@]}" list)
+    result=$?
+    if [[ "$result" != 0 ]]; then
+      printf '\nPress Enter to close.'; read -r _; exit "$result"
+    elif [[ -z "$packages" ]]; then printf 'No installed packages.\n'
+    else
+      selected=$(printf '%s\n' "$packages" | fzf --delimiter=$'\t' --with-nth=1,2 --prompt="$action > ") || exit 0
+      package=${selected%%$'\t'*}
+      "${haps[@]}" "$action" -- "$package"
+    fi ;;
+  *) exit 2 ;;
+esac
+result=$?
+printf '\n'
+read -r -p 'Press Enter to close.' _
+exit "$result"
+'''
+
+def install_directory():
+    return Path(os.environ.get('HAPS_INSTALL_DIR') or Path.home() / '.local/bin').expanduser().absolute()
+
+def find_haps():
+    executable = shutil.which('haps')
+    if executable:
+        return executable
+    # Desktop sessions may not inherit the user's interactive shell PATH.
+    for directory in [install_directory(), Path.home() / '.cargo/bin']:
+        candidate = directory / 'haps'
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+def launch_plugin():
+    command = shlex.join([sys.executable, str(Path(__file__).resolve()), '--menu'])
+    return subprocess.call(['omarchy-launch-or-focus-tui', '--app-id=to.hashtree.haps', command])
+
+def pause():
+    try:
+        input('\nPress Enter to close.')
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+def plugin_menu():
+    executable = find_haps()
+    if not executable:
+        print('Haps — packages from your social graph.\n')
+        print('Install the prebuilt Haps CLI and Hashtree helpers from haps.hashtree.cc.')
+        print('The installer checks downloads and preserves existing commands. No sudo is used.\n')
+        try:
+            answer = input('Install Haps now? [y/N] ')
+        except EOFError:
+            return 0
+        if answer.strip().lower() not in ('y', 'yes'):
+            return 0
+        installer = Path(__file__).resolve().parents[2] / 'website/public/install.sh'
+        directory = install_directory()
+        result = subprocess.call(['sh', str(installer), '--bin-dir', str(directory)])
+        if result:
+            pause()
+            return result
+        executable = str(directory / 'haps')
+        if not os.access(executable, os.X_OK):
+            raise ValueError('Installation did not create the Haps command. Check the installer output above.')
+    if not shutil.which('fzf'):
+        raise ValueError('The Haps menu needs fzf. Install it with: omarchy pkg add fzf')
+    return subprocess.call(['bash', '-c', menu_script(executable), 'haps-menu', 'menu'])
 
 def parse(raw):
     # Match Omarchy v4's supported JSONC: full-line comments and trailing commas.
@@ -86,34 +168,28 @@ def install(executable, home, remove=False):
         with backup.open('x') as file:
             file.write(raw)
     if not remove:
-        script = '#!/usr/bin/env bash\nset -u\nhaps=(' + shlex.join([executable, '--home', home]) + ')\n' + '''action=${1:-search}
-case "$action" in
-  search) read -r -p 'Find packages: ' package; "${haps[@]}" search -- "$package" ;;
-  install) read -r -p 'Package (name or publisher/name): ' package; [[ -z "$package" ]] || "${haps[@]}" install -- "$package" ;;
-  list) "${haps[@]}" list ;;
-  update|remove)
-    packages=$("${haps[@]}" list) || exit $?
-    if [[ -z "$packages" ]]; then printf 'No installed packages.\\n'
-    else
-      selected=$(printf '%s\\n' "$packages" | fzf --delimiter=$'\\t' --with-nth=1,2 --prompt="$action > ") || exit 0
-      package=${selected%%$'\\t'*}
-      "${haps[@]}" "$action" -- "$package"
-    fi ;;
-  *) exit 2 ;;
-esac
-result=$?
-printf '\\n'
-read -r -p 'Press Enter to close.' _
-exit "$result"
-'''
-        atomic(helper, script, 0o755)
+        atomic(helper, menu_script(executable, home), 0o755)
     atomic(menu, changed, menu.stat().st_mode & 0o777 if menu.exists() else 0o644)
     if remove:
         helper.unlink(missing_ok=True)
     print('Haps menu removed.' if remove else 'Haps added to the Omarchy menu. Open the menu and choose Haps.')
 
 if __name__ == '__main__':
+    result = 0
     try:
-        install(sys.argv[1], sys.argv[2], '--remove' in sys.argv[3:])
+        if sys.argv[1:] == ['--launch']:
+            result = launch_plugin()
+        elif sys.argv[1:] == ['--menu']:
+            result = plugin_menu()
+        elif len(sys.argv) >= 3:
+            install(sys.argv[1], sys.argv[2], '--remove' in sys.argv[3:])
+        else:
+            raise ValueError('Usage: omarchy.py --launch | --menu | EXECUTABLE HOME [--remove]')
     except (OSError, ValueError) as error:
-        sys.exit(str(error))
+        print(str(error), file=sys.stderr)
+        result = 1
+        if sys.argv[1:] == ['--menu']:
+            pause()
+    except KeyboardInterrupt:
+        result = 130
+    sys.exit(result)
