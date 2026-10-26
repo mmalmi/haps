@@ -11,6 +11,7 @@ import tempfile
 
 START = '  // BEGIN HAPS MENU\n'
 END = '  // END HAPS MENU\n'
+MENU_ROOTS = ('haps', 'install.haps', 'update.haps', 'remove.haps')
 
 SEARCH_FORMATTER = r'''
 import json
@@ -30,8 +31,84 @@ for row in rows:
     print('  ' + text(package['target']) + ' · Audits: ' + str(len(row.get('audits', [])))
           + ' · Warnings: ' + str(len(row.get('warnings', []))))
     print()
-if rows and not installed:
-    print('Use a publisher/name above in “Install a package”. Haps checks trust before installing.')
+'''
+
+# Embedded in the generated menu helper so Cargo installs need no extra files.
+PACKAGE_PICKER = r'''
+import json
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+
+def text(value):
+    return ''.join(c if c.isprintable() else ' ' for c in str(value))
+
+def run():
+    action, *haps = sys.argv[1:]
+    searching = action == 'search'
+    if searching:
+        print('Finding packages…', flush=True)
+    args = ['search', '--json', '--', ''] if searching else ['list', '--json']
+    result = subprocess.run(haps + args, stdout=subprocess.PIPE, text=True)
+    if result.returncode:
+        print(text(result.stdout), file=sys.stderr)
+        return result.returncode
+    rows = json.loads(result.stdout)
+    if searching:
+        target = subprocess.check_output(haps + ['target'], text=True).strip()
+        rows = [row for row in rows if row['package']['target'] == target]
+    if not rows:
+        print('No packages found for this computer.' if searching else 'No installed packages.')
+        return 0
+    operation = 'install' if searching else action
+    with tempfile.TemporaryDirectory(prefix='haps-picker-') as directory:
+        choices = []
+        for index, row in enumerate(rows):
+            package = row['package']
+            label = text(row['label'])
+            version = text(package['version'])
+            description = text(package.get('description', ''))
+            choices.append(str(index) + '\t' + label + '\t' + version + '\t' + description)
+            preview = [label + '  ' + version, description, '',
+                       'Platform: ' + text(package['target']),
+                       'Publisher: ' + text(row['publisher']),
+                       'Release: ' + text(row['release_id']),
+                       'Audits: ' + str(len(row.get('audits', []))),
+                       'Warnings: ' + str(len(row.get('warnings', []))), '',
+                       'Haps checks trust before installing or updating.']
+            Path(directory, str(index)).write_text('\n'.join(preview) + '\n')
+        picked = subprocess.run([
+            'fzf', '--delimiter=\t', '--with-nth=2..', '--layout=reverse',
+            '--prompt=Haps > ', '--header=Enter: ' + operation + ' · Esc: cancel',
+            '--preview=cat ' + shlex.quote(directory) + '/{1}',
+            '--preview-window=down:65%:wrap',
+            '--preview-label=alt-p: toggle details, alt-j/k: scroll',
+            '--preview-label-pos=bottom',
+            '--bind=alt-p:toggle-preview,alt-j:preview-down,alt-k:preview-up',
+        ], input='\n'.join(choices) + '\n', stdout=subprocess.PIPE, text=True)
+        if picked.returncode:
+            return 130 if picked.returncode in (1, 130) else picked.returncode
+        # Only a row from this snapshot can become an argument; labels are display-only.
+        selected = picked.stdout.rstrip('\n')
+        if selected not in choices:
+            raise ValueError('The package selection was not in the result list.')
+        row = rows[int(selected.split('\t', 1)[0])]
+    args = [operation]
+    if searching:
+        args += ['--version', row['package']['version']]
+    return subprocess.call(haps + args + ['--', row['identity']])
+
+try:
+    sys.exit(run())
+except subprocess.CalledProcessError as error:
+    sys.exit(error.returncode)
+except KeyboardInterrupt:
+    sys.exit(130)
+except (OSError, ValueError, KeyError, TypeError) as error:
+    print(str(error), file=sys.stderr)
+    sys.exit(1)
 '''
 
 def menu_script(executable, home=None):
@@ -40,30 +117,21 @@ def menu_script(executable, home=None):
               '  [[ "$1" != search ]] || printf \'Finding packages…\\n\'\n'
               '  results=$("${haps[@]}" "$@") || return $?\n'
               '  printf \'%s\\n\' "$results" | python3 -c ' + shlex.quote(SEARCH_FORMATTER) + ' "$1"\n}\n')
-    return '#!/usr/bin/env bash\nset -u\nhaps=(' + shlex.join(command) + ')\n' + search + r'''action=${1:-search}
+    picker = 'pick_package() { python3 -c ' + shlex.quote(PACKAGE_PICKER) + ' "$1" "${haps[@]}"; }\n'
+    return '#!/usr/bin/env bash\nset -u\nhaps=(' + shlex.join(command) + ')\n' + search + picker + r'''action=${1:-search}
 if [[ "$action" == menu ]]; then
-  selected=$(printf '%s\n' $'search\tFind packages' $'install\tInstall a package' $'list\tInstalled packages' $'update\tUpdate a package' $'remove\tRemove a package' |
+  selected=$(printf '%s\n' $'search\tFind and install packages' $'install\tInstall by name' $'list\tInstalled packages' $'update\tUpdate a package' $'remove\tRemove a package' |
     fzf --delimiter=$'\t' --with-nth=2 --prompt='Haps > ' --header='Packages from your social graph' --height=12 --layout=reverse) || exit 0
   action=${selected%%$'\t'*}
 fi
 case "$action" in
-  search) read -r -p 'Find packages: ' package || exit 0; show_packages search --json -- "$package" ;;
+  search|update|remove) pick_package "$action" ;;
   install) read -r -p 'Package (name or publisher/name): ' package || exit 0; [[ -n "$package" ]] || exit 0; "${haps[@]}" install -- "$package" ;;
   list) show_packages list --json ;;
-  update|remove)
-    packages=$("${haps[@]}" list)
-    result=$?
-    if [[ "$result" != 0 ]]; then
-      printf '\nPress Enter to close.'; read -r _; exit "$result"
-    elif [[ -z "$packages" ]]; then printf 'No installed packages.\n'
-    else
-      selected=$(printf '%s\n' "$packages" | fzf --delimiter=$'\t' --with-nth=1,2 --prompt="$action > ") || exit 0
-      package=${selected%%$'\t'*}
-      "${haps[@]}" "$action" -- "$package"
-    fi ;;
   *) exit 2 ;;
 esac
 result=$?
+[[ "$result" == 130 ]] && exit 0
 printf '\n'
 read -r -p 'Press Enter to close.' _
 exit "$result"
@@ -136,7 +204,7 @@ def merge(raw, rows):
     entries = parsed.get('items', parsed)
     if not isinstance(entries, dict):
         raise ValueError('Omarchy menu items must be an object')
-    if any(k == 'haps' or k.startswith('haps.') for k in entries):
+    if any(k == root or k.startswith(root + '.') for k in entries for root in MENU_ROOTS):
         raise ValueError('Existing Haps menu entries are not managed by this installer')
     if not rows:
         return raw
@@ -183,10 +251,13 @@ def install(executable, home, remove=False):
         raise ValueError('Omarchy extensions directory is missing; this integration needs Omarchy v4')
     helper = Path(home) / 'integrations/omarchy-menu'
     raw = menu.read_text() if menu.exists() else '{\n}\n'
-    rows = {'haps': {'label': 'Haps', 'icon': '󰏗', 'description': 'Packages from your social graph'}}
-    for action, label in [('search', 'Find packages'), ('install', 'Install a package'), ('list', 'Installed packages'), ('update', 'Update a package'), ('remove', 'Remove a package')]:
+    rows = {}
+    for parent, action in [('install', 'search'), ('update', 'update'), ('remove', 'remove')]:
         command = shlex.join([str(helper), action])
-        rows['haps.' + action] = {'label': label, 'action': shlex.join(['omarchy-launch-or-focus-tui', '--app-id=to.hashtree.haps.' + action, command])}
+        rows[parent + '.haps'] = {'label': 'Haps', 'icon': '󰏗',
+                                  'description': 'Packages from your social graph',
+                                  'action': shlex.join(['omarchy-launch-or-focus-tui', '--app-id=to.hashtree.haps.' + action, command])}
+    rows['install.haps']['aliases'] = ['haps']
     changed = merge(raw, {} if remove else rows)
     backup = menu.with_suffix('.jsonc.haps-backup')
     if menu.exists() and not backup.exists():
@@ -198,7 +269,7 @@ def install(executable, home, remove=False):
     atomic(menu, changed, menu.stat().st_mode & 0o777 if menu.exists() else 0o644)
     if remove:
         helper.unlink(missing_ok=True)
-    print('Haps menu removed.' if remove else 'Haps added to the Omarchy menu. Open the menu and choose Haps.')
+    print('Haps menu removed.' if remove else 'Haps added to Install, Update, and Remove in the Omarchy menu.')
 
 if __name__ == '__main__':
     result = 0

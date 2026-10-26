@@ -100,13 +100,16 @@ class MenuTests(unittest.TestCase):
     def test_plugin_actions_preserve_arguments_and_failures(self):
         with tempfile.TemporaryDirectory(prefix="haps plugin ' $ ") as tmp:
             root = Path(tmp)
+            row = {'identity': 'a' * 64 + '/app', 'label': 'publisher/app',
+                   'publisher': 'a' * 64, 'release_id': 'b' * 64,
+                   'package': {'version': '1.0.0', 'target': 'test-linux', 'description': 'An app'}}
             executable = root / 'haps'
-            executable.write_text('#!/usr/bin/env python3\nimport json, os, sys\nfrom pathlib import Path\np=Path(os.environ["HOME"]) / "calls"\nwith p.open("a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\nif sys.argv[1] == "list": print("publisher/app\\t1.0.0")\nsys.exit(int(os.environ.get("HAPS_TEST_STATUS", "0")))\n')
+            executable.write_text('#!/usr/bin/env python3\nimport json, os, sys\nfrom pathlib import Path\np=Path(os.environ["HOME"]) / "calls"\nwith p.open("a") as f: f.write(json.dumps(sys.argv[1:]) + "\\n")\nif sys.argv[1] in ("list", "search"): print(os.environ["HAPS_TEST_ROWS"])\nif sys.argv[1] == "target": print("test-linux")\nsys.exit(int(os.environ.get("HAPS_TEST_STATUS", "0")))\n')
             executable.chmod(0o755)
             picker = root / 'fzf'
             picker.write_text('#!/usr/bin/env python3\nimport os, sys\nrows=sys.stdin.read().splitlines()\nselection=os.environ.get("HAPS_TEST_PICK", "")\nif selection == "cancel": sys.exit(130)\nprint(next((row for row in rows if row.split("\\t")[0] == selection), rows[0]))\n')
             picker.chmod(0o755)
-            env = dict(os.environ, HOME=tmp, PATH=tmp + os.pathsep + os.environ['PATH'])
+            env = dict(os.environ, HOME=tmp, PATH=tmp + os.pathsep + os.environ['PATH'], HAPS_TEST_ROWS=json.dumps([row]))
             calls = root / 'calls'
             def run(action, answer='\n', **extra):
                 calls.unlink(missing_ok=True)
@@ -115,14 +118,57 @@ class MenuTests(unittest.TestCase):
                 return result.returncode, args
             package = '--allow-unaudited; $(touch should-not-exist)'
             self.assertEqual(run('menu', package + '\n\n', HAPS_TEST_PICK='install'), (0, [['install', '--', package]]))
-            self.assertEqual(run('search', package + '\n\n', HAPS_TEST_STATUS='7'), (7, [['search', '--json', '--', package]]))
-            self.assertEqual(run('update'), (0, [['list'], ['update', '--', 'publisher/app']]))
-            self.assertEqual(run('update', HAPS_TEST_STATUS='7'), (7, [['list']]))
-            self.assertEqual(run('remove'), (0, [['list'], ['remove', '--', 'publisher/app']]))
-            self.assertEqual(run('remove', HAPS_TEST_PICK='cancel'), (0, [['list']]))
+            self.assertEqual(run('search', HAPS_TEST_STATUS='7'), (7, [['search', '--json', '--', '']]))
+            self.assertEqual(run('search'), (0, [['search', '--json', '--', ''], ['target'], ['install', '--version', '1.0.0', '--', row['identity']]]))
+            self.assertEqual(run('update'), (0, [['list', '--json'], ['update', '--', row['identity']]]))
+            self.assertEqual(run('update', HAPS_TEST_STATUS='7'), (7, [['list', '--json']]))
+            self.assertEqual(run('remove'), (0, [['list', '--json'], ['remove', '--', row['identity']]]))
+            self.assertEqual(run('remove', HAPS_TEST_PICK='cancel'), (0, [['list', '--json']]))
+            self.assertEqual(run('search', HAPS_TEST_ROWS='[]'), (0, [['search', '--json', '--', ''], ['target']]))
             self.assertEqual(run('menu', HAPS_TEST_PICK='cancel'), (0, []))
             self.assertEqual(run('install', ''), (0, []))
             self.assertEqual(run('unknown'), (2, []))
+
+    def test_picker_filters_platform_and_keeps_display_text_out_of_commands(self):
+        with tempfile.TemporaryDirectory(prefix="haps picker ' $ ") as tmp:
+            root = Path(tmp)
+            rows = [
+                {'identity': 'a' * 64 + '/app', 'label': 'publisher/app', 'publisher': 'a' * 64,
+                 'release_id': 'b' * 64, 'package': {'version': '1.0.0', 'target': 'other-platform'}},
+                {'identity': 'c' * 64 + '/app', 'label': '$(touch bad)\t\x1b[2J', 'publisher': 'c' * 64,
+                 'release_id': 'd' * 64, 'package': {'version': '2.0.0', 'target': 'test-linux', 'description': 'line1\nline2'},
+                 'audits': [{}], 'warnings': [{}]},
+            ]
+            executable = root / 'haps'
+            executable.write_text('#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\nargs=sys.argv[3:]\nroot=Path(sys.argv[2])\nif args[0]=="search": print((root/"rows").read_text())\nelif args[0]=="target": print("test-linux")\nelse: (root/"installed").write_text(json.dumps(args)); sys.exit(8)\n')
+            executable.chmod(0o755)
+            picker = root / 'fzf'
+            picker.write_text('''#!/usr/bin/env python3
+import json, os, shlex, subprocess, sys
+from pathlib import Path
+root=Path(os.environ['HOME'])
+rows=sys.stdin.read().splitlines()
+(root/'choices').write_text(json.dumps(rows))
+preview=next(arg.removeprefix('--preview=') for arg in sys.argv if arg.startswith('--preview='))
+preview=shlex.split(preview.replace('{1}', '0'))
+(root/'preview-path').write_text(preview[1])
+(root/'preview').write_text(subprocess.check_output(preview, text=True))
+print(rows[0])
+''')
+            picker.chmod(0o755)
+            (root / 'rows').write_text(json.dumps(rows))
+            env = dict(os.environ, HOME=tmp, PATH=tmp + os.pathsep + os.environ['PATH'])
+            result = subprocess.run([sys.executable, '-c', omarchy.PACKAGE_PICKER, 'search', str(executable), '--home', tmp], env=env, text=True, capture_output=True)
+            self.assertEqual(result.returncode, 8, result.stderr)
+            self.assertEqual(json.loads((root / 'installed').read_text()), ['install', '--version', '2.0.0', '--', rows[1]['identity']])
+            choices = json.loads((root / 'choices').read_text())
+            self.assertEqual(len(choices), 1)
+            self.assertEqual(len(choices[0].split('\t')), 4)
+            self.assertNotIn('\x1b', choices[0])
+            self.assertIn('Audits: 1\nWarnings: 1', (root / 'preview').read_text())
+            self.assertIn(rows[1]['release_id'], (root / 'preview').read_text())
+            self.assertFalse(Path((root / 'preview-path').read_text()).exists())
+            self.assertFalse((root / 'bad').exists())
 
     def test_preserves_custom_menu_and_comments_and_is_idempotent(self):
         for raw in ['{\n  // Personal notes\n  "personal": {"label":"Notes"},\n}\n', '{\n"items": {\n"personal": {"label":"Notes"}\n}\n}\n']:
@@ -135,8 +181,19 @@ class MenuTests(unittest.TestCase):
             self.assertIn('haps', parsed.get('items', parsed))
         with self.assertRaises(ValueError):
             omarchy.merge('{"haps":{"label":"Mine"}}', {'haps': {}})
+        for key in ['install.haps', 'remove.haps', 'update.haps.custom']:
+            with self.assertRaises(ValueError):
+                omarchy.merge(json.dumps({key: {'label': 'Mine'}}), {'install.haps': {}})
         with self.assertRaises(ValueError):
             omarchy.merge('{not json}', {'haps': {}})
+
+    def test_migrates_owned_top_level_menu_without_changing_custom_entries(self):
+        raw = '{\n"personal":{"label":"Notes"}\n}\n'
+        old = omarchy.merge(raw, {'haps': {'label': 'Haps'}, 'haps.search': {'action': 'old'}})
+        updated = omarchy.merge(old, {'install.haps': {'label': 'Haps', 'action': 'new'}})
+        self.assertNotIn('"haps.search"', updated)
+        self.assertNotIn('"haps":', updated)
+        self.assertEqual(omarchy.merge(updated, {}), raw)
 
     def test_install_run_update_and_remove_keep_user_configuration(self):
         with tempfile.TemporaryDirectory(prefix='haps menu $ ') as tmp:
@@ -152,8 +209,8 @@ class MenuTests(unittest.TestCase):
             with patch.dict(os.environ, {'HOME': str(root)}):
                 omarchy.install(str(executable), str(home))
                 first = menu.read_text()
-                for action in ['search', 'install', 'list', 'update', 'remove']:
-                    row = omarchy.parse(first)[1]['haps.' + action]
+                for parent, action in [('install', 'search'), ('update', 'update'), ('remove', 'remove')]:
+                    row = omarchy.parse(first)[1][parent + '.haps']
                     command = shlex.split(row['action'])
                     self.assertEqual(command[:2], ['omarchy-launch-or-focus-tui', '--app-id=to.hashtree.haps.' + action])
                     self.assertEqual(shlex.split(command[2]), [str(home / 'integrations/omarchy-menu'), action])

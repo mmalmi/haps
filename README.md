@@ -148,10 +148,35 @@ State defaults to the operating system's local application-data directory under
 
 ### Linux desktop and Omarchy
 
-#### Omarchy shell plugin
+#### Omarchy package menus
 
-The Omarchy v4 (Quattro) plugin, tested with 4.0.6, adds **Haps** to the bar. Click it to find,
-install, list, update, or remove packages in a keyboard-driven terminal menu.
+Omarchy uses pacman for Arch and Omarchy packages, and yay for AUR packages.
+Haps fits alongside those sources in the existing **Install**, **Update**, and
+**Remove** menus. Enable the integration after installing Haps:
+
+```sh
+haps omarchy
+# Undo the menu integration:
+haps omarchy --remove
+```
+
+Choose **Install > Haps** to filter packages for this computer with `fzf`,
+preview the publisher, description, version, audits, and warnings, then press
+Enter to install the selected version. **Update > Haps** and **Remove > Haps**
+show installed packages in the same picker. These actions retain Haps' normal
+signature, audit, and trust checks. System packages remain managed by Omarchy.
+
+This integration needs Omarchy v4, Python 3, Bash, and `fzf`. It preserves
+custom menu entries and comments, saves the original as
+`omarchy-menu.jsonc.haps-backup`, and migrates older Haps-owned menu entries.
+It adds no bar button or background updates. The menu and picker changes above
+are available from this source revision; older Haps releases use a top-level
+Haps menu.
+
+#### Optional bar shortcut
+
+For a persistent shortcut, the Omarchy v4 (Quattro) plugin adds **Haps** to the
+bar. Click it to find, install, list, update, or remove packages in a terminal menu.
 It uses the existing Haps CLI and its normal signature, audit, and trust checks.
 
 Once this revision is published to the GitHub mirror, install it with:
@@ -215,20 +240,6 @@ These Linux binaries require a recent distribution (Iris Chat requires glibc
 2.43 or newer). Haps does not yet resolve system dependencies or run installer
 hooks. Drive and VPN include their companion CLI binaries; system service setup
 and privileged VPN operations remain the apps' responsibility.
-
-To add Find, Install, Installed, Update, and Remove to the **Omarchy v4** menu:
-
-```sh
-haps omarchy
-# Undo the menu integration:
-haps omarchy --remove
-```
-
-This uses Python 3, Bash, and Omarchy's terminal launcher and `fzf`. It preserves
-existing menu entries/comments and saves the original menu file as
-`omarchy-menu.jsonc.haps-backup`. All actions use the same Haps home and trust
-checks as the CLI. It adds no automatic trust overrides or background updates.
-Use Haps 0.1.2 or newer for the Linux catalog and menu integration.
 
 ### Updating Haps itself
 
