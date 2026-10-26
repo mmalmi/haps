@@ -20,8 +20,9 @@ def text(value):
     return ''.join(c if c.isprintable() else ' ' for c in str(value))
 
 rows = json.load(sys.stdin)
+installed = len(sys.argv) > 1 and sys.argv[1] == 'list'
 if not rows:
-    print('No matching packages. Try another search.')
+    print('No installed packages.' if installed else 'No matching packages. Try another search.')
 for row in rows:
     package = row['package']
     print(text(row['label']) + '  ' + text(package['version']))
@@ -29,15 +30,16 @@ for row in rows:
     print('  ' + text(package['target']) + ' · Audits: ' + str(len(row.get('audits', [])))
           + ' · Warnings: ' + str(len(row.get('warnings', []))))
     print()
-if rows:
+if rows and not installed:
     print('Use a publisher/name above in “Install a package”. Haps checks trust before installing.')
 '''
 
 def menu_script(executable, home=None):
     command = [executable] + (['--home', home] if home is not None else [])
-    search = ('search_packages() {\n  local results\n'
-              '  results=$("${haps[@]}" search --json -- "$1") || return $?\n'
-              '  printf \'%s\\n\' "$results" | python3 -c ' + shlex.quote(SEARCH_FORMATTER) + '\n}\n')
+    search = ('show_packages() {\n  local results\n'
+              '  [[ "$1" != search ]] || printf \'Finding packages…\\n\'\n'
+              '  results=$("${haps[@]}" "$@") || return $?\n'
+              '  printf \'%s\\n\' "$results" | python3 -c ' + shlex.quote(SEARCH_FORMATTER) + ' "$1"\n}\n')
     return '#!/usr/bin/env bash\nset -u\nhaps=(' + shlex.join(command) + ')\n' + search + r'''action=${1:-search}
 if [[ "$action" == menu ]]; then
   selected=$(printf '%s\n' $'search\tFind packages' $'install\tInstall a package' $'list\tInstalled packages' $'update\tUpdate a package' $'remove\tRemove a package' |
@@ -45,9 +47,9 @@ if [[ "$action" == menu ]]; then
   action=${selected%%$'\t'*}
 fi
 case "$action" in
-  search) read -r -p 'Find packages: ' package || exit 0; search_packages "$package" ;;
+  search) read -r -p 'Find packages: ' package || exit 0; show_packages search --json -- "$package" ;;
   install) read -r -p 'Package (name or publisher/name): ' package || exit 0; [[ -n "$package" ]] || exit 0; "${haps[@]}" install -- "$package" ;;
-  list) "${haps[@]}" list ;;
+  list) show_packages list --json ;;
   update|remove)
     packages=$("${haps[@]}" list)
     result=$?

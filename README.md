@@ -150,7 +150,7 @@ State defaults to the operating system's local application-data directory under
 
 #### Omarchy shell plugin
 
-The Omarchy v4 (Quattro) plugin adds **Haps** to the bar. Click it to find,
+The Omarchy v4 (Quattro) plugin, tested with 4.0.6, adds **Haps** to the bar. Click it to find,
 install, list, update, or remove packages in a keyboard-driven terminal menu.
 It uses the existing Haps CLI and its normal signature, audit, and trust checks.
 

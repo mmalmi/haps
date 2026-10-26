@@ -23,6 +23,8 @@ class MenuTests(unittest.TestCase):
         self.assertNotIn('"package"', result.stdout)
         empty = subprocess.run([sys.executable, '-c', omarchy.SEARCH_FORMATTER], input='[]', text=True, capture_output=True, check=True)
         self.assertIn('No matching packages', empty.stdout)
+        installed = subprocess.run([sys.executable, '-c', omarchy.SEARCH_FORMATTER, 'list'], input='[]', text=True, capture_output=True, check=True)
+        self.assertIn('No installed packages.', installed.stdout)
 
     def test_plugin_launch_quotes_paths_for_omarchy_terminal(self):
         with patch.object(omarchy.subprocess, 'call', return_value=0) as call:
