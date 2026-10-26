@@ -4,7 +4,8 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{path::Path, process::Command};
 mod failure;
-pub use failure::{Finding, retain_failed};
+pub mod repair;
+pub use failure::{Finding, retain_failed, retain_failed_release};
 
 pub const REVIEW_SCOPE: &str = "Inspect the exact source, recipe, and direct/transitive runtime and build dependencies, including install hooks and build scripts. Read pinned dependency source independently; do not run npm install, builds, hooks, or project/dependency scripts during review. Check that downloads are content-pinned and verified before use. Record dependency versions, sources, findings, unreviewed parts, and OS/toolchain assumptions; a hash alone is not a code audit.";
 
@@ -49,6 +50,29 @@ pub struct BuildIdentity {
 pub fn recipe_sha256(recipe: &crate::build::Recipe) -> Result<String> {
     use sha2::{Digest, Sha256};
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(recipe)?)))
+}
+
+pub fn local_build_metadata(recipe_hash: &str, manifest: &str) -> Result<semver::BuildMetadata> {
+    use sha2::{Digest, Sha256};
+    let build_id = hex::encode(Sha256::digest(format!("{recipe_hash}:{manifest}")));
+    Ok(semver::BuildMetadata::new(&format!(
+        "haps.{}",
+        &build_id[..20]
+    ))?)
+}
+
+/// A published local build retains the committed version plus an identifier
+/// derived from the exact recipe and payload. No other metadata may differ.
+pub fn recipe_matches_release(
+    recipe: &crate::build::Recipe,
+    release: &crate::model::Release,
+) -> Result<bool> {
+    if recipe.package == release.data.package {
+        return Ok(true);
+    }
+    let mut package = recipe.package.clone();
+    package.version.build = local_build_metadata(&recipe_sha256(recipe)?, &release.data.manifest)?;
+    Ok(package == release.data.package)
 }
 
 fn runner() -> Command {
@@ -158,7 +182,18 @@ pub fn review(
     interactive: bool,
 ) -> Result<Review> {
     let (progress, _reporter) = Progress::stderr(true)?;
-    review_with_progress(checkout, agent, model, interactive, &progress)
+    review_with_progress(checkout, agent, model, interactive, &progress, None)
+}
+
+pub fn review_repair(
+    checkout: &crate::build::Checkout,
+    agent: &str,
+    model: Option<&str>,
+    interactive: bool,
+    repair: &repair::ReviewContext,
+) -> Result<Review> {
+    let (progress, _reporter) = Progress::stderr(true)?;
+    review_with_progress(checkout, agent, model, interactive, &progress, Some(repair))
 }
 
 fn review_with_progress(
@@ -167,11 +202,18 @@ fn review_with_progress(
     model: Option<&str>,
     interactive: bool,
     progress: &Progress,
+    repair: Option<&repair::ReviewContext>,
 ) -> Result<Review> {
     progress.clear();
     let root = checkout.root();
     eprintln!("Audit source: {}", root.display());
     eprintln!("Build recipe: {}", serde_json::to_string(&checkout.recipe)?);
+    if let Some(repair) = repair {
+        eprintln!("Repair review: {}", serde_json::to_string(repair)?);
+        eprintln!(
+            "Check the original findings are resolved and review the complete fork. Stop if it is unsafe or the evidence is incomplete."
+        );
+    }
     let review = if agent == "manual" {
         ensure!(model.is_none(), "a model applies only to an agent review");
         ensure!(
@@ -208,7 +250,11 @@ fn review_with_progress(
         );
         progress.stage(format!("Reviewing source with {agent}"));
         let input = tempfile::NamedTempFile::new()?;
-        crate::model::atomic_write(input.path(), &serde_json::to_vec(&checkout.recipe)?)?;
+        let mut packet = serde_json::to_value(&checkout.recipe)?;
+        if let Some(repair) = repair {
+            packet["repair_review"] = serde_json::to_value(repair)?;
+        }
+        crate::model::atomic_write(input.path(), &serde_json::to_vec(&packet)?)?;
         let output = runner()
             .arg("review")
             .arg(&root)
@@ -268,13 +314,13 @@ pub async fn review_and_rebuild(
     )?;
     let result = async {
         ensure!(
-            checkout.recipe.package == release.data.package,
+            recipe_matches_release(&checkout.recipe, release)?,
             "source recipe does not describe the exact published package"
         );
         progress.stage("Checking published package manifest");
         let manifest: crate::model::Manifest = repository.json(&release.data.manifest).await?;
         manifest.validate(&release.data.package)?;
-        let review = review_with_progress(&checkout, agent, model, interactive, &progress)?;
+        let review = review_with_progress(&checkout, agent, model, interactive, &progress, None)?;
         let evidence = rebuild(
             home,
             release,
@@ -287,7 +333,7 @@ pub async fn review_and_rebuild(
         Ok((evidence, review.note))
     }
     .await;
-    result.map_err(|error| retain_failed(checkout, error))
+    result.map_err(|error| retain_failed_release(checkout, error, Some(release)))
 }
 
 async fn rebuild(
@@ -470,7 +516,7 @@ pub async fn finish(
     let evidence = if let Some(recipe) = recipe {
         let checkout = crate::build::Checkout::with_recipe(checkout, recipe)?;
         ensure!(
-            checkout.recipe.package == release.data.package,
+            recipe_matches_release(&checkout.recipe, &release)?,
             "source recipe does not describe the exact published package"
         );
         rebuild(home, &release, &checkout, reviewer, &progress, execution).await?

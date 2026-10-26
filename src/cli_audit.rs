@@ -72,6 +72,9 @@ pub(super) async fn run(
     non_interactive: bool,
 ) -> Result<()> {
     match action {
+        AuditAction::Repair { action } => {
+            crate::cli_repair::run(home, config, trust, action, non_interactive).await?;
+        }
         AuditAction::Settings {
             agent,
             model,

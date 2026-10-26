@@ -63,6 +63,8 @@ assert '--ignore-user-config' in sys.argv
 assert '--sandbox' in sys.argv and 'read-only' in sys.argv
 assert 'shell_tool' in sys.argv
 pathlib.Path(os.environ['AGENT_CALLED']).write_text('called')
+if os.environ.get('AGENT_PROMPT'):
+    pathlib.Path(os.environ['AGENT_PROMPT']).write_text(prompt)
 if '--model' in sys.argv:
     print('model: ' + sys.argv[sys.argv.index('--model') + 1], file=sys.stderr)
 out = pathlib.Path(sys.argv[sys.argv.index('--output-last-message') + 1])
@@ -285,6 +287,137 @@ out.write_text(json.dumps({'verdict': os.environ.get('AUDIT_VERDICT', 'pass'), '
         self.assertTrue((reports[0].parent / 'repo/build.py').is_file())
         self.assertIn('audit source retained', result.stderr)
         self.assertFalse((self.home / 'discovery/outbox').exists())
+
+    def repair_fixture(self, runnable=False):
+        self.publish(runnable=runnable)
+        self.env['AUDIT_VERDICT'] = 'block'
+        self.run_cli('install', self.package, '--audit-agent', 'codex', success=False)
+        failed = next(self.home.glob('audits/work/*/audit-failure.json'))
+        # Preparation must never copy a compromised retained worktree.
+        (failed.parent / 'repo/untracked-danger').write_text('do not copy')
+        prepared = self.run_cli('audit', 'repair', 'prepare', str(failed))
+        session = next((self.home / 'audits/repairs').iterdir())
+        self.assertIn('Stop here if the package is not worth repairing', prepared.stdout)
+        self.assertFalse((session / 'repo/untracked-danger').exists())
+        self.assertEqual(json.loads(failed.read_text()), json.loads((session / 'audit-failure.json').read_text()))
+        self.assertFalse((self.root / 'build-called').exists())
+        self.assertFalse((self.home / 'installed.json').exists())
+        return session
+
+    def commit_repair(self, session, version='1.0.1'):
+        source = session / 'repo'
+        recipe = source / 'haps-build.toml'
+        recipe.write_text(recipe.read_text().replace('version="1.0.0"', f'version="{version}"'))
+        def git(*args):
+            return subprocess.check_output(['git', '-C', str(source), *args], stderr=subprocess.DEVNULL, text=True).strip()
+        git('config', 'user.name', 'Test')
+        git('config', 'user.email', 'test@example.invalid')
+        git('add', '.')
+        git('commit', '--allow-empty', '-m', 'Repair fixture')
+        return git('rev-parse', 'HEAD')
+
+    def build_repair(self, session, revision, success=True, repository=None):
+        return self.run_cli('audit', 'repair', 'build', session.name,
+                            '--repository', repository or (session / 'repo').as_uri(),
+                            '--rev', revision, '--note', 'Fixed the fixture finding',
+                            '--audit-agent', 'codex', '--allow-host-build', success=success)
+
+    def test_repair_can_be_declined_and_rejected_again_without_build_or_publication(self):
+        session = self.repair_fixture()
+        revision = self.commit_repair(session)
+        for verdict in ('block', 'incomplete'):
+            with self.subTest(verdict=verdict):
+                self.env['AUDIT_VERDICT'] = verdict
+                self.build_repair(session, revision, success=False)
+                self.assertFalse((self.root / 'build-called').exists())
+                self.assertIsNone(json.loads((session / 'ready.json').read_text()))
+                self.run_cli('audit', 'repair', 'publish', session.name, '--name', 'fixed', success=False)
+        self.assertFalse((self.home / 'discovery/outbox').exists())
+        self.assertFalse((self.home / 'installed.json').exists())
+
+    def test_repair_reviews_fresh_commit_and_signs_only_own_payload(self):
+        session = self.repair_fixture()
+        revision = self.commit_repair(session)
+        self.env['AUDIT_VERDICT'] = 'pass'
+        self.env['AGENT_PROMPT'] = str(self.root / 'prompt')
+        self.run_cli('audit', 'settings', '--publish', 'true')
+        # Dirty edits are not part of the explicitly pinned commit.
+        (session / 'repo/build.py').write_text('raise RuntimeError("dirty checkout executed")')
+        built = self.build_repair(session, revision)
+        self.assertIn('Nothing installed or published', built.stdout)
+        self.assertTrue((self.root / 'build-called').exists())
+        prompt = (self.root / 'prompt').read_text()
+        self.assertIn('repair_review', prompt)
+        self.assertIn(self.release['id'], prompt)
+        self.assertIn('Fixed the fixture finding', prompt)
+        self.assertNotIn('dirty checkout executed', prompt)
+        self.assertFalse((self.home / 'discovery/outbox').exists())
+        self.assertFalse((self.home / 'installed.json').exists())
+        own = self.run_cli('identity', 'show').stdout.strip()
+        info = json.loads(self.run_cli('info', f'{own}/hello', '--json').stdout)
+        evidence = info['audits'][0]['evidence']
+        self.assertIn(self.release['id'], evidence['provenance'])
+        self.assertIn('Fixed the fixture finding', evidence['provenance'])
+        self.assertFalse(evidence['binary_match'])
+        self.assertEqual(json.loads(self.run_cli('info', self.package, '--json').stdout)['audits'], [])
+        denied = self.run_cli('audit', 'repair', 'publish', session.name, '--name', 'fixed', success=False)
+        self.assertIn('local source paths cannot be published', denied.stderr)
+        self.run_cli('install', f'{own}/hello')
+        receipt = next(iter(json.loads((self.home / 'installed.json').read_text()).values()))
+        self.assertEqual(receipt['current']['pubkey'], own)
+        catalog = session / 'builds' / json.loads((session / 'ready.json').read_text())['attempt'] / 'catalog'
+        self.assertFalse((catalog / 'audit-failure.json').exists())
+        # Another reader must be able to audit/reproduce the committed version
+        # despite the content-derived +haps suffix on the signed release.
+        reader = self.root / 'independent-reader'
+        self.run_cli('identity', 'init', home=reader)
+        self.run_cli('follow', own, home=reader)
+        self.run_cli('source', 'add', 'repair', str(catalog), '--author', own, home=reader)
+        self.run_cli('install', f'{own}/hello', '--audit-agent', 'codex', home=reader)
+        reviewed = json.loads(self.run_cli('info', f'{own}/hello', '--json', home=reader).stdout)
+        self.assertTrue(reviewed['audits'][0]['evidence']['binary_match'])
+        installed = next(iter(json.loads((reader / 'installed.json').read_text()).values()))
+        self.assertEqual(installed['current']['pubkey'], own)
+
+    def test_failed_repair_retry_invalidates_publish_selection_but_preserves_previous_build(self):
+        session = self.repair_fixture()
+        revision = self.commit_repair(session)
+        self.env['AUDIT_VERDICT'] = 'pass'
+        self.build_repair(session, revision)
+        previous = json.loads((session / 'ready.json').read_text())
+        self.env['AUDIT_VERDICT'] = 'block'
+        self.build_repair(session, revision, success=False)
+        self.assertTrue((session / 'builds' / previous['attempt'] / 'catalog/catalog.json').exists())
+        result = self.run_cli('audit', 'repair', 'publish', session.name, '--name', 'fixed', success=False)
+        self.assertIn('latest repair attempt did not complete', result.stderr)
+
+    @unittest.skipUnless(sys.platform in ('linux', 'darwin'), 'requires native build isolation')
+    def test_repair_defaults_to_isolated_build_with_network_disabled(self):
+        session = self.repair_fixture(runnable=True)
+        revision = self.commit_repair(session)
+        self.env['AUDIT_VERDICT'] = 'pass'
+        out = self.run_cli('audit', 'repair', 'build', session.name,
+                           '--repository', (session / 'repo').as_uri(), '--rev', revision,
+                           '--note', 'Reviewed fixture fix', '--audit-agent', 'codex')
+        self.assertIn('Isolated files and environment; network disabled.', out.stderr)
+        self.assertIsNotNone(json.loads((session / 'ready.json').read_text()))
+
+    def test_repair_requires_new_version_and_real_descendant_commit(self):
+        session = self.repair_fixture()
+        original = json.loads((session / 'audit-failure.json').read_text())['recipe']['package']['source']['rev']
+        denied = self.build_repair(session, original, success=False)
+        self.assertIn('newer package version', denied.stderr)
+        revision = self.commit_repair(session)
+        # Re-root the same tree: this is an unrelated project, not a descendant repair.
+        source = session / 'repo'
+        tree = subprocess.check_output(['git', '-C', str(source), 'rev-parse', f'{revision}^{{tree}}'], text=True).strip()
+        unrelated = subprocess.check_output(['git', '-C', str(source), 'commit-tree', tree, '-m', 'Unrelated'], text=True).strip()
+        subprocess.run(['git', '-C', str(source), 'update-ref', 'refs/heads/unrelated', unrelated], check=True)
+        denied = self.build_repair(session, unrelated, success=False)
+        self.assertIn('audited commit in its history', denied.stderr)
+        self.assertFalse((self.root / 'build-called').exists())
+        self.run_cli('audit', 'repair', 'build', '../escape', '--repository', source.as_uri(), '--rev', revision,
+                     '--note', 'Fix', '--audit-agent', 'codex', success=False)
 
     def test_enabled_source_scanner_still_blocks_an_audit_build(self):
         self.publish()

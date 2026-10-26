@@ -54,7 +54,7 @@ pub struct Checkout {
     pub recipe: Recipe,
 }
 
-fn git() -> Command {
+pub(crate) fn git() -> Command {
     let mut git = Command::new("git");
     // A preview must not execute globally configured checkout filters/hooks.
     git.env("GIT_CONFIG_NOSYSTEM", "1")

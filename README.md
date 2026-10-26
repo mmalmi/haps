@@ -685,6 +685,65 @@ can prevent identical output; Haps does not strip differences to manufacture a
 match. A match connects the reviewed source and build inputs to the payload; it
 does not prove the code safe or independently verify the compiler and dependencies.
 
+#### Repairing a failed audit
+
+A failed audit is a valid reason to stop using a package. Repair is optional:
+reject packages whose behavior, missing source, dependency risks, or maintenance
+burden make a trustworthy fix impractical. Haps never starts a repair automatically.
+
+For a finding you choose to fix, prepare a separate editable checkout from the
+exact audited commit. Pass the retained directory or its `audit-failure.json`:
+
+```sh
+haps audit repair prepare FAILED_AUDIT_DIRECTORY
+```
+
+The command prints a session name and source directory. It preserves the original
+report and recipe outside the checkout and runs no package code. Review those
+findings, edit the source yourself or with an agent, and test the fix. Commit the
+fix and a newer package version in `haps.toml` (legacy `haps-build.toml` also works).
+Keep the original audited commit in the fork's history. Respect the source license
+and publish the fork source to a repository you control when you intend to share it.
+
+```sh
+haps audit repair build SESSION --repository https://example.com/you/project.git \
+  --rev FULL_FIXED_COMMIT --note "Pinned and verified the build-time download" \
+  --audit-agent codex
+```
+
+This fetches the exact committed fork into a fresh checkout and requests a new
+source and recipe review informed by the prior findings, then builds only after
+a passing review. The normal agent review coverage limits still apply. A version
+bump or claimed fix alone is not approval. Blocked or incomplete reviews still
+stop execution. The usual source scans and build isolation apply; downloads need
+`--allow-build-network`. Manual review uses `--audit-agent manual` in a terminal.
+The committed source must include build instructions.
+
+The result is signed with your own publishing key and a distinct `+haps.…` build
+identifier. Its audit links the original commit, recipe hash, and original release
+when recorded. It approves only the repaired payload. The command prints an exact
+local installation command for testing; building does not install or publish,
+even when automatic audit publication is enabled.
+
+After testing, share that repair explicitly:
+
+```sh
+haps audit repair publish SESSION --name my-fixed-project
+```
+
+Publication includes only that build's package catalog and signed audit. Original
+failure reports and editable source stay local. Local `file://` source references
+cannot be published: publish the fork source first, then rebuild and review using
+its public `https://` or `htree://` URL. Review package metadata and the public
+repair summary before sharing. A failed newer build clears the publication
+selection while preserving previous catalogs and receipts for inspection. A
+withdrawn audit or active trusted warning also blocks publication. Upload or relay
+failures are reported; retry the publish command, or `haps sync` for queued events.
+
+Readers choose your qualified `PUBLISHER/package` explicitly. Existing upstream
+installations keep their publisher, and your publisher self-review does not count
+as an independent audit for other readers.
+
 #### Preparing a package for audit
 
 Human and agent reviewers should include the exact direct and transitive dependency

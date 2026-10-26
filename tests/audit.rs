@@ -8,6 +8,49 @@ use nostr::{EventBuilder, Keys, Kind, Tag};
 use std::{collections::BTreeMap, fs};
 
 #[tokio::test]
+async fn published_local_version_is_bound_to_exact_recipe_and_payload() -> anyhow::Result<()> {
+    let tmp = tempfile::tempdir()?;
+    let payload = tmp.path().join("payload");
+    fs::create_dir(&payload)?;
+    fs::write(payload.join("hello"), "reviewed bytes")?;
+    let repo = Repository::local(tmp.path().join("catalog"))?;
+    let mut recipe = haps::build::Recipe {
+        package: PackageSpec {
+            name: "hello".into(),
+            version: "1.0.1".parse()?,
+            target: target().into(),
+            description: "Repair".into(),
+            commands: BTreeMap::from([("hello".into(), "hello".into())]),
+            dependencies: vec![],
+            source: Some(haps::model::SourceInfo {
+                git: "https://example.invalid/fork".into(),
+                rev: "a".repeat(40),
+            }),
+            app: None,
+            desktop: None,
+        },
+        build: haps::build::Steps {
+            unavailable: None,
+            builder: haps::build::Builder::Commands,
+            commands: vec![vec!["compiler".into()]],
+            artifacts: BTreeMap::from([("hello".into(), "hello".into())]),
+        },
+    };
+    let manifest = repo.pack_payload(&recipe.package, &payload).await?;
+    let mut published = recipe.package.clone();
+    published.version.build =
+        haps::audit::local_build_metadata(&haps::audit::recipe_sha256(&recipe)?, &manifest)?;
+    let release = repo.publish(&Keys::generate(), published, &payload).await?;
+    assert!(haps::audit::recipe_matches_release(&recipe, &release)?);
+    recipe.build.commands[0].push("unreviewed-option".into());
+    assert!(!haps::audit::recipe_matches_release(&recipe, &release)?);
+    recipe.build.commands[0].pop();
+    recipe.package.description = "Different package metadata".into();
+    assert!(!haps::audit::recipe_matches_release(&recipe, &release)?);
+    Ok(())
+}
+
+#[tokio::test]
 async fn installation_requires_an_exact_current_audit_even_with_trust_overrides()
 -> anyhow::Result<()> {
     let tmp = tempfile::tempdir()?;

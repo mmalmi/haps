@@ -2,7 +2,7 @@
 use crate::{build::Checkout, model::atomic_write};
 use std::fmt;
 
-#[derive(Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Finding {
     pub verdict: String,
     pub note: String,
@@ -17,10 +17,20 @@ impl fmt::Display for Finding {
 impl std::error::Error for Finding {}
 
 pub fn retain_failed(checkout: Checkout, error: anyhow::Error) -> anyhow::Error {
+    retain_failed_release(checkout, error, None)
+}
+
+pub fn retain_failed_release(
+    checkout: Checkout,
+    error: anyhow::Error,
+    release: Option<&crate::model::Release>,
+) -> anyhow::Error {
     let report = serde_json::json!({
         "schema": "haps.failed-audit.v1",
         "error": format!("{error:#}"),
         "recipe": checkout.recipe,
+        "finding": error.downcast_ref::<Finding>(),
+        "release": release.map(|release| &release.event),
     });
     let directory = checkout.keep();
     let report_path = directory.join("audit-failure.json");
@@ -31,6 +41,9 @@ pub fn retain_failed(checkout: Checkout, error: anyhow::Error) -> anyhow::Error 
         eprintln!("Could not save audit findings: {save_error:#}");
     } else {
         eprintln!("Audit findings retained: {}", report_path.display());
+        eprintln!(
+            "You can stop using this package. If the findings are repairable, run haps audit repair prepare with the report path above (quoted if it contains spaces)."
+        );
     }
     error.context(format!(
         "audit source retained at {}",

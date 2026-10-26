@@ -3,6 +3,7 @@ mod cli_catalogs;
 mod cli_dependencies;
 mod cli_hash;
 mod cli_install;
+mod cli_repair;
 mod cli_source;
 
 use anyhow::{Context, Result, ensure};
@@ -104,6 +105,11 @@ struct AuditReviewArgs {
 
 #[derive(Subcommand)]
 enum AuditAction {
+    /// Optionally repair a failed audit, review the fork, and publish under your own key.
+    Repair {
+        #[command(subcommand)]
+        action: RepairAction,
+    },
     /// Clone pinned source to a private directory for a person or external agent.
     Prepare {
         package: String,
@@ -134,6 +140,40 @@ enum AuditAction {
         model: Option<String>,
         #[arg(long)]
         publish: Option<bool>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RepairAction {
+    /// Preserve a failed report and create an editable checkout. Does not run package code.
+    Prepare {
+        /// Retained audit directory or audit-failure.json printed by a failed audit.
+        failed: PathBuf,
+    },
+    /// Review a new pinned fork and build a locally signed package without installing.
+    Build {
+        session: String,
+        /// Fork Git URL. Use a public https:// or htree:// URL before publication.
+        #[arg(long)]
+        repository: String,
+        #[arg(long)]
+        rev: String,
+        /// Public summary of the fix, included in signed audit evidence.
+        #[arg(long)]
+        note: String,
+        #[arg(long)]
+        audit_agent: Option<String>,
+        #[arg(long)]
+        audit_model: Option<String>,
+        #[command(flatten)]
+        build_execution: BuildExecutionArgs,
+    },
+    /// Share the latest successfully reviewed repair and its audit under your key.
+    Publish {
+        session: String,
+        /// Stable Hashtree publication name for this package's repaired versions.
+        #[arg(long)]
+        name: String,
     },
 }
 

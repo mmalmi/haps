@@ -13,6 +13,11 @@ pub(super) struct InstallMode {
     pub allow_source_fallback: bool,
 }
 
+pub(super) struct RepairBuild {
+    pub catalog: std::path::PathBuf,
+    pub review: haps::audit::repair::ReviewContext,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn from_release(
     home: &Path,
@@ -78,7 +83,7 @@ pub(super) async fn from_release(
     let checkout = Checkout::with_recipe(source, recipe)?;
     let result = async {
     ensure!(
-        checkout.recipe.package == upstream.release.data.package,
+        haps::audit::recipe_matches_release(&checkout.recipe, &upstream.release)?,
         "source manifest does not describe the selected package"
     );
     progress.clear();
@@ -91,9 +96,11 @@ pub(super) async fn from_release(
         Some(previous)
     } else { None };
     build_reviewed(home, config, trust, &checkout, &options, non_interactive,
-        Some(upstream), mode.prefer_published, mode.allow_source_fallback, trusted).await
+        Some(upstream), mode.prefer_published, mode.allow_source_fallback, trusted, None).await
     }.await;
-    result.map_err(|error| haps::audit::retain_failed(checkout, error))
+    result.map_err(|error| {
+        haps::audit::retain_failed_release(checkout, error, Some(&upstream.release))
+    })
 }
 
 pub(super) async fn build(
@@ -115,6 +122,33 @@ pub(super) async fn build(
         false,
         true,
         None,
+        None,
+    )
+    .await;
+    result.map_err(|error| haps::audit::retain_failed(checkout, error))
+}
+
+pub(super) async fn build_repair(
+    home: &Path,
+    config: &mut Config,
+    trust: &mut Trust,
+    checkout: Checkout,
+    options: &AuditReviewArgs,
+    non_interactive: bool,
+    repair: &RepairBuild,
+) -> Result<Candidate> {
+    let result = build_reviewed(
+        home,
+        config,
+        trust,
+        &checkout,
+        options,
+        non_interactive,
+        None,
+        false,
+        true,
+        None,
+        Some(repair),
     )
     .await;
     result.map_err(|error| haps::audit::retain_failed(checkout, error))
@@ -132,6 +166,7 @@ async fn build_reviewed(
     prefer_published: bool,
     allow_source_fallback: bool,
     trusted: Option<(String, Evidence)>,
+    repair: Option<&RepairBuild>,
 ) -> Result<Candidate> {
     let execution = options.build_execution.execution();
     execution.preflight()?;
@@ -151,7 +186,7 @@ async fn build_reviewed(
     let reused_review = trusted.is_some();
     // Rebuilding someone else's review is useful local evidence, not another
     // independent source audit. Never automatically republish it as our review.
-    let publication = if reused_review {
+    let publication = if reused_review || repair.is_some() {
         (Some(false), false)
     } else {
         (options.publish_audit, interactive)
@@ -176,7 +211,17 @@ async fn build_reviewed(
                 .then(|| config.audit.model.clone())
                 .flatten()
         });
-        let review = haps::audit::review(checkout, &agent, model.as_deref(), interactive)?;
+        let review = if let Some(repair) = repair {
+            haps::audit::review_repair(
+                checkout,
+                &agent,
+                model.as_deref(),
+                interactive,
+                &repair.review,
+            )?
+        } else {
+            haps::audit::review(checkout, &agent, model.as_deref(), interactive)?
+        };
         (
             Some(review.reviewer),
             review.note,
@@ -206,8 +251,18 @@ async fn build_reviewed(
     progress.clear(); // Build commands own the terminal while they run.
     let payload = checkout.execute_with(execution)?;
     progress.stage("Recording the local build");
-    let repo = Repository::local(home.join("built-packages"))?;
-    let source_name = format!("local-builds-{}", &keys.public_key().to_hex()[..16]);
+    let repo = Repository::local(repair.map_or_else(
+        || home.join("built-packages"),
+        |repair| repair.catalog.clone(),
+    ))?;
+    let source_name = if let Some(repair) = repair {
+        format!(
+            "local-repair-{}",
+            &hex::encode(Sha256::digest(repair.catalog.to_string_lossy().as_bytes()))[..20]
+        )
+    } else {
+        format!("local-builds-{}", &keys.public_key().to_hex()[..16])
+    };
     let location = repo
         .path()
         .context("local repository missing")?
@@ -287,8 +342,7 @@ async fn build_reviewed(
     }
     // Include both inputs and output so two local builds cannot silently replace
     // one immutable release when a toolchain or dependency changes its output.
-    let build_id = hex::encode(Sha256::digest(format!("{recipe_hash}:{manifest}")));
-    package.version.build = semver::BuildMetadata::new(&format!("haps.{}", &build_id[..20]))?;
+    package.version.build = haps::audit::local_build_metadata(&recipe_hash, &manifest)?;
     let release = repo.publish_reusable(&keys, package, &payload).await?;
     let recipe_cid = repo.put_json(&checkout.recipe).await?;
     let evidence = Evidence {
@@ -299,7 +353,7 @@ async fn build_reviewed(
                 format!("{}-review-local-build", r.agent)
             }),
         provenance: format!(
-            "{reviewed_by} Built locally from reviewed pinned source {} and recipe {} (SHA-256 {}). {} This audit approves only this local payload. Dependencies and toolchain are not independently verified.",
+            "{reviewed_by} Built locally from reviewed pinned source {} and recipe {} (SHA-256 {}). {} This audit approves only this local payload. Dependencies and toolchain are not independently verified. {}",
             checkout
                 .recipe
                 .package
@@ -309,7 +363,8 @@ async fn build_reviewed(
                 .rev,
             recipe_cid,
             recipe_hash,
-            execution.description()
+            execution.description(),
+            repair.map_or_else(String::new, |repair| repair.review.provenance())
         ),
         binary_match: false,
         reviewer,

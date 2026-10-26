@@ -117,6 +117,13 @@ for dependency locks, verified downloads, prerequisites, and review coverage.
 
 ## Managed event catalogs
 
+To publish a fork after a failed audit, use the optional
+[repair workflow](README.md#repairing-a-failed-audit): preserve the findings with
+`haps audit repair prepare`, commit the fix in your own source repository, then
+run `haps audit repair build` for a fresh review and locally signed build.
+`haps audit repair publish` shares only that selected repair and its audit.
+You can stop at any step if the package is unsuitable for repair.
+
 For routine publishing, Haps can maintain the output directory and selected
 Nostr event index itself:
 
