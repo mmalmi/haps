@@ -14,6 +14,16 @@ omarchy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(omarchy)
 
 class MenuTests(unittest.TestCase):
+    def test_search_results_are_readable_and_strip_terminal_controls(self):
+        rows = [{'label': 'publisher/app', 'package': {'version': '1.2.3', 'description': 'Hello\x1b[2J\nworld', 'target': 'x86_64-unknown-linux-gnu'}, 'audits': [{}], 'warnings': []}]
+        result = subprocess.run([sys.executable, '-c', omarchy.SEARCH_FORMATTER], input=json.dumps(rows), text=True, capture_output=True, check=True)
+        self.assertIn('publisher/app  1.2.3', result.stdout)
+        self.assertIn('Audits: 1 · Warnings: 0', result.stdout)
+        self.assertNotIn('\x1b', result.stdout)
+        self.assertNotIn('"package"', result.stdout)
+        empty = subprocess.run([sys.executable, '-c', omarchy.SEARCH_FORMATTER], input='[]', text=True, capture_output=True, check=True)
+        self.assertIn('No matching packages', empty.stdout)
+
     def test_plugin_launch_quotes_paths_for_omarchy_terminal(self):
         with patch.object(omarchy.subprocess, 'call', return_value=0) as call:
             omarchy.launch_plugin()
@@ -103,7 +113,7 @@ class MenuTests(unittest.TestCase):
                 return result.returncode, args
             package = '--allow-unaudited; $(touch should-not-exist)'
             self.assertEqual(run('menu', package + '\n\n', HAPS_TEST_PICK='install'), (0, [['install', '--', package]]))
-            self.assertEqual(run('search', package + '\n\n', HAPS_TEST_STATUS='7'), (7, [['search', '--', package]]))
+            self.assertEqual(run('search', package + '\n\n', HAPS_TEST_STATUS='7'), (7, [['search', '--json', '--', package]]))
             self.assertEqual(run('update'), (0, [['list'], ['update', '--', 'publisher/app']]))
             self.assertEqual(run('update', HAPS_TEST_STATUS='7'), (7, [['list']]))
             self.assertEqual(run('remove'), (0, [['list'], ['remove', '--', 'publisher/app']]))
