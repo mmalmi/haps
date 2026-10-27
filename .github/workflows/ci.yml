@@ -28,7 +28,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap apparmor apparmor-profiles fzf
+          sudo apt-get install -y bubblewrap apparmor apparmor-profiles
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] &&
              [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1 ]; then
             # Load Ubuntu's scoped bwrap profile; retain the host-wide restriction.
@@ -41,6 +41,15 @@ jobs:
           # Fail before compiling if this runner cannot provide build isolation.
           /usr/bin/bwrap --unshare-all --unshare-user --die-with-parent \
             --disable-userns --cap-drop ALL --ro-bind / / -- /bin/true
+      - name: Install the supported Omarchy picker
+        if: runner.os == 'Linux'
+        run: |
+          curl --fail --location --retry 3 https://github.com/junegunn/fzf/releases/download/v0.74.5/fzf-0.74.5-linux_amd64.tar.gz -o "$RUNNER_TEMP/fzf.tar.gz"
+          echo 'd47d7f882972c7d674dbbba998ffa4116e68379616ffac7695d0671e9a722c5f  '"$RUNNER_TEMP/fzf.tar.gz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/fzf"
+          tar -xzf "$RUNNER_TEMP/fzf.tar.gz" -C "$RUNNER_TEMP/fzf" fzf
+          sudo install -m 755 "$RUNNER_TEMP/fzf/fzf" /usr/local/bin/fzf
+          /usr/local/bin/fzf --version
       - name: Check all targets with Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test native installation and package lifecycle
@@ -48,7 +57,7 @@ jobs:
       - name: Test installers and Omarchy integration
         if: runner.os == 'Linux'
         env:
-          HAPS_TEST_FZF: /usr/bin/fzf
+          HAPS_TEST_FZF: /usr/local/bin/fzf
         run: python3 -m unittest discover -s tests -p '*_test.py'
       - name: Verify the publishable crate
         if: runner.os == 'Linux'

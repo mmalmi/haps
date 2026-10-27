@@ -175,7 +175,8 @@ Press **Ctrl-R** to refresh. Installation pins both the selected version and its
 signed release ID and runs fresh trust checks.
 After upgrading Haps, run `haps omarchy` again to update the installed menu helper.
 
-This integration needs Omarchy v4, Python 3, Bash, and `fzf`. It preserves
+This integration needs Omarchy v4, Python 3, Bash, and `fzf` 0.71 or newer
+to keep the selected package stable while results update. It preserves
 custom menu entries and comments, saves the original as
 `omarchy-menu.jsonc.haps-backup`, and migrates older Haps-owned menu entries.
 It adds no bar button or background updates. The package menus are available in Haps 0.1.21 and newer; older releases

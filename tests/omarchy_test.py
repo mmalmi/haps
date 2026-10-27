@@ -203,7 +203,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json, os, re, shlex, subprocess, sys, time
 from pathlib import Path
 if '--help' in sys.argv:
-    print('--id-nth')
+    print(os.environ.get('FZF_TEST_HELP', '--id-nth'))
     sys.exit(0)
 root = Path(os.environ['HOME'])
 work = Path(os.environ['HAPS_PICKER_DIR'])
@@ -307,6 +307,15 @@ class PickerFixture(unittest.TestCase):
 
 
 class PickerTests(PickerFixture):
+    def test_old_fzf_is_rejected_before_search_or_picker_starts(self):
+        child = self.start([], FZF_TEST_HELP='--track')
+        _, error = self.finish(child, 1)
+        self.assertIn('fzf 0.71 or newer', error)
+        self.assertNotIn('Traceback', error)
+        self.assertFalse((self.root / 'search-pids').exists())
+        self.assertFalse((self.root / 'picker-pids').exists())
+        self.assertFalse((self.root / 'installed').exists())
+
     def test_opens_before_first_snapshot_and_selects_before_search_eof(self):
         row = package()
         child = self.start([{'frames': [{'wait': 'send', 'rows': []}, {'rows': [row]}], 'hold': True}])
@@ -525,7 +534,29 @@ class RealPickerTests(PickerFixture):
         self.rendered(b'd' * 40)
         self.output.clear()
         (self.root / 'next').touch()
-        self.rendered(b'second/app')
+        # Wait for the focused release preview, not just a row elsewhere in the list.
+        self.rendered(b'd' * 40)
+        os.write(self.master, b'\r')
+        self.assertEqual(self.wait_terminal(), 0)
+        self.assertEqual(json.loads((self.root / 'installed').read_text())[-1], second['identity'])
+        self.assert_search_reaped()
+
+    def test_real_fzf_tracks_filtered_selection_after_removal_and_metadata_change(self):
+        outside = package(label='outside/app')
+        first = package(publisher='b', label='needle first/app')
+        second = package('2.0.0', 'd', publisher='c', label='needle second/app')
+        changed = dict(second, package=dict(second['package'], description='Updated description'))
+        self.terminal([{'frames': [{'rows': [outside, first, second]},
+                                  {'wait': 'next', 'rows': [outside, changed]}], 'hold': True}])
+        self.rendered(b'outside/app')
+        os.write(self.master, b'needle')
+        self.rendered(b'needle first/app')
+        os.write(self.master, b'\x1b[B')
+        self.rendered(b'd' * 40)
+        self.output.clear()
+        (self.root / 'next').touch()
+        self.rendered(b'Updated description')
+        self.rendered(b'd' * 40)
         os.write(self.master, b'\r')
         self.assertEqual(self.wait_terminal(), 0)
         self.assertEqual(json.loads((self.root / 'installed').read_text())[-1], second['identity'])

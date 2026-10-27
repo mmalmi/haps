@@ -397,7 +397,7 @@ enum Command {
     },
     /// Show an installed directory (including native app bundles).
     Path { package: String },
-    /// Add Haps to Omarchy's package menus (requires Python 3 and fzf).
+    /// Add Haps to Omarchy's package menus (requires Python 3 and fzf 0.71+).
     #[cfg(target_os = "linux")]
     Omarchy {
         /// Remove only the menu entries installed by Haps.
