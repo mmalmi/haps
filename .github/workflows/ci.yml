@@ -69,7 +69,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: haps-crate-verified
-          path: target/package/haps-*.crate
+          path: target/package/**/haps-*.crate
           if-no-files-found: error
           retention-days: 7
       - name: Build and install an audited PKGBUILD using Arch tooling
