@@ -150,7 +150,9 @@ def update_picker(port, key, actions):
 def search_pick(haps, target):
     query = ''
     help_text = subprocess.check_output(['fzf', '--help'], text=True)
-    tracking = ['--track', '--id-nth=1'] if '--id-nth' in help_text else []
+    tracking = ['--track'] if '--track' in help_text or '--id-nth' in help_text else []
+    if '--id-nth' in help_text:
+        tracking.append('--id-nth=1')
     while True:
         with tempfile.TemporaryDirectory(prefix='haps-picker-') as directory:
             root = Path(directory)
