@@ -190,7 +190,7 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
                 .unwrap()
                 .contains("selected release changed")
         );
-        assert!(Installation::new(&home)?.receipt("hello").is_err());
+        assert!(Installation::new(home.clone())?.receipt("hello").is_err());
         let result = run(&[
             "--non-interactive",
             "install",
