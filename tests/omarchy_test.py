@@ -6,6 +6,7 @@ import subprocess
 import shlex
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +15,129 @@ omarchy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(omarchy)
 
 class MenuTests(unittest.TestCase):
+    def test_search_reopens_saved_results_refreshes_and_invalidates_changed_trust(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            row = {'identity': 'a' * 64 + '/app', 'label': 'publisher/app',
+                   'publisher': 'a' * 64, 'release_id': 'b' * 64,
+                   'package': {'version': '1.0.0', 'target': 'test-linux'}}
+            (root / 'rows').write_text(json.dumps([row]))
+            executable = root / 'haps'
+            executable.write_text('''#!/usr/bin/env python3
+import json, os, sys, time
+from pathlib import Path
+root = Path(sys.argv[2])
+args = sys.argv[3:]
+with (root / 'calls').open('a') as file:
+    file.write(json.dumps(args) + '\\n')
+if args[0] == 'target':
+    print('test-linux')
+elif args[0] == 'search':
+    (root / 'search.pid').write_text(str(os.getpid()))
+    time.sleep(float(os.environ.get('SEARCH_DELAY', '0')))
+    if os.environ.get('SEARCH_FAIL'):
+        sys.exit(7)
+    print((root / 'rows').read_text())
+''')
+            executable.chmod(0o755)
+            picker = root / 'fzf'
+            picker.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+root = Path(os.environ['HOME'])
+rows = sys.stdin.read().splitlines()
+(root / 'shown').write_text(json.dumps(rows))
+(root / 'header').write_text(next(arg for arg in sys.argv if arg.startswith('--header=')))
+if (root / 'refresh').exists():
+    (root / 'refresh').unlink()
+    print('ctrl-r')
+elif os.environ.get('PICK_INSTALL'):
+    print('')  # fzf --expect emits an empty key line for Enter.
+    print(rows[0])
+else:
+    sys.exit(130)
+''')
+            picker.chmod(0o755)
+            env = dict(os.environ, HOME=tmp, PATH=tmp + os.pathsep + os.environ['PATH'])
+
+            def run(**extra):
+                (root / 'calls').unlink(missing_ok=True)
+                result = subprocess.run(
+                    [sys.executable, '-c', omarchy.PACKAGE_PICKER,
+                     'search', str(executable), '--home', tmp],
+                    env=dict(env, **extra), text=True, capture_output=True, timeout=5)
+                calls = [json.loads(line) for line in (root / 'calls').read_text().splitlines()]
+                return result, calls
+
+            result, calls = run()
+            self.assertEqual(result.returncode, 130, result.stderr)
+            self.assertEqual(calls, [['target'], ['search', '--json', '--', '']])
+            result, calls = run(SEARCH_FAIL='1', PICK_INSTALL='1')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls, [['target'], ['install', '--version', '1.0.0', '--', row['identity']]])
+            self.assertIn('Saved list from', (root / 'header').read_text())
+            self.assertIn('Ctrl-R: refresh', (root / 'header').read_text())
+
+            row['package']['version'] = '2.0.0'
+            (root / 'rows').write_text(json.dumps([row]))
+            (root / 'refresh').touch()
+            result, calls = run(PICK_INSTALL='1')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(calls, [['target'], ['search', '--json', '--', ''],
+                                     ['install', '--version', '2.0.0', '--', row['identity']]])
+
+            (root / 'refresh').touch()
+            result, calls = run(SEARCH_FAIL='1')
+            self.assertEqual(result.returncode, 130, result.stderr)
+            self.assertIn('Refresh failed', result.stderr)
+            self.assertIn('showing previous list', (root / 'header').read_text())
+            self.assertIn('2.0.0', (root / 'shown').read_text())
+
+            for filename in ('social.json', 'config.json'):
+                (root / filename).write_text('{}')
+                result, calls = run()
+                self.assertEqual(result.returncode, 130, result.stderr)
+                self.assertEqual(calls, [['target'], ['search', '--json', '--', '']])
+
+            (root / 'integrations/omarchy-search.json').write_text('{broken')
+            result, calls = run()
+            self.assertEqual(result.returncode, 130, result.stderr)
+            self.assertEqual(calls, [['target'], ['search', '--json', '--', '']])
+
+            (root / 'rows').write_text('[]')
+            (root / 'refresh').touch()
+            result, calls = run()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn('No packages found', result.stdout)
+            result, calls = run()
+            self.assertEqual(calls, [['target'], ['search', '--json', '--', '']])
+
+    def test_slow_search_reports_progress_and_timeout_reaps_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            executable = root / 'haps'
+            executable.write_text('''#!/usr/bin/env python3
+import os, sys, time
+from pathlib import Path
+if sys.argv[1] == 'target':
+    print('test-linux')
+else:
+    Path(os.environ['HOME'], 'search.pid').write_text(str(os.getpid()))
+    time.sleep(30)
+''')
+            executable.chmod(0o755)
+            script = omarchy.PACKAGE_PICKER.replace('SEARCH_POLL_SECONDS = 5', 'SEARCH_POLL_SECONDS = 0.1')
+            script = script.replace('SEARCH_TIMEOUT_SECONDS = 120', 'SEARCH_TIMEOUT_SECONDS = 0.4')
+            started = time.monotonic()
+            result = subprocess.run([sys.executable, '-c', script, 'search', str(executable)],
+                                    env=dict(os.environ, HOME=tmp), text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('Still finding packages', result.stderr)
+            self.assertIn('Package search timed out', result.stderr)
+            self.assertLess(time.monotonic() - started, 5)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int((root / 'search.pid').read_text()), 0)
+
     def test_search_results_are_readable_and_strip_terminal_controls(self):
         rows = [{'label': 'publisher/app', 'package': {'version': '1.2.3', 'description': 'Hello\x1b[2J\nworld', 'target': 'x86_64-unknown-linux-gnu'}, 'audits': [{}], 'warnings': []}]
         result = subprocess.run([sys.executable, '-c', omarchy.SEARCH_FORMATTER], input=json.dumps(rows), text=True, capture_output=True, check=True)
@@ -44,7 +168,7 @@ class MenuTests(unittest.TestCase):
             self.assertEqual(argv[:2], ['bash', '-c'])
             self.assertEqual(argv[3:], ['haps-menu', 'menu'])
             self.assertIn("haps=('/some path/haps')", argv[2])
-            self.assertNotIn('--home', argv[2])
+            self.assertNotIn('--home', argv[2].splitlines()[2])
 
     def test_menu_finds_existing_install_outside_desktop_path(self):
         with tempfile.TemporaryDirectory() as tmp, \
@@ -83,13 +207,13 @@ class MenuTests(unittest.TestCase):
                 return result.returncode, args
             package = '--allow-unaudited; $(touch should-not-exist)'
             self.assertEqual(run('menu', package + '\n\n', HAPS_TEST_PICK='install'), (0, [['install', '--', package]]))
-            self.assertEqual(run('search', HAPS_TEST_STATUS='7'), (7, [['search', '--json', '--', '']]))
-            self.assertEqual(run('search'), (0, [['search', '--json', '--', ''], ['target'], ['install', '--version', '1.0.0', '--', row['identity']]]))
+            self.assertEqual(run('search', HAPS_TEST_STATUS='7'), (7, [['target']]))
+            self.assertEqual(run('search'), (0, [['target'], ['search', '--json', '--', ''], ['install', '--version', '1.0.0', '--', row['identity']]]))
             self.assertEqual(run('update'), (0, [['list', '--json'], ['update', '--', row['identity']]]))
             self.assertEqual(run('update', HAPS_TEST_STATUS='7'), (7, [['list', '--json']]))
             self.assertEqual(run('remove'), (0, [['list', '--json'], ['remove', '--', row['identity']]]))
             self.assertEqual(run('remove', HAPS_TEST_PICK='cancel'), (0, [['list', '--json']]))
-            self.assertEqual(run('search', HAPS_TEST_ROWS='[]'), (0, [['search', '--json', '--', ''], ['target']]))
+            self.assertEqual(run('search', HAPS_TEST_ROWS='[]'), (0, [['target'], ['search', '--json', '--', '']]))
             self.assertEqual(run('menu', HAPS_TEST_PICK='cancel'), (0, []))
             self.assertEqual(run('install', ''), (0, []))
             self.assertEqual(run('unknown'), (2, []))

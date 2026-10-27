@@ -168,6 +168,14 @@ Enter to install the selected version. **Update > Haps** and **Remove > Haps**
 show installed packages in the same picker. These actions retain Haps' normal
 signature, audit, and trust checks. System packages remain managed by Omarchy.
 
+From Haps 0.1.22, the install picker reuses its last successful package list so
+reopening does not repeat the network search. The saved list's date is shown;
+press **Ctrl-R** to refresh packages and preview details. Changes to the saved configuration or social
+graph invalidate the list, and installation always runs fresh trust checks.
+Network searches report elapsed time every five seconds and stop after two
+minutes if they cannot finish. A failed refresh keeps the previous list available.
+After upgrading Haps, run `haps omarchy` again to update the installed menu helper.
+
 This integration needs Omarchy v4, Python 3, Bash, and `fzf`. It preserves
 custom menu entries and comments, saves the original as
 `omarchy-menu.jsonc.haps-backup`, and migrates older Haps-owned menu entries.
