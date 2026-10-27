@@ -1275,12 +1275,16 @@ After committing a version bump, pushing `master`, and waiting for CI:
 
 ```sh
 git tag vX.Y.Z
+git push origin master
 git push github vX.Y.Z
 gh workflow run release.yml --repo mmalmi/haps -f tag=vX.Y.Z
 # Once the workflow succeeds, mirror its exact assets using the maintainer's htree identity:
 python3 scripts/publish-hashtree-release.py --tag vX.Y.Z --expected-root VERIFIED_RELEASES_ROOT_CID
 ```
 
+GitHub release workflow first cold-fetches the tagged commit from the configured
+Hashtree source and refuses to publish binaries if its history is incomplete.
+The `origin` push above uploads source through this repository's Hashtree remote.
 Resolve and verify the current `releases/haps` root before mirroring; the
 `--expected-root` check protects existing release history. The mirror command
 verifies asset sizes/checksums and the tag's source commit,
