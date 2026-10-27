@@ -9,7 +9,18 @@ import subprocess
 import tempfile
 
 
-def verify(source, revision, helpers):
+def clone_timeout_seconds(value):
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError, OverflowError):
+        raise argparse.ArgumentTypeError('Clone timeout must be an integer from 1 to 1800 seconds') from None
+    if not 1 <= seconds <= 1800:
+        raise argparse.ArgumentTypeError('Clone timeout must be from 1 to 1800 seconds')
+    return seconds
+
+
+def verify(source, revision, helpers, clone_timeout=300):
+    clone_timeout = clone_timeout_seconds(clone_timeout)
     if not source.startswith('htree://') or not re.fullmatch(r'[0-9a-fA-F]{40}|[0-9a-fA-F]{64}', revision):
         raise ValueError('Expected an explicit Hashtree source URL and full commit hash')
     with tempfile.TemporaryDirectory(prefix='public-source-') as temporary:
@@ -25,7 +36,7 @@ def verify(source, revision, helpers):
             env.pop(name, None)
         command = ['git', '-c', 'protocol.ext.allow=never']
         subprocess.run([*command, 'clone', '--no-local', '--no-checkout', '--', source, str(root / 'repo')],
-                       check=True, env=env, timeout=300)
+                       check=True, env=env, timeout=clone_timeout)
         def git(*args):
             return subprocess.check_output([*command, '-C', str(root / 'repo'), *args],
                                            env=env, text=True, timeout=120).strip()
@@ -42,5 +53,7 @@ if __name__ == '__main__':
     parser.add_argument('--config', type=Path, default=Path('haps-release.json'))
     parser.add_argument('--commit', required=True)
     parser.add_argument('--helpers', type=Path, required=True)
+    parser.add_argument('--clone-timeout', type=clone_timeout_seconds, default=300, metavar='SECONDS',
+                        help='Cold clone deadline, from 1 to 1800 seconds (default: 300)')
     args = parser.parse_args()
-    verify(json.loads(args.config.read_text())['source'], args.commit, args.helpers)
+    verify(json.loads(args.config.read_text())['source'], args.commit, args.helpers, args.clone_timeout)

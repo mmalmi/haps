@@ -330,6 +330,9 @@ announcing packages. See [source publication](README.md#package-discovery-and-ev
 for checkout and identity requirements. CI can independently run
 `scripts/verify-public-source.py` with checksum-pinned Git helpers, without a
 signing key, before creating a public binary release.
+Large repositories can set `--clone-timeout 1800` (seconds; default 300,
+maximum 1800). Allow additional time in the CI job for the revision and
+complete-history checks, which retain their own command deadlines.
 
 Publication keeps original release events on a byte-identical retry, refuses
 changed bytes at an existing version, uploads immutable packages and a native

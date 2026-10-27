@@ -1,3 +1,4 @@
+import argparse
 import importlib.util
 import os
 from pathlib import Path
@@ -22,6 +23,7 @@ class PublicSourceGate(unittest.TestCase):
         args, options = clone.call_args
         self.assertIn('--no-local', args[0])
         self.assertIn('--no-checkout', args[0])
+        self.assertEqual(options['timeout'], 300)
         env = options['env']
         self.assertNotEqual(env['HTREE_CONFIG_DIR'], '/publisher')
         self.assertNotEqual(env['HTREE_DATA_DIR'], '/cached')
@@ -30,6 +32,23 @@ class PublicSourceGate(unittest.TestCase):
         self.assertEqual(env['HTREE_PREFER_LOCAL_DAEMON'], 'false')
         self.assertEqual(env['HTREE_LOCAL_DAEMON_ONLY'], 'false')
         self.assertEqual(read.call_args.args[0][-5:], ['rev-list', '--objects', '--missing=error', revision, '--'])
+
+    def test_larger_clone_deadline_preserves_history_checks(self):
+        revision = 'a' * 40
+        with patch.object(module.subprocess, 'run') as clone, \
+                patch.object(module.subprocess, 'check_output', side_effect=[revision, 'false', 'objects']) as read:
+            module.verify('htree://npub1fixture/source', revision, ROOT, clone_timeout=1800)
+        self.assertEqual(clone.call_args.kwargs['timeout'], 1800)
+        self.assertEqual(read.call_count, 3)
+        self.assertTrue(all(call.kwargs['timeout'] == 120 for call in read.call_args_list))
+        self.assertEqual(read.call_args.args[0][-5:], ['rev-list', '--objects', '--missing=error', revision, '--'])
+
+    def test_invalid_deadlines_stop_before_fetch(self):
+        for timeout in (0, -1, 1801, '1.5', 'inf'):
+            with self.subTest(timeout=timeout), patch.object(module.subprocess, 'run') as clone:
+                with self.assertRaises(argparse.ArgumentTypeError):
+                    module.verify('htree://npub1fixture/source', 'a' * 40, ROOT, clone_timeout=timeout)
+                clone.assert_not_called()
 
     def test_missing_parents_and_shallow_history_stop_release(self):
         revision = 'a' * 40
