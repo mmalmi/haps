@@ -14,8 +14,8 @@ pub struct CatalogTransport {
 impl CatalogTransport {
     pub fn new(location: &str, cache: &Path) -> Result<Self> {
         let mut config = ClientConfig::from_env()?;
-        // Include cold public-relay connections in the signed-root observation
-        // window. Three seconds was too short for fresh installs in CI.
+        // Allow slow cold connections, but return immediately when a signed
+        // root is available. This is a deadline, not an observation window.
         config.resolve_window = Duration::from_secs(10);
         Self::with_config(location, cache, config)
     }
@@ -45,7 +45,7 @@ impl CatalogTransport {
             .root
             .get_or_try_init(|| {
                 self.client
-                    .resolve(self.reference.as_ref().expect("unresolved named root"))
+                    .resolve_ready(self.reference.as_ref().expect("unresolved named root"))
             })
             .await?;
         self.client.read_file(root, path, limit).await

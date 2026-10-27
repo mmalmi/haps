@@ -48,7 +48,7 @@ impl IndexReader {
                     nostr::PublicKey::parse(author)?.to_hex() == self.author,
                     "index publisher mismatch"
                 );
-                client.resolve(&reference).await?
+                client.resolve_ready(&reference).await?
             };
             let store = client.store();
             let index = hashtree_nostr::NostrEventStore::new(store.clone());

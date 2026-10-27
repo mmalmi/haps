@@ -166,11 +166,16 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
                 vec![url.replace("http:", "ws:") + "/ws"]
             },
             read_servers: if daemon { vec![] } else { vec![url.clone()] },
-            resolve_window: Duration::from_secs(1),
+            resolve_window: Duration::from_secs(5),
             request_timeout: Duration::from_secs(3),
         };
         let repository = Repository::hashtree(&location, &cache, config)?;
-        let snapshot = repository.catalog(&publisher.public_key().to_hex()).await?;
+        let snapshot = tokio::time::timeout(
+            Duration::from_secs(2),
+            repository.catalog(&publisher.public_key().to_hex()),
+        )
+        .await
+        .expect("an available signed root must not wait for the observation window")?;
         assert!(
             repository
                 .catalog(&host.public_key().to_hex())
