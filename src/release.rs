@@ -23,8 +23,11 @@ pub struct ReleaseArgs {
     #[arg(long, env = "HAPS_KEY_FILE")]
     pub key_file: Option<PathBuf>,
     /// Validate signer, checksums and package layouts without signing or publishing.
-    #[arg(long, conflicts_with = "publish")]
+    #[arg(long, conflicts_with_all = ["publish", "publish_source"])]
     pub check: bool,
+    /// Push and cold-fetch the pinned Hashtree source before publishing release assets.
+    #[arg(long, conflicts_with = "publish")]
+    pub publish_source: bool,
     /// Upload and announce the signed packages after preparation.
     #[arg(long)]
     pub publish: bool,
@@ -88,6 +91,26 @@ pub async fn prepare(args: &ReleaseArgs, home: &Path) -> Result<Option<PreparedR
             )),
             "duplicate package target in release mapping"
         );
+    }
+    if args.publish_source {
+        ensure!(
+            plan.iter().all(|p| p
+                .spec
+                .source
+                .as_ref()
+                .is_some_and(|s| s.git.starts_with("htree://"))),
+            "source publication requires an explicit htree:// source URL for every package"
+        );
+        crate::source_publication::ensure_available(
+            plan.iter().filter_map(|p| p.spec.source.as_ref()),
+            keys.public_key(),
+            args.config
+                .canonicalize()?
+                .parent()
+                .context("release config has no parent")?,
+        )?;
+        println!("Published and verified source for {}", args.tag);
+        return Ok(None);
     }
     if args.check {
         let temporary = Repository::local(stage.path().join("verified"))?;

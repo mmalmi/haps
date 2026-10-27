@@ -67,6 +67,10 @@ pub(crate) fn git() -> Command {
         .env_remove("GIT_DIR")
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_SHALLOW_FILE")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .args([
             "-c",
             "protocol.ext.allow=never",
@@ -96,6 +100,15 @@ fn expand(value: &str) -> String {
 
 impl SourceCheckout {
     pub fn fetch(source: SourceInfo, work: &Path) -> Result<Self> {
+        Self::fetch_inner(source, work, false)
+    }
+
+    /// Verify source as a new reader, without the publisher's Hashtree cache.
+    pub fn fetch_public(source: SourceInfo, work: &Path) -> Result<Self> {
+        Self::fetch_inner(source, work, true)
+    }
+
+    fn fetch_inner(source: SourceInfo, work: &Path, public: bool) -> Result<Self> {
         source.validate()?;
         fs::create_dir_all(work)?;
         let directory = tempfile::Builder::new()
@@ -106,10 +119,17 @@ impl SourceCheckout {
         if source.git.starts_with("htree://") {
             crate::helpers::configure_git(&mut clone)?;
         }
+        if public {
+            clone
+                .env("HTREE_CONFIG_DIR", directory.path().join("hashtree"))
+                .env("HTREE_DATA_DIR", directory.path().join("data"))
+                .env("HTREE_PREFER_LOCAL_DAEMON", "false")
+                .env("HTREE_LOCAL_DAEMON_ONLY", "false");
+        }
         git_ok(
             clone
                 .current_dir(directory.path())
-                .args(["clone", "--no-checkout", "--", &source.git])
+                .args(["clone", "--no-local", "--no-checkout", "--", &source.git])
                 .arg("repo"),
         )?;
         let commit = git_ok(git().current_dir(&root).args([
@@ -121,6 +141,22 @@ impl SourceCheckout {
             commit.eq_ignore_ascii_case(&source.rev),
             "source did not resolve to the requested commit"
         );
+        let shallow = git_ok(
+            git()
+                .current_dir(&root)
+                .args(["rev-parse", "--is-shallow-repository"]),
+        )?;
+        ensure!(
+            shallow == "false",
+            "source history is incomplete (shallow repository)"
+        );
+        git_ok(git().current_dir(&root).args([
+            "rev-list",
+            "--objects",
+            "--missing=error",
+            &commit,
+            "--",
+        ]))?;
         git_ok(
             git()
                 .current_dir(&root)

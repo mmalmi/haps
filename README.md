@@ -1136,6 +1136,20 @@ install, or execute the package. `catalog publish` uploads content, exports the
 selected Nostr event index, and announces its immutable address. Publication
 uses the existing `htree` helper, included in the Haps bundle.
 
+Before uploading packages with `htree://` source, publication checks that the
+pinned commit and its full Git history can be fetched with an empty Hashtree
+cache and without the local daemon. If the source belongs to the publishing
+identity and its commit exists in the current repository, Haps first pushes it
+to `refs/tags/haps-source/<commit>` on that source URL. This preserves existing
+branches and tags and excludes uncommitted files. The source URL must identify
+its owner with a public key, and the corresponding Hashtree signing identity
+must be configured. A failed push or source check stops package publication.
+`import-release --publish` uses the repository containing its release config
+instead of the current directory. Run these publishing commands from the source
+repository when publishing locally prepared packages; if the source is already
+public, a local source checkout is not required. Other publishers' source is
+checked without pushing changes to their repositories.
+
 You can also curate other publishers' packages without changing their signatures:
 
 ```sh
@@ -1270,6 +1284,7 @@ python3 scripts/publish-hashtree-release.py --tag vX.Y.Z --expected-root VERIFIE
 Resolve and verify the current `releases/haps` root before mirroring; the
 `--expected-root` check protects existing release history. The mirror command
 verifies asset sizes/checksums and the tag's source commit,
+publishes and cold-fetches its source through `haps import-release --publish-source`,
 then uses `htree release publish` to retain previous versions and move `latest`.
 The publisher requires `gh`, `htree`, Python 3.11+, and the release identity already
 configured locally. Crates.io publication and website deployment remain separate

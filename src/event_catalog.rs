@@ -282,9 +282,26 @@ pub async fn package_events(
     keys: &Keys,
     legacy_name: Option<&str>,
 ) -> Result<Vec<Event>> {
+    package_events_from(home, path, keys, legacy_name, &std::env::current_dir()?).await
+}
+
+pub async fn package_events_from(
+    home: &Path,
+    path: &Path,
+    keys: &Keys,
+    legacy_name: Option<&str>,
+    source_repository: &Path,
+) -> Result<Vec<Event>> {
     let repo = crate::repository::Repository::local(path.to_path_buf())?;
     let snapshot = repo.catalog(&keys.public_key().to_hex()).await?;
     let releases = repo.releases(&snapshot).await?;
+    crate::source_publication::ensure_available(
+        releases
+            .iter()
+            .filter_map(|release| release.data.package.source.as_ref()),
+        keys.public_key(),
+        source_repository,
+    )?;
     let location = upload(home, path, legacy_name)?;
     let previous = Discovery::open(home)?
         .events(vec![nostr::Filter::new()])

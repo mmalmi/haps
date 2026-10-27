@@ -1906,8 +1906,17 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                     packages,
                 } = prepared;
                 if args.publish {
-                    let mut events =
-                        haps::event_catalog::package_events(&home, &path, &keys, None).await?;
+                    let mut events = haps::event_catalog::package_events_from(
+                        &home,
+                        &path,
+                        &keys,
+                        None,
+                        args.config
+                            .canonicalize()?
+                            .parent()
+                            .context("release config has no parent")?,
+                    )
+                    .await?;
                     let location = haps::event_catalog::upload_index(&home, &events)?;
                     let discovery = Discovery::open(&home)?;
                     let previous = discovery.events(vec![nostr::Filter::new()]).await?;

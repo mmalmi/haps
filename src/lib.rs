@@ -20,6 +20,7 @@ pub mod progress;
 mod publication;
 pub mod repository;
 pub mod security;
+mod source_publication;
 pub mod store;
 pub mod transport;
 pub mod trust;

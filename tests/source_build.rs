@@ -43,6 +43,45 @@ fn git(root: &Path, args: &[&str]) -> String {
 }
 
 #[test]
+fn source_preparation_rejects_a_readable_tip_with_incomplete_history() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().join("source");
+    fs::create_dir(&root).unwrap();
+    git(&root, &["init"]);
+    git(&root, &["config", "user.name", "Test"]);
+    git(&root, &["config", "user.email", "test@example.invalid"]);
+    fs::write(root.join("README"), "first").unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "parent"]);
+    fs::write(root.join("README"), "second").unwrap();
+    git(&root, &["commit", "-am", "tip"]);
+    let rev = git(&root, &["rev-parse", "HEAD"]);
+    let source = haps::model::SourceInfo {
+        git: reqwest::Url::from_directory_path(&root)
+            .unwrap()
+            .to_string(),
+        rev: rev.clone(),
+    };
+    haps::build::SourceCheckout::fetch_public(source.clone(), &tmp.path().join("complete"))
+        .unwrap();
+    // A shallow boundary masks missing ancestors from ordinary Git traversal.
+    // The tip still checks out, but cannot satisfy the release source contract.
+    fs::write(root.join(".git/shallow"), format!("{rev}\n")).unwrap();
+    for public in [false, true] {
+        let result = if public {
+            haps::build::SourceCheckout::fetch_public(source.clone(), &tmp.path().join("cold"))
+        } else {
+            haps::build::SourceCheckout::fetch(source.clone(), &tmp.path().join("audit"))
+        };
+        let error = result.err().expect("incomplete source must fail");
+        assert!(
+            error.to_string().contains("source history is incomplete"),
+            "{error:#}"
+        );
+    }
+}
+
+#[test]
 fn missing_recipe_explains_manual_provenance_without_building() {
     let tmp = tempdir().unwrap();
     let root = tmp.path().join("source");

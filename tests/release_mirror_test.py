@@ -40,6 +40,8 @@ class ReleaseHistoryGuard(unittest.TestCase):
         def read(args, **kwargs):
             if args == ['htree', 'release', 'publish', '--help']:
                 return 'Options: --expected-root <CID>'
+            if args == ['haps', 'import-release', '--help']:
+                return 'Options: --publish-source'
             if args[:2] == ['git', 'rev-parse']:
                 return commit + '\n'
             if args[:2] == ['git', 'show']:
@@ -71,7 +73,7 @@ class ReleaseHistoryGuard(unittest.TestCase):
                 pass
             elif args[:2] == ['haps', 'import-release']:
                 haps.append(args[-1])
-                if args[-1] == '--check':
+                if args[-1] in ('--check', '--publish-source'):
                     self.assertFalse(published)
                 else:
                     self.assertTrue(published)
@@ -89,10 +91,18 @@ class ReleaseHistoryGuard(unittest.TestCase):
                 patch.dict(os.environ, HTREE_LOCAL_DAEMON_ONLY='true',
                            HTREE_PREFER_LOCAL_DAEMON='true', NOSTR_RELAYS='ws://127.0.0.1:9999'):
             self.run_mirror()
-        self.assertEqual(haps, ['--check', '--publish'])
+        self.assertEqual(haps, ['--check', '--publish-source', '--publish'])
         self.assertEqual(published, [['htree', 'release', 'publish', 'releases/haps',
                                      'v0.1.11', 'nhash1verified', '--expected-root',
                                      'a' * 64 + ':' + 'b' * 64]])
+
+    def test_old_haps_is_rejected_before_any_upload(self):
+        with patch('subprocess.check_output', side_effect=[
+                'Options: --expected-root <CID>', 'Options: --check --publish']), \
+                patch('subprocess.run') as mutate:
+            with self.assertRaisesRegex(SystemExit, '--publish-source'):
+                self.run_mirror()
+        mutate.assert_not_called()
 
 
 if __name__ == '__main__':

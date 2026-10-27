@@ -28,7 +28,9 @@ help_text = subprocess.check_output(['htree', 'release', 'publish', '--help'], t
 if '--expected-root' not in help_text:
     raise SystemExit('Update htree to a build supporting release publish --expected-root. '
                      'Publication stopped before upload to protect existing releases.')
-subprocess.run(['haps', 'import-release', '--help'], check=True, stdout=subprocess.DEVNULL)
+haps_help = subprocess.check_output(['haps', 'import-release', '--help'], text=True)
+if '--publish-source' not in haps_help:
+    raise SystemExit('Update haps to support import-release --publish-source before publishing release assets.')
 commit = subprocess.check_output(['git', 'rev-parse', f'{tag}^{{commit}}'], text=True).strip()
 with tempfile.TemporaryDirectory(prefix='haps-release-') as temp:
     root = Path(temp)
@@ -58,6 +60,9 @@ with tempfile.TemporaryDirectory(prefix='haps-release-') as temp:
     (root / 'version.txt').write_text(tag + '\n')
     haps_args = ['haps', 'import-release', str(root), '--config', str(Path(__file__).resolve().parents[1] / 'haps-release.json'), '--tag', tag]
     subprocess.run([*haps_args, '--check'], check=True)
+    public_env = dict(os.environ, HTREE_PREFER_LOCAL_DAEMON='false', HTREE_LOCAL_DAEMON_ONLY='false')
+    public_env.pop('NOSTR_RELAYS', None)
+    subprocess.run([*haps_args, '--publish-source'], check=True, env=public_env)
     output = subprocess.check_output(['htree', 'add', str(root), '--no-ignore'], text=True)
     match = re.search(r'^\s*url:\s*(nhash1\w+)\s*$', output, re.M)
     if not match:
@@ -66,6 +71,4 @@ with tempfile.TemporaryDirectory(prefix='haps-release-') as temp:
     subprocess.run(['htree', 'release', 'publish', 'releases/haps', tag, match[1],
                     '--expected-root', args.expected_root], check=True)
     # Local storage acknowledgements do not establish public discovery.
-    public_env = dict(os.environ, HTREE_PREFER_LOCAL_DAEMON='false', HTREE_LOCAL_DAEMON_ONLY='false')
-    public_env.pop('NOSTR_RELAYS', None)
     subprocess.run([*haps_args, '--publish'], check=True, env=public_env)
