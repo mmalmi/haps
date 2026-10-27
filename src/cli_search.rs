@@ -68,13 +68,12 @@ impl Results {
                 }
             } else if Release::verify(event.clone()).is_ok() {
                 self.events.insert(event.id, event.clone());
-            } else if event.kind == Kind::ContactList
+            } else if (event.kind == Kind::ContactList
                 || event.kind == Kind::MuteList
-                || parse_attestation(event).is_ok()
+                || parse_attestation(event).is_ok())
+                && let Err(error) = trust.ingest(event.clone())
             {
-                if let Err(error) = trust.ingest(event.clone()) {
-                    eprintln!("Invalid social event: {error:#}");
-                }
+                eprintln!("Invalid social event: {error:#}");
             }
         }
     }
@@ -561,10 +560,10 @@ pub(super) async fn run(
         results.ingest(&events, trust);
         // A relay/index response makes its slower block fallback redundant.
         for event in &events {
-            if results.events.contains_key(&event.id) {
-                if let Some(fetch) = pending.fetches.remove(&event.id) {
-                    fetch.abort();
-                }
+            if results.events.contains_key(&event.id)
+                && let Some(fetch) = pending.fetches.remove(&event.id)
+            {
+                fetch.abort();
             }
         }
         // Emit before persistence; disk writes must not hide ready rows.
