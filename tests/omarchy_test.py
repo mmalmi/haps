@@ -1,5 +1,6 @@
 import importlib.util
 import fcntl
+import http.client
 import struct
 import json
 import shutil
@@ -414,6 +415,9 @@ class RealPickerTests(PickerFixture):
             '#!/usr/bin/env python3\nimport json, os, sys\nfrom pathlib import Path\n'
             'with (Path(os.environ["HOME"]) / "fzf-args").open("a") as file:\n'
             '    file.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+            'if "--help" not in sys.argv:\n'
+            '    (Path(os.environ["HOME"]) / "fzf-control").write_text(json.dumps({\n'
+            '        "directory": os.environ["HAPS_PICKER_DIR"], "key": os.environ["FZF_API_KEY"]}))\n'
             'os.execv(' + repr(actual) + ', [' + repr(actual) + '] + sys.argv[1:])\n')
         (self.root / 'fzf').chmod(0o755)
         self.pid, self.master = None, None
@@ -452,6 +456,36 @@ class RealPickerTests(PickerFixture):
             if time.monotonic() > deadline:
                 self.fail('fzf did not render ' + repr(needle) + ': ' + repr(self.output[-1600:]))
             self.read_terminal()
+
+    def picker_ready(self, query, labels, focused, description=None):
+        deadline = time.monotonic() + 5
+        state = None
+        while time.monotonic() < deadline:
+            # Drain terminal output while observing actual fzf state; text that
+            # was painted before typing is not evidence that filtering finished.
+            self.read_terminal()
+            connection = None
+            try:
+                control = json.loads((self.root / 'fzf-control').read_text())
+                port = int((Path(control['directory']) / 'port').read_text())
+                connection = http.client.HTTPConnection('127.0.0.1', port, timeout=0.2)
+                connection.request('GET', '/?limit=10', headers={'x-api-key': control['key']})
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200)
+                state = json.loads(response.read())
+                current = (state.get('current') or {}).get('text', '').split('\t')
+                matches = [item['text'].split('\t')[1] for item in state['matches']]
+                if (state['query'] == query and not state['reading'] and state['progress'] == 100
+                        and state['matchCount'] == len(labels) and matches == labels
+                        and len(current) == 4 and current[1] == focused
+                        and (description is None or current[3] == description)):
+                    return
+            except (OSError, http.client.HTTPException, ValueError):
+                pass
+            finally:
+                if connection is not None:
+                    connection.close()
+        self.fail('fzf query/focus did not settle: ' + repr(state))
 
     def wait_terminal(self):
         deadline = time.monotonic() + 5
@@ -550,11 +584,13 @@ class RealPickerTests(PickerFixture):
                                   {'wait': 'next', 'rows': [outside, changed]}], 'hold': True}])
         self.rendered(b'outside/app')
         os.write(self.master, b'needle')
-        self.rendered(b'needle first/app')
+        self.picker_ready('needle', [first['label'], second['label']], first['label'])
         os.write(self.master, b'\x1b[B')
+        self.picker_ready('needle', [first['label'], second['label']], second['label'])
         self.rendered(b'd' * 40)
         self.output.clear()
         (self.root / 'next').touch()
+        self.picker_ready('needle', [second['label']], second['label'], 'Updated description')
         self.rendered(b'Updated description')
         self.rendered(b'd' * 40)
         os.write(self.master, b'\r')

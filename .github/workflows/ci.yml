@@ -50,15 +50,26 @@ jobs:
           tar -xzf "$RUNNER_TEMP/fzf.tar.gz" -C "$RUNNER_TEMP/fzf" fzf
           sudo install -m 755 "$RUNNER_TEMP/fzf/fzf" /usr/local/bin/fzf
           /usr/local/bin/fzf --version
+      - name: Test the Omarchy picker
+        if: runner.os == 'Linux'
+        env:
+          HAPS_TEST_FZF: /usr/local/bin/fzf
+        run: python3 -m unittest discover -s tests -p omarchy_test.py
       - name: Check all targets with Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test native installation and package lifecycle
         run: cargo test --locked
-      - name: Test installers and Omarchy integration
+      - name: Test installers and audit integration
         if: runner.os == 'Linux'
-        env:
-          HAPS_TEST_FZF: /usr/local/bin/fzf
-        run: python3 -m unittest discover -s tests -p '*_test.py'
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys, unittest
+          sys.path.insert(0, 'tests')
+          modules = [path.stem for path in sorted(pathlib.Path('tests').glob('*_test.py'))
+                     if path.name != 'omarchy_test.py']
+          suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
+          sys.exit(not unittest.TextTestRunner().run(suite).wasSuccessful())
+          PY
       - name: Verify the publishable crate
         if: runner.os == 'Linux'
         env:
