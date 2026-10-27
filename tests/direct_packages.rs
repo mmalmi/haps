@@ -182,7 +182,15 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
             &"0".repeat(64),
         ]);
         assert!(!changed.status.success());
-        assert!(String::from_utf8_lossy(&changed.stderr).contains("selected release changed"));
+        let error: serde_json::Value = serde_json::from_slice(&changed.stdout)?;
+        assert_eq!(error["error"]["code"], "operation_failed");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("selected release changed")
+        );
+        assert!(Installation::new(&home)?.receipt("hello").is_err());
         let result = run(&[
             "--non-interactive",
             "install",
