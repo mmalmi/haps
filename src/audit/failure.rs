@@ -10,7 +10,7 @@ pub struct Finding {
 
 impl fmt::Display for Finding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "audit did not pass: {}", self.note.escape_debug())
+        write!(f, "audit did not pass: {}", super::summary(&self.note))
     }
 }
 

@@ -28,7 +28,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap apparmor apparmor-profiles
+          sudo apt-get install -y bubblewrap apparmor apparmor-profiles fzf
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] &&
              [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1 ]; then
             # Load Ubuntu's scoped bwrap profile; retain the host-wide restriction.
@@ -47,7 +47,22 @@ jobs:
         run: cargo test --locked
       - name: Test installers and Omarchy integration
         if: runner.os == 'Linux'
+        env:
+          HAPS_TEST_FZF: /usr/bin/fzf
         run: python3 -m unittest discover -s tests -p '*_test.py'
+      - name: Verify the publishable crate
+        if: runner.os == 'Linux'
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+        run: cargo publish --dry-run --locked
+      - name: Retain the verified crate
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: haps-crate-verified
+          path: target/package/haps-*.crate
+          if-no-files-found: error
+          retention-days: 7
       - name: Build and install an audited PKGBUILD using Arch tooling
         if: runner.os == 'Linux'
         run: bash scripts/test-makepkg.sh

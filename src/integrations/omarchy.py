@@ -36,47 +36,29 @@ for row in rows:
 # Embedded in the generated menu helper so Cargo installs need no extra files.
 PACKAGE_PICKER = r'''
 import hashlib
+import http.client
 import json
+import os
 from pathlib import Path
-import shlex
+import secrets
+import selectors
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 
-SEARCH_POLL_SECONDS = 5
 SEARCH_TIMEOUT_SECONDS = 120
+MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
+
 
 def text(value):
     return ''.join(c if c.isprintable() else ' ' for c in str(value))
 
-def search(haps):
-    print('Finding packages… Ctrl-C to cancel.', flush=True)
-    started = time.monotonic()
-    with subprocess.Popen(haps + ['search', '--json', '--', ''],
-                          stdout=subprocess.PIPE, text=True) as process:
-        try:
-            while True:
-                remaining = SEARCH_TIMEOUT_SECONDS - (time.monotonic() - started)
-                if remaining <= 0:
-                    raise TimeoutError('Package search timed out. Check your connection and try again.')
-                try:
-                    output, _ = process.communicate(timeout=min(SEARCH_POLL_SECONDS, remaining))
-                    if process.returncode:
-                        print(text(output), file=sys.stderr)
-                        raise subprocess.CalledProcessError(process.returncode, process.args)
-                    return json.loads(output)
-                except subprocess.TimeoutExpired:
-                    elapsed = int(time.monotonic() - started)
-                    print('Still finding packages (' + str(elapsed) + 's)… Ctrl-C to cancel.',
-                          file=sys.stderr, flush=True)
-        finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-
 
 def search_rows(rows, target):
+    if not isinstance(rows, list):
+        raise ValueError('Package search did not return a result array.')
     latest = {}
     for row in rows:
         package = row['package']
@@ -90,144 +72,218 @@ def search_rows(rows, target):
     return [entry[1] for entry in latest.values()]
 
 
-def cache_context(haps):
-    # The installed integration supplies the exact CLI home. Standalone callers
-    # without one can still search, but must not share another profile's cache.
-    if '--home' not in haps:
-        return None
-    home = Path(haps[haps.index('--home') + 1])
-    digest = hashlib.sha256(json.dumps(haps).encode())
-    for name in ('config.json', 'social.json'):
-        path = home / name
-        digest.update(path.read_bytes() if path.exists() else b'')
-        digest.update(b'\0')
-    return home / 'integrations/omarchy-search.json', digest.hexdigest()
+def choices_for(rows, directory):
+    choices = {}
+    for row in rows:
+        package = row['package']
+        token = hashlib.sha256(json.dumps([
+            row['identity'], row['release_id'], package['version']]).encode()).hexdigest()
+        label = text(row['label'])
+        version = text(package['version'])
+        description = text(package.get('description', ''))
+        choice = token + '\t' + label + '\t' + version + '\t' + description
+        choices[choice] = row
+        preview = [label + '  ' + version, description, '',
+                   'Platform: ' + text(package['target']),
+                   'Publisher: ' + text(row['publisher']),
+                   'Release: ' + text(row['release_id']),
+                   'Audits: ' + str(len(row.get('audits', []))),
+                   'Warnings: ' + str(len(row.get('warnings', []))), '',
+                   'Haps checks trust before installing or updating.']
+        Path(directory, token).write_text('\n'.join(preview) + '\n')
+    return choices
 
 
-def saved_search(haps, target):
+def picker_args(operation, searching):
+    return [
+        'fzf', '--delimiter=\t', '--with-nth=2..', '--layout=reverse',
+        '--no-multi', '--no-select-1', '--no-exit-0', '--prompt=Haps > ',
+        '--header=' + header(operation, searching),
+        '--preview=cat "$HAPS_PICKER_DIR"/{1}',
+        '--preview-window=down:65%:wrap',
+        '--preview-label=alt-p: toggle details, alt-j/k: scroll',
+        '--preview-label-pos=bottom',
+        '--bind=alt-p:toggle-preview,alt-j:preview-down,alt-k:preview-up',
+    ]
+
+
+def header(operation, searching, status=''):
+    return (status + ' · ' if status else '') + 'Enter: ' + operation + (
+        ' · Ctrl-R: refresh' if searching else '') + ' · Esc: cancel'
+
+
+def stop(process, group=False):
+    if process is None:
+        return
+    if group:
+        # Reap helpers even when the search process has already exited.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    elif process.poll() is None:
+        process.terminate()
     try:
-        context = cache_context(haps)
-        if context is None:
-            return None
-        path, fingerprint = context
-        saved = json.loads(path.read_text())
-        if (saved['schema'] != 1 or saved['fingerprint'] != fingerprint
-                or saved['target'] != target):
-            return None
-        rows = search_rows(saved['rows'], target)
-        # Empty snapshots should not hide packages arriving after initial setup.
-        if not rows:
-            return None
-        label = 'Saved list from ' + time.strftime('%Y-%m-%d %H:%M', time.localtime(saved['time']))
-        return rows, label
-    except (OSError, ValueError, KeyError, TypeError, OverflowError):
-        return None
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+    if group:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    process.wait()
 
 
-def save_search(haps, target, rows):
-    temporary = None
+def update_picker(port, key, actions):
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=0.2)
     try:
-        context = cache_context(haps)
-        if context is None:
-            return
-        path, fingerprint = context
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as file:
-            temporary = Path(file.name)
-            json.dump(dict(schema=1, fingerprint=fingerprint, target=target,
-                           time=time.time(), rows=rows), file)
-        temporary.replace(path)
-    except OSError as error:
-        print('Could not save package list: ' + text(error), file=sys.stderr)
+        connection.request('POST', '/', actions.encode(), {'x-api-key': key})
+        response = connection.getresponse()
+        response.read()
+        if response.status != 200:
+            raise OSError('Could not refresh package picker.')
     finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
+        connection.close()
+
+
+def search_pick(haps, target):
+    query = ''
+    help_text = subprocess.check_output(['fzf', '--help'], text=True)
+    tracking = ['--track', '--id-nth=1'] if '--id-nth' in help_text else []
+    while True:
+        with tempfile.TemporaryDirectory(prefix='haps-picker-') as directory:
+            root = Path(directory)
+            key = secrets.token_hex(32)
+            env = dict(os.environ, HAPS_PICKER_DIR=directory, FZF_API_KEY=key)
+            args = picker_args('install', True) + tracking + [
+                '--listen=127.0.0.1:0', '--expect=ctrl-r', '--print-query', '--query=' + query,
+                '--bind=load:transform-header:cat "$HAPS_PICKER_DIR/header"',
+                '--bind=start:execute-silent:printf "%s" "$FZF_PORT" > "$HAPS_PICKER_DIR/port"',
+            ]
+            choices, buffer, picked, generation = {}, b'', bytearray(), 0
+            pending, port, search = None, None, None
+            status = 'Finding packages…'
+            (root / 'header').write_text(header('install', True, status))
+            failure = None
+            with tempfile.TemporaryFile() as errors, selectors.DefaultSelector() as selector:
+                picker = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, env=env)
+                try:
+                    selector.register(picker.stdout, selectors.EVENT_READ, 'picker')
+                    search = subprocess.Popen(haps + ['search', '--json', '--stream', '--', ''],
+                                              stdout=subprocess.PIPE, stderr=errors, start_new_session=True)
+                    selector.register(search.stdout, selectors.EVENT_READ, 'search')
+                    started = time.monotonic()
+                    searching, eof = True, False
+                    pending = 'change-header(' + header('install', True, status) + ')'
+                    while picker.poll() is None:
+                        if port is None and (root / 'port').exists():
+                            raw = (root / 'port').read_text()
+                            if raw.isdecimal() and 0 < int(raw) < 65536:
+                                port = int(raw)
+                        if port is not None and pending is not None:
+                            (root / 'header').write_text(header('install', True, status))
+                            try:
+                                update_picker(port, key, pending)
+                                pending = None
+                            except OSError:
+                                if picker.poll() is not None:
+                                    break
+                        for event, _ in selector.select(timeout=0.05):
+                            data = os.read(event.fileobj.fileno(), 65536)
+                            if event.data == 'picker':
+                                picked.extend(data)
+                                if not data:
+                                    selector.unregister(event.fileobj)
+                                continue
+                            if data:
+                                buffer += data
+                                if len(buffer) > MAX_SNAPSHOT_BYTES:
+                                    raise ValueError('Package search result is too large.')
+                            # An EOF may finish a final line without a newline.
+                            lines = buffer.split(b'\n')
+                            buffer = lines.pop() if data else b''
+                            for line in lines:
+                                if not line.strip():
+                                    continue
+                                rows = search_rows(json.loads(line), target)
+                                choices = choices_for(rows, directory)
+                                generation += 1
+                                snapshot = 'snapshot-' + str(generation)
+                                (root / snapshot).write_text('\n'.join(choices) + ('\n' if choices else ''))
+                                status = 'Updating packages…' if choices else 'Finding packages…'
+                                pending = ('reload-sync(cat "$HAPS_PICKER_DIR/' + snapshot + '")'
+                                           '+change-header(' + header('install', True, status) + ')')
+                            if not data:
+                                selector.unregister(event.fileobj)
+                                eof = True
+                        if searching and eof and search.poll() is not None:
+                            searching = False
+                            if search.returncode:
+                                failure = 'Package search failed. Press Ctrl-R to retry.'
+                            status = failure or ('' if choices else 'No packages found for this computer.')
+                            pending = ((pending + '+') if pending else '') + (
+                                'change-header(' + header('install', True, status) + ')')
+                        if searching and time.monotonic() - started > SEARCH_TIMEOUT_SECONDS:
+                            if not eof:
+                                selector.unregister(search.stdout)
+                            stop(search, group=True)
+                            searching = False
+                            failure = 'Package search timed out. Press Ctrl-R to retry.'
+                            status = failure
+                            pending = ((pending + '+') if pending else '') + (
+                                'change-header(' + header('install', True, failure) + ')')
+                    picked.extend(picker.stdout.read())
+                finally:
+                    stop(search, group=True)
+                    stop(picker)
+                    if search is not None:
+                        search.stdout.close()
+                    picker.stdout.close()
+                output = picked.decode().rstrip('\n').split('\n', 2)
+                query = output[0]
+                # fzf returns 1 for an expected key when the result list is empty.
+                if picker.returncode in (0, 1) and len(output) > 1 and output[1] == 'ctrl-r':
+                    continue
+                if picker.returncode:
+                    if failure:
+                        print(failure, file=sys.stderr)
+                    return 130 if picker.returncode in (1, 130) else picker.returncode
+                selected = output[2] if len(output) == 3 else ''
+                # A newer snapshot can arrive while Enter is being handled. Never
+                # reinterpret an old row number or install an invalidated choice.
+                if selected not in choices:
+                    raise ValueError('Package results changed. Open the picker and select again.')
+                row = choices[selected]
+                return subprocess.call(haps + ['install', '--version', row['package']['version'],
+                                               '--release', row['release_id'], '--', row['identity']])
 
 
 def run():
     action, *haps = sys.argv[1:]
-    searching = action == 'search'
-    label = ''
-    if searching:
+    if action == 'search':
         target = subprocess.check_output(haps + ['target'], text=True).strip()
-        saved = saved_search(haps, target)
-        if saved is not None:
-            rows, label = saved
-        else:
-            rows = search_rows(search(haps), target)
-            save_search(haps, target, rows)
-    else:
-        result = subprocess.run(haps + ['list', '--json'], stdout=subprocess.PIPE, text=True)
-        if result.returncode:
-            print(text(result.stdout), file=sys.stderr)
-            return result.returncode
-        rows = json.loads(result.stdout)
-    return pick(action, haps, rows, label, target if searching else None)
-
-
-def pick(action, haps, rows, status, target):
-    searching = action == 'search'
+        return search_pick(haps, target)
+    result = subprocess.run(haps + ['list', '--json'], stdout=subprocess.PIPE, text=True)
+    if result.returncode:
+        print(text(result.stdout), file=sys.stderr)
+        return result.returncode
+    rows = json.loads(result.stdout)
     if not rows:
-        print('No packages found for this computer.' if searching else 'No installed packages.')
+        print('No installed packages.')
         return 0
-    operation = 'install' if searching else action
-    while True:
-        with tempfile.TemporaryDirectory(prefix='haps-picker-') as directory:
-            choices = []
-            for index, row in enumerate(rows):
-                package = row['package']
-                label = text(row['label'])
-                version = text(package['version'])
-                description = text(package.get('description', ''))
-                choices.append(str(index) + '\t' + label + '\t' + version + '\t' + description)
-                preview = [label + '  ' + version, description, '',
-                           'Platform: ' + text(package['target']),
-                           'Publisher: ' + text(row['publisher']),
-                           'Release: ' + text(row['release_id']),
-                           'Audits: ' + str(len(row.get('audits', []))),
-                           'Warnings: ' + str(len(row.get('warnings', []))), '',
-                           'Haps checks trust before installing or updating.']
-                if status:
-                    preview += ['', status + '. Refresh to update these details.']
-                Path(directory, str(index)).write_text('\n'.join(preview) + '\n')
-            picked = subprocess.run([
-                'fzf', '--delimiter=\t', '--with-nth=2..', '--layout=reverse',
-                '--prompt=Haps > ',
-                '--header=' + (status + ' · ' if status else '') + 'Enter: ' + operation
-                    + (' · Ctrl-R: refresh' if searching else '') + ' · Esc: cancel',
-                '--preview=cat ' + shlex.quote(directory) + '/{1}',
-                '--preview-window=down:65%:wrap',
-                '--preview-label=alt-p: toggle details, alt-j/k: scroll',
-                '--preview-label-pos=bottom',
-                '--bind=alt-p:toggle-preview,alt-j:preview-down,alt-k:preview-up',
-            ] + (['--expect=ctrl-r'] if searching else []), input='\n'.join(choices) + '\n', stdout=subprocess.PIPE, text=True)
-            if picked.returncode:
-                return 130 if picked.returncode in (1, 130) else picked.returncode
-            # Only a row from this snapshot can become an argument; labels are display-only.
-            selected = picked.stdout.rstrip('\n')
-            if searching and selected.split('\n', 1)[0] == 'ctrl-r':
-                try:
-                    refreshed = search_rows(search(haps), target)
-                    save_search(haps, target, refreshed)
-                    if not refreshed:
-                        print('No packages found for this computer.')
-                        return 0
-                    rows = refreshed
-                    status = ''
-                except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as error:
-                    print('Refresh failed: ' + text(error), file=sys.stderr)
-                    status = 'Refresh failed; showing previous list'
-                continue
-            if searching and selected.startswith('\n'):
-                selected = selected[1:]
-            if selected not in choices:
-                raise ValueError('The package selection was not in the result list.')
-            row = rows[int(selected.split('\t', 1)[0])]
-        break
-    args = [operation]
-    if searching:
-        args += ['--version', row['package']['version']]
-    return subprocess.call(haps + args + ['--', row['identity']])
+    with tempfile.TemporaryDirectory(prefix='haps-picker-') as directory:
+        choices = choices_for(rows, directory)
+        picked = subprocess.run(picker_args(action, False),
+                                input='\n'.join(choices) + '\n', stdout=subprocess.PIPE, text=True,
+                                env=dict(os.environ, HAPS_PICKER_DIR=directory))
+        if picked.returncode:
+            return 130 if picked.returncode in (1, 130) else picked.returncode
+        selected = picked.stdout.rstrip('\n')
+        if selected not in choices:
+            raise ValueError('The package selection was not in the result list.')
+        return subprocess.call(haps + [action, '--', choices[selected]['identity']])
+
 
 try:
     sys.exit(run())

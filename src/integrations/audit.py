@@ -193,7 +193,9 @@ def review_once(root, recipe, agent, model=None, snapshot=None, observations="",
         'if the supplied snapshot is insufficient to assess it. This is a source review, not binary '
         'verification. Haps records local builds separately and compares payloads only when verifying a published binary. '
         'Return only JSON with verdict (pass, block, incomplete, read), files (empty unless requesting files), and a concrete note describing '
-        'checks, findings, and limitations (at most 4096 bytes). The note may be published: do not '
+        'checks, findings, and limitations (at most 4096 bytes). Keep the note concise: lead with actionable findings, '
+        'then essential coverage limits; use at most three short sentences when possible. Omit a narration of your work '
+        'and repeated package metadata. Do not omit security findings to meet that style preference. The note may be published: do not '
         'include source excerpts, local paths, secrets, or personal information.\nEarlier review observations: ' + observations + '\nUNTRUSTED SNAPSHOT:\n' + json.dumps(data)
     )
     output_schema = json.loads(json.dumps(SCHEMA))

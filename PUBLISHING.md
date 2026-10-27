@@ -309,6 +309,8 @@ its exact size and SHA-256. Asset paths are relative to that release directory;
 # HAPS_KEY_FILE may select an existing secret-key file; otherwise Haps uses
 # its existing identity.key. Never generate a new identity during a release.
 haps import-release stage --config haps-release.json --tag v1.2.3 --check
+# Publish and cold-verify the pinned source before making binary assets public:
+haps import-release stage --config haps-release.json --tag v1.2.3 --publish-source
 # After the project's existing release gates and canonical publication:
 haps import-release stage --config haps-release.json --tag v1.2.3 --publish
 ```
@@ -320,6 +322,14 @@ current package format. The adapter retains regular-file bytes and executable
 permissions, including signed macOS bundles. Native installers, Android and iOS
 remain on their existing distribution channels; map their desktop/CLI archives
 only when those can be installed as ordinary files.
+
+From 0.1.22, `--publish-source` pushes the exact owned Hashtree source revision
+and checks its complete Git history from an empty cache. It does not publish
+binary assets. Normal package publication repeats the source check before
+announcing packages. See [source publication](README.md#package-discovery-and-event-catalogs)
+for checkout and identity requirements. CI can independently run
+`scripts/verify-public-source.py` with checksum-pinned Git helpers, without a
+signing key, before creating a public binary release.
 
 Publication keeps original release events on a byte-identical retry, refuses
 changed bytes at an existing version, uploads immutable packages and a native

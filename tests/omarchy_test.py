@@ -1,6 +1,12 @@
 import importlib.util
+import fcntl
+import struct
 import json
+import shutil
 import os
+import pty
+import select
+import signal
 from pathlib import Path
 import subprocess
 import shlex
@@ -15,129 +21,6 @@ omarchy = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(omarchy)
 
 class MenuTests(unittest.TestCase):
-    def test_search_reopens_saved_results_refreshes_and_invalidates_changed_trust(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            row = {'identity': 'a' * 64 + '/app', 'label': 'publisher/app',
-                   'publisher': 'a' * 64, 'release_id': 'b' * 64,
-                   'package': {'version': '1.0.0', 'target': 'test-linux'}}
-            (root / 'rows').write_text(json.dumps([row]))
-            executable = root / 'haps'
-            executable.write_text('''#!/usr/bin/env python3
-import json, os, sys, time
-from pathlib import Path
-root = Path(sys.argv[2])
-args = sys.argv[3:]
-with (root / 'calls').open('a') as file:
-    file.write(json.dumps(args) + '\\n')
-if args[0] == 'target':
-    print('test-linux')
-elif args[0] == 'search':
-    (root / 'search.pid').write_text(str(os.getpid()))
-    time.sleep(float(os.environ.get('SEARCH_DELAY', '0')))
-    if os.environ.get('SEARCH_FAIL'):
-        sys.exit(7)
-    print((root / 'rows').read_text())
-''')
-            executable.chmod(0o755)
-            picker = root / 'fzf'
-            picker.write_text('''#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-root = Path(os.environ['HOME'])
-rows = sys.stdin.read().splitlines()
-(root / 'shown').write_text(json.dumps(rows))
-(root / 'header').write_text(next(arg for arg in sys.argv if arg.startswith('--header=')))
-if (root / 'refresh').exists():
-    (root / 'refresh').unlink()
-    print('ctrl-r')
-elif os.environ.get('PICK_INSTALL'):
-    print('')  # fzf --expect emits an empty key line for Enter.
-    print(rows[0])
-else:
-    sys.exit(130)
-''')
-            picker.chmod(0o755)
-            env = dict(os.environ, HOME=tmp, PATH=tmp + os.pathsep + os.environ['PATH'])
-
-            def run(**extra):
-                (root / 'calls').unlink(missing_ok=True)
-                result = subprocess.run(
-                    [sys.executable, '-c', omarchy.PACKAGE_PICKER,
-                     'search', str(executable), '--home', tmp],
-                    env=dict(env, **extra), text=True, capture_output=True, timeout=5)
-                calls = [json.loads(line) for line in (root / 'calls').read_text().splitlines()]
-                return result, calls
-
-            result, calls = run()
-            self.assertEqual(result.returncode, 130, result.stderr)
-            self.assertEqual(calls, [['target'], ['search', '--json', '--', '']])
-            result, calls = run(SEARCH_FAIL='1', PICK_INSTALL='1')
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(calls, [['target'], ['install', '--version', '1.0.0', '--', row['identity']]])
-            self.assertIn('Saved list from', (root / 'header').read_text())
-            self.assertIn('Ctrl-R: refresh', (root / 'header').read_text())
-
-            row['package']['version'] = '2.0.0'
-            (root / 'rows').write_text(json.dumps([row]))
-            (root / 'refresh').touch()
-            result, calls = run(PICK_INSTALL='1')
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(calls, [['target'], ['search', '--json', '--', ''],
-                                     ['install', '--version', '2.0.0', '--', row['identity']]])
-
-            (root / 'refresh').touch()
-            result, calls = run(SEARCH_FAIL='1')
-            self.assertEqual(result.returncode, 130, result.stderr)
-            self.assertIn('Refresh failed', result.stderr)
-            self.assertIn('showing previous list', (root / 'header').read_text())
-            self.assertIn('2.0.0', (root / 'shown').read_text())
-
-            for filename in ('social.json', 'config.json'):
-                (root / filename).write_text('{}')
-                result, calls = run()
-                self.assertEqual(result.returncode, 130, result.stderr)
-                self.assertEqual(calls, [['target'], ['search', '--json', '--', '']])
-
-            (root / 'integrations/omarchy-search.json').write_text('{broken')
-            result, calls = run()
-            self.assertEqual(result.returncode, 130, result.stderr)
-            self.assertEqual(calls, [['target'], ['search', '--json', '--', '']])
-
-            (root / 'rows').write_text('[]')
-            (root / 'refresh').touch()
-            result, calls = run()
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn('No packages found', result.stdout)
-            result, calls = run()
-            self.assertEqual(calls, [['target'], ['search', '--json', '--', '']])
-
-    def test_slow_search_reports_progress_and_timeout_reaps_child(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            executable = root / 'haps'
-            executable.write_text('''#!/usr/bin/env python3
-import os, sys, time
-from pathlib import Path
-if sys.argv[1] == 'target':
-    print('test-linux')
-else:
-    Path(os.environ['HOME'], 'search.pid').write_text(str(os.getpid()))
-    time.sleep(30)
-''')
-            executable.chmod(0o755)
-            script = omarchy.PACKAGE_PICKER.replace('SEARCH_POLL_SECONDS = 5', 'SEARCH_POLL_SECONDS = 0.1')
-            script = script.replace('SEARCH_TIMEOUT_SECONDS = 120', 'SEARCH_TIMEOUT_SECONDS = 0.4')
-            started = time.monotonic()
-            result = subprocess.run([sys.executable, '-c', script, 'search', str(executable)],
-                                    env=dict(os.environ, HOME=tmp), text=True, capture_output=True, timeout=5)
-            self.assertEqual(result.returncode, 1)
-            self.assertIn('Still finding packages', result.stderr)
-            self.assertIn('Package search timed out', result.stderr)
-            self.assertLess(time.monotonic() - started, 5)
-            with self.assertRaises(ProcessLookupError):
-                os.kill(int((root / 'search.pid').read_text()), 0)
-
     def test_search_results_are_readable_and_strip_terminal_controls(self):
         rows = [{'label': 'publisher/app', 'package': {'version': '1.2.3', 'description': 'Hello\x1b[2J\nworld', 'target': 'x86_64-unknown-linux-gnu'}, 'audits': [{}], 'warnings': []}]
         result = subprocess.run([sys.executable, '-c', omarchy.SEARCH_FORMATTER], input=json.dumps(rows), text=True, capture_output=True, check=True)
@@ -208,61 +91,13 @@ else:
             package = '--allow-unaudited; $(touch should-not-exist)'
             self.assertEqual(run('menu', package + '\n\n', HAPS_TEST_PICK='install'), (0, [['install', '--', package]]))
             self.assertEqual(run('search', HAPS_TEST_STATUS='7'), (7, [['target']]))
-            self.assertEqual(run('search'), (0, [['target'], ['search', '--json', '--', ''], ['install', '--version', '1.0.0', '--', row['identity']]]))
             self.assertEqual(run('update'), (0, [['list', '--json'], ['update', '--', row['identity']]]))
             self.assertEqual(run('update', HAPS_TEST_STATUS='7'), (7, [['list', '--json']]))
             self.assertEqual(run('remove'), (0, [['list', '--json'], ['remove', '--', row['identity']]]))
             self.assertEqual(run('remove', HAPS_TEST_PICK='cancel'), (0, [['list', '--json']]))
-            self.assertEqual(run('search', HAPS_TEST_ROWS='[]'), (0, [['target'], ['search', '--json', '--', '']]))
             self.assertEqual(run('menu', HAPS_TEST_PICK='cancel'), (0, []))
             self.assertEqual(run('install', ''), (0, []))
             self.assertEqual(run('unknown'), (2, []))
-
-    def test_picker_filters_platform_and_keeps_display_text_out_of_commands(self):
-        with tempfile.TemporaryDirectory(prefix="haps picker ' $ ") as tmp:
-            root = Path(tmp)
-            rows = [
-                {'identity': 'a' * 64 + '/app', 'label': 'publisher/app', 'publisher': 'a' * 64,
-                 'release_id': 'b' * 64, 'package': {'version': '1.0.0', 'target': 'other-platform'}},
-                {'identity': 'c' * 64 + '/app', 'label': '$(touch bad)\t\x1b[2J', 'publisher': 'c' * 64,
-                 'release_id': 'd' * 64, 'package': {'version': '2.0.0', 'target': 'test-linux', 'description': 'line1\nline2'},
-                 'audits': [{}], 'warnings': [{}]},
-            ]
-            # Discovery includes history and prereleases. The default picker shows
-            # the newest stable version per publisher, like the CLI's selection.
-            for version in ['1.10.0', '1.9.0', '3.0.0-beta.1']:
-                older = dict(rows[1], package=dict(rows[1]['package'], version=version))
-                rows.append(older)
-            executable = root / 'haps'
-            executable.write_text('#!/usr/bin/env python3\nimport json, sys\nfrom pathlib import Path\nargs=sys.argv[3:]\nroot=Path(sys.argv[2])\nif args[0]=="search": print((root/"rows").read_text())\nelif args[0]=="target": print("test-linux")\nelse: (root/"installed").write_text(json.dumps(args)); sys.exit(8)\n')
-            executable.chmod(0o755)
-            picker = root / 'fzf'
-            picker.write_text('''#!/usr/bin/env python3
-import json, os, shlex, subprocess, sys
-from pathlib import Path
-root=Path(os.environ['HOME'])
-rows=sys.stdin.read().splitlines()
-(root/'choices').write_text(json.dumps(rows))
-preview=next(arg.removeprefix('--preview=') for arg in sys.argv if arg.startswith('--preview='))
-preview=shlex.split(preview.replace('{1}', '0'))
-(root/'preview-path').write_text(preview[1])
-(root/'preview').write_text(subprocess.check_output(preview, text=True))
-print(rows[0])
-''')
-            picker.chmod(0o755)
-            (root / 'rows').write_text(json.dumps(rows))
-            env = dict(os.environ, HOME=tmp, PATH=tmp + os.pathsep + os.environ['PATH'])
-            result = subprocess.run([sys.executable, '-c', omarchy.PACKAGE_PICKER, 'search', str(executable), '--home', tmp], env=env, text=True, capture_output=True)
-            self.assertEqual(result.returncode, 8, result.stderr)
-            self.assertEqual(json.loads((root / 'installed').read_text()), ['install', '--version', '2.0.0', '--', rows[1]['identity']])
-            choices = json.loads((root / 'choices').read_text())
-            self.assertEqual(len(choices), 1)
-            self.assertEqual(len(choices[0].split('\t')), 4)
-            self.assertNotIn('\x1b', choices[0])
-            self.assertIn('Audits: 1\nWarnings: 1', (root / 'preview').read_text())
-            self.assertIn(rows[1]['release_id'], (root / 'preview').read_text())
-            self.assertFalse(Path((root / 'preview-path').read_text()).exists())
-            self.assertFalse((root / 'bad').exists())
 
     def test_preserves_custom_menu_and_comments_and_is_idempotent(self):
         for raw in ['{\n  // Personal notes\n  "personal": {"label":"Notes"},\n}\n', '{\n"items": {\n"personal": {"label":"Notes"}\n}\n}\n']:
@@ -317,6 +152,416 @@ print(rows[0])
                 self.assertFalse(helper.exists())
                 self.assertEqual(menu.read_text(), original)
                 self.assertEqual(menu.with_suffix('.jsonc.haps-backup').read_text(), original)
+
+
+
+def package(version='1.0.0', release='b', publisher='a', **changes):
+    row = {'identity': publisher * 64 + '/app', 'label': 'publisher/app',
+           'publisher': publisher * 64, 'release_id': release * 64,
+           'package': {'version': version, 'target': 'test-linux', 'description': 'An app'}}
+    row.update(changes)
+    return row
+
+
+SEARCH_STUB = r'''#!/usr/bin/env python3
+import json, os, sys, time
+from pathlib import Path
+root = Path(os.environ['HOME'])
+args = sys.argv[1:]
+with (root / 'calls').open('a') as file:
+    file.write(json.dumps(args) + '\n')
+if args[0] == 'target':
+    print('test-linux')
+elif args[0] == 'search':
+    with (root / 'search-pids').open('a') as file:
+        file.write(str(os.getpid()) + '\n')
+    run = len((root / 'search-pids').read_text().splitlines()) - 1
+    scenarios = json.loads((root / 'scenarios').read_text())
+    scenario = scenarios[min(run, len(scenarios) - 1)]
+    for frame in scenario.get('frames', []):
+        if 'wait' in frame:
+            while not (root / frame['wait']).exists():
+                time.sleep(0.01)
+        time.sleep(frame.get('delay', 0))
+        if 'raw' in frame:
+            print(frame['raw'], end='', flush=True)
+        else:
+            print(json.dumps(frame['rows']), flush=True)
+    if scenario.get('close_stdout'):
+        os.close(1)
+    if scenario.get('hold'):
+        while True: time.sleep(1)
+    sys.exit(scenario.get('code', 0))
+else:
+    (root / 'installed').write_text(json.dumps(args))
+    sys.exit(int(os.environ.get('INSTALL_STATUS', '0')))
+'''
+
+
+PICKER_STUB = r'''#!/usr/bin/env python3
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import json, os, re, shlex, subprocess, sys, time
+from pathlib import Path
+if '--help' in sys.argv:
+    print('--id-nth')
+    sys.exit(0)
+root = Path(os.environ['HOME'])
+work = Path(os.environ['HAPS_PICKER_DIR'])
+with (root / 'picker-pids').open('a') as file:
+    file.write(str(os.getpid()) + '\n')
+run = len((root / 'picker-pids').read_text().splitlines()) - 1
+(root / 'opened').touch()
+rows, first, headers = [], None, []
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        global rows, first
+        assert self.headers['x-api-key'] == os.environ['FZF_API_KEY']
+        actions = self.rfile.read(int(self.headers['Content-Length'])).decode()
+        for name in re.findall(r'\$HAPS_PICKER_DIR/(snapshot-\d+)', actions):
+            rows = (work / name).read_text().splitlines()
+            if first is None and rows: first = rows[0]
+            with (root / 'shown').open('a') as file:
+                file.write(json.dumps(rows) + '\n')
+        headers.append(actions)
+        (root / 'headers').write_text('\n'.join(headers))
+        self.send_response(200)
+        self.end_headers()
+    def log_message(self, *args): pass
+server = HTTPServer(('127.0.0.1', 0), Handler)
+server.timeout = 0.01
+(work / 'port').write_text(str(server.server_port))
+mode = os.environ.get('PICKER_MODE', 'first')
+while True:
+    server.handle_request()
+    if mode == 'cancel' and (root / 'cancel').exists(): sys.exit(130)
+    if mode == 'timeout' and any('timed out' in h for h in headers): sys.exit(130)
+    if mode == 'empty' and any('No packages found' in h for h in headers): sys.exit(130)
+    if mode == 'failure' and any('search failed' in h for h in headers): sys.exit(130)
+    if mode == 'stale' and first and rows and first != rows[0]:
+        print('\n\n' + first)
+        break
+    if mode == 'refresh' and rows and run == 0:
+        print('app\nctrl-r\n' + rows[0])
+        break
+    if rows and (mode in ('first', 'refresh', 'forged') or (mode == 'wait' and (root / 'pick').exists())):
+        row = rows[0]
+        preview = next(arg[10:] for arg in sys.argv if arg.startswith('--preview='))
+        command = preview.replace('{1}', shlex.quote(row.split('\t')[0]))
+        (root / 'preview').write_text(subprocess.check_output(['sh', '-c', command], text=True))
+        (root / 'preview-dir').write_text(str(work))
+        print('\n\n' + (row + ' forged' if mode == 'forged' else row))
+        break
+server.server_close()
+'''
+
+
+class PickerFixture(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="haps picker ' $ ")
+        self.root = Path(self.temp.name)
+        self.haps = self.root / 'haps'
+        self.haps.write_text(SEARCH_STUB)
+        self.haps.chmod(0o755)
+        fzf = self.root / 'fzf'
+        fzf.write_text(PICKER_STUB)
+        fzf.chmod(0o755)
+        self.env = dict(os.environ, HOME=str(self.root), PATH=str(self.root) + os.pathsep + os.environ['PATH'])
+        self.children = []
+
+    def tearDown(self):
+        for child in self.children:
+            if child.poll() is None:
+                child.kill()
+            child.communicate()
+        self.temp.cleanup()
+
+    def start(self, scenarios, mode='first', script=None, **extra):
+        (self.root / 'scenarios').write_text(json.dumps(scenarios))
+        child = subprocess.Popen([sys.executable, '-c', script or omarchy.PACKAGE_PICKER,
+                                  'search', str(self.haps)], env=dict(self.env, PICKER_MODE=mode, **extra),
+                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.children.append(child)
+        return child
+
+    def wait_for(self, condition):
+        deadline = time.monotonic() + 5
+        while not condition():
+            if time.monotonic() > deadline:
+                self.fail('Timed out waiting for picker state')
+            time.sleep(0.01)
+
+    def finish(self, child, expected=0):
+        stdout, stderr = child.communicate(timeout=6)
+        self.assertEqual(child.returncode, expected, stdout + stderr)
+        for name in ('picker-pids', 'search-pids'):
+            if (self.root / name).exists():
+                for pid in (self.root / name).read_text().splitlines():
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(int(pid), 0)
+        return stdout, stderr
+
+    def shown(self):
+        path = self.root / 'shown'
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+
+class PickerTests(PickerFixture):
+    def test_opens_before_first_snapshot_and_selects_before_search_eof(self):
+        row = package()
+        child = self.start([{'frames': [{'wait': 'send', 'rows': []}, {'rows': [row]}], 'hold': True}])
+        self.wait_for(lambda: (self.root / 'opened').exists())
+        self.assertIsNone(child.poll())
+        self.assertFalse((self.root / 'installed').exists())
+        (self.root / 'send').touch()
+        self.finish(child)
+        self.assertEqual(json.loads((self.root / 'installed').read_text()),
+                         ['install', '--version', '1.0.0', '--release', 'b' * 64, '--', row['identity']])
+        calls = [json.loads(line) for line in (self.root / 'calls').read_text().splitlines()]
+        self.assertEqual(calls[1], ['search', '--json', '--stream', '--', ''])
+        self.assertFalse((self.root / 'integrations/omarchy-search.json').exists())
+
+    def test_eof_does_not_block_picker_while_search_is_exiting(self):
+        child = self.start([{'frames': [{'rows': [package()]}], 'close_stdout': True, 'hold': True}])
+        self.finish(child)
+
+    def test_snapshots_replace_reorder_remove_and_pin_same_version_release(self):
+        old, other, new = package(), package(publisher='c'), package(release='d')
+        child = self.start([{'frames': [{'rows': [old, other]}, {'wait': 'next', 'rows': [new]}], 'hold': True}], 'wait')
+        self.wait_for(lambda: self.shown())
+        first = self.shown()[-1]
+        (self.root / 'next').touch()
+        self.wait_for(lambda: self.shown()[-1] != first)
+        self.assertEqual(len(self.shown()[-1]), 1)
+        self.assertNotEqual(first[0].split('\t')[0], self.shown()[-1][0].split('\t')[0])
+        (self.root / 'pick').touch()
+        self.finish(child)
+        self.assertEqual(json.loads((self.root / 'installed').read_text())[3:5], ['--release', 'd' * 64])
+
+    def test_invalidated_or_forged_selection_cannot_install(self):
+        for mode in ('stale', 'forged'):
+            with self.subTest(mode=mode):
+                child = self.start([{'frames': [{'rows': [package()]},
+                                                {'delay': 0.2, 'rows': [package(release='d')]}], 'hold': True}], mode)
+                _, stderr = self.finish(child, 1)
+                self.assertIn('Package results changed', stderr)
+                self.assertFalse((self.root / 'installed').exists())
+
+    def test_empty_replacement_removes_previous_rows(self):
+        child = self.start([{'frames': [{'rows': [package()]}, {'wait': 'clear', 'rows': []}]}], 'empty')
+        self.wait_for(lambda: self.shown())
+        (self.root / 'clear').touch()
+        self.finish(child, 130)
+        self.assertEqual(self.shown()[-1], [])
+    def test_refresh_restarts_search_and_reaps_previous_process(self):
+        child = self.start([{'frames': [{'rows': [package()]}], 'hold': True},
+                            {'frames': [{'rows': [package('2.0.0', 'c')]}], 'hold': True}], 'refresh')
+        self.finish(child)
+        self.assertEqual(len((self.root / 'search-pids').read_text().splitlines()), 2)
+        self.assertEqual(json.loads((self.root / 'installed').read_text())[2:6], ['2.0.0', '--release', 'c' * 64, '--'])
+
+    def test_cancel_timeout_failure_and_malformed_stream_reap_processes(self):
+        child = self.start([{'frames': [], 'hold': True}], 'cancel')
+        self.wait_for(lambda: (self.root / 'search-pids').exists())
+        (self.root / 'cancel').touch()
+        self.finish(child, 130)
+        child = self.start([{'frames': [], 'hold': True}], 'timeout',
+                           script=omarchy.PACKAGE_PICKER.replace('SEARCH_TIMEOUT_SECONDS = 120', 'SEARCH_TIMEOUT_SECONDS = 0.2'))
+        _, stderr = self.finish(child, 130)
+        self.assertIn('timed out', stderr)
+        child = self.start([{'frames': [], 'code': 7}], 'failure')
+        _, stderr = self.finish(child, 130)
+        self.assertIn('search failed', stderr)
+        child = self.start([{'frames': [{'raw': '{not json}\n'}], 'hold': True}])
+        self.finish(child, 1)
+        self.assertFalse((self.root / 'installed').exists())
+
+    def test_filters_versions_platform_and_sanitizes_display_without_commands(self):
+        row = package('2.0.0', label='$(touch bad)\t\x1b[2J', audits=[{}], warnings=[{}])
+        row['package']['description'] = 'line1\nline2'
+        other = package('9.0.0', publisher='c')
+        other['package']['target'] = 'other-platform'
+        child = self.start([{'frames': [{'rows': [other, row, package('1.10.0'),
+                                                 package('1.9.0'), package('3.0.0-beta.1')]}]}], INSTALL_STATUS='8')
+        self.finish(child, 8)
+        choices = self.shown()[-1]
+        self.assertEqual(len(choices), 1)
+        self.assertEqual(len(choices[0].split('\t')), 4)
+        self.assertNotIn('\x1b', choices[0])
+        preview = (self.root / 'preview').read_text()
+        self.assertIn('Audits: 1\nWarnings: 1', preview)
+        self.assertIn(row['release_id'], preview)
+        self.assertFalse(Path((self.root / 'preview-dir').read_text()).exists())
+        self.assertFalse((self.root / 'bad').exists())
+
+
+@unittest.skipUnless(os.environ.get('HAPS_TEST_FZF') or shutil.which('fzf'), 'real fzf is not available')
+class RealPickerTests(PickerFixture):
+    def setUp(self):
+        super().setUp()
+        actual = os.environ.get('HAPS_TEST_FZF') or shutil.which('fzf')
+        (self.root / 'fzf').unlink()
+        (self.root / 'fzf').write_text(
+            '#!/usr/bin/env python3\nimport json, os, sys\nfrom pathlib import Path\n'
+            'with (Path(os.environ["HOME"]) / "fzf-args").open("a") as file:\n'
+            '    file.write(json.dumps(sys.argv[1:]) + "\\n")\n'
+            'os.execv(' + repr(actual) + ', [' + repr(actual) + '] + sys.argv[1:])\n')
+        (self.root / 'fzf').chmod(0o755)
+        self.pid, self.master = None, None
+        self.output = bytearray()
+
+    def tearDown(self):
+        if self.pid is not None:
+            try:
+                os.kill(self.pid, signal.SIGINT)
+                self.wait_terminal()
+            except (ProcessLookupError, ChildProcessError):
+                pass
+        if self.master is not None:
+            os.close(self.master)
+        super().tearDown()
+
+    def terminal(self, scenarios):
+        (self.root / 'scenarios').write_text(json.dumps(scenarios))
+        self.pid, self.master = pty.fork()
+        if self.pid == 0:
+            import termios
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack('HHHH', 30, 110, 0, 0))
+            os.execvpe(sys.executable, [sys.executable, '-c', omarchy.PACKAGE_PICKER,
+                                      'search', str(self.haps)], dict(self.env, TERM='xterm-256color', FZF_DEFAULT_OPTS=''))
+
+    def read_terminal(self):
+        if select.select([self.master], [], [], 0.1)[0]:
+            try:
+                self.output.extend(os.read(self.master, 65536))
+            except OSError:
+                pass
+
+    def rendered(self, needle):
+        deadline = time.monotonic() + 5
+        while needle not in self.output:
+            if time.monotonic() > deadline:
+                self.fail('fzf did not render ' + repr(needle) + ': ' + repr(self.output[-1600:]))
+            self.read_terminal()
+
+    def wait_terminal(self):
+        deadline = time.monotonic() + 5
+        while True:
+            done, status = os.waitpid(self.pid, os.WNOHANG)
+            if done:
+                self.pid = None
+                return os.waitstatus_to_exitcode(status)
+            if time.monotonic() > deadline:
+                os.kill(self.pid, signal.SIGKILL)
+                os.waitpid(self.pid, 0)
+                self.pid = None
+                self.fail('Terminal did not exit: ' + repr(self.output[-1600:]))
+            self.read_terminal()
+
+    def assert_search_reaped(self):
+        for entry in (self.root / 'search-pids').read_text().splitlines():
+            with self.assertRaises(ProcessLookupError):
+                os.kill(int(entry), 0)
+
+    def test_real_fzf_progressive_replacement_before_eof(self):
+        old, new = package(), package('2.0.0', 'd', label='$(touch bad) app')
+        self.terminal([{'frames': [
+            {'wait': 'send', 'rows': []}, {'rows': [old]}, {'wait': 'next', 'rows': [new]}], 'hold': True}])
+        self.rendered(b'Haps')
+        self.assertFalse((self.root / 'installed').exists())
+        (self.root / 'send').touch()
+        self.rendered(b'1.0.0')
+        (self.root / 'next').touch()
+        self.rendered(b'2.0.0')
+        os.write(self.master, b'\r')
+        self.assertEqual(self.wait_terminal(), 0)
+        self.assertEqual(json.loads((self.root / 'installed').read_text())[2:6], ['2.0.0', '--release', 'd' * 64, '--'])
+        self.assertFalse((self.root / 'bad').exists())
+        self.assert_search_reaped()
+
+    def test_real_fzf_same_version_new_release_and_eof(self):
+        self.terminal([{'frames': [{'rows': [package()]},
+                                  {'wait': 'next', 'rows': [package(release='d', label='replacement/app')]}]}])
+        self.rendered(b'publisher/app')
+        (self.root / 'next').touch()
+        self.rendered(b'replacement/app')
+        os.write(self.master, b'\r')
+        self.assertEqual(self.wait_terminal(), 0)
+        self.assertEqual(json.loads((self.root / 'installed').read_text())[3:5], ['--release', 'd' * 64])
+        self.assert_search_reaped()
+
+    def test_real_fzf_empty_replacement_and_cancel(self):
+        self.terminal([{'frames': [{'rows': [package()]}, {'wait': 'clear', 'rows': []}]}])
+        self.rendered(b'1.0.0')
+        (self.root / 'clear').touch()
+        self.rendered(b'No packages found')
+        os.write(self.master, b'\x1b')
+        self.assertEqual(self.wait_terminal(), 130)
+        self.assertFalse((self.root / 'installed').exists())
+        self.assert_search_reaped()
+
+    def test_real_fzf_refresh_after_failure_and_cancel_active_search(self):
+        self.terminal([{'frames': [], 'code': 7},
+                       {'frames': [{'rows': [package('2.0.0', 'd', label='needle/app')]}], 'hold': True}])
+        self.rendered(b'search failed')
+        os.write(self.master, b'needle\x12')
+        self.rendered(b'2.0.0')
+        self.assertEqual(len((self.root / 'search-pids').read_text().splitlines()), 2)
+        launches = [json.loads(line) for line in (self.root / 'fzf-args').read_text().splitlines() if '--help' not in line]
+        self.assertIn('--query=needle', launches[1])
+        os.write(self.master, b'\x1b')
+        self.assertEqual(self.wait_terminal(), 130)
+        self.assert_search_reaped()
+
+
+    def test_real_fzf_tracks_selection_when_snapshot_reorders(self):
+        first = package(label='first/app')
+        second = package('2.0.0', 'd', publisher='c', label='second/app')
+        self.terminal([{'frames': [{'rows': [first, second]},
+                                  {'wait': 'next', 'rows': [second, first]}], 'hold': True}])
+        self.rendered(b'first/app')
+        os.write(self.master, b'\x1b[B')
+        # The preview release ID confirms which row is focused before replacement.
+        self.rendered(b'd' * 40)
+        self.output.clear()
+        (self.root / 'next').touch()
+        self.rendered(b'second/app')
+        os.write(self.master, b'\r')
+        self.assertEqual(self.wait_terminal(), 0)
+        self.assertEqual(json.loads((self.root / 'installed').read_text())[-1], second['identity'])
+        self.assert_search_reaped()
+
+    def check_cancel_helper(self, kind):
+        cat = self.root / 'cat'
+        cat.write_text('''#!/usr/bin/env python3
+import os, sys, time
+from pathlib import Path
+path = Path(sys.argv[1])
+root = Path(os.environ['HOME'])
+hold = (path.name.startswith('snapshot-') if os.environ['CAT_HOLD'] == 'reload'
+        else len(path.name) == 64)
+if hold:
+    (root / 'helper-pid').write_text(str(os.getpid()))
+    while True: time.sleep(1)
+else:
+    sys.stdout.write(path.read_text())
+''')
+        cat.chmod(0o755)
+        self.env['CAT_HOLD'] = kind
+        self.terminal([{'frames': [{'rows': [package()]}], 'hold': True}])
+        self.wait_for(lambda: self.read_terminal() or (self.root / 'helper-pid').exists())
+        os.write(self.master, b'\x1b')
+        self.assertEqual(self.wait_terminal(), 130)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(int((self.root / 'helper-pid').read_text()), 0)
+        self.assert_search_reaped()
+
+    def test_real_fzf_cancel_reaps_reload_child(self):
+        self.check_cancel_helper('reload')
+
+    def test_real_fzf_cancel_reaps_preview_child(self):
+        self.check_cancel_helper('preview')
+
 
 if __name__ == '__main__':
     unittest.main()

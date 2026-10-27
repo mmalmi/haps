@@ -173,7 +173,24 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
         assert_eq!(results[0]["package"]["name"], "hello");
         audit::local(&home, release.event.id)?;
         let package = format!("{}/hello", publisher.public_key().to_bech32()?);
-        let result = run(&["--non-interactive", "install", &package, "--json"]);
+        let changed = run(&[
+            "--non-interactive",
+            "install",
+            &package,
+            "--json",
+            "--release",
+            &"0".repeat(64),
+        ]);
+        assert!(!changed.status.success());
+        assert!(String::from_utf8_lossy(&changed.stderr).contains("selected release changed"));
+        let result = run(&[
+            "--non-interactive",
+            "install",
+            &package,
+            "--json",
+            "--release",
+            &release.event.id.to_hex(),
+        ]);
         anyhow::ensure!(
             result.status.success(),
             "{} {}",

@@ -9,6 +9,22 @@ pub use failure::{Finding, retain_failed, retain_failed_release};
 
 pub const REVIEW_SCOPE: &str = "Inspect the exact source, recipe, and direct/transitive runtime and build dependencies, including install hooks and build scripts. Read pinned dependency source independently; do not run npm install, builds, hooks, or project/dependency scripts during review. Check that downloads are content-pinned and verified before use. Record dependency versions, sources, findings, unreviewed parts, and OS/toolchain assumptions; a hash alone is not a code audit.";
 
+/// Terminal summaries are bounded; the signed or retained report keeps the note.
+pub fn summary(note: &str) -> String {
+    let clean = note.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clean: String = clean.chars().filter(|c| !c.is_control()).collect();
+    if clean.chars().count() <= 280 {
+        return clean;
+    }
+    let prefix: String = clean.chars().take(280).collect();
+    format!(
+        "{}…",
+        prefix
+            .rsplit_once(' ')
+            .map_or(prefix.as_str(), |(words, _)| words)
+    )
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Reviewer {
@@ -207,7 +223,6 @@ fn review_with_progress(
     progress.clear();
     let root = checkout.root();
     eprintln!("Audit source: {}", root.display());
-    eprintln!("Build recipe: {}", serde_json::to_string(&checkout.recipe)?);
     if let Some(repair) = repair {
         eprintln!("Repair review: {}", serde_json::to_string(repair)?);
         eprintln!(

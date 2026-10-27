@@ -319,8 +319,8 @@ impl Discovery {
         }
         Ok(latest.into_values().collect())
     }
-    /// Bounded observation, never a proof of absence. The subscription stays open
-    /// through EOSE so a relay's initial response does not end the observation.
+    /// Query currently available records, never a proof of absence. The duration
+    /// is a response deadline, not a mandatory observation period after EOSE.
     pub async fn refresh(
         &self,
         bus: &RelayEventBus,
@@ -666,9 +666,37 @@ pub async fn relay_bus(home: &Path) -> Result<RelayEventBus> {
         ensure!(!config.local_only, "local Hashtree daemon is unavailable");
         config.relays
     };
-    let bus = RelayEventBus::new(relays, Duration::from_secs(3)).await?;
-    bus.client()
-        .wait_for_connection(Duration::from_secs(3))
-        .await;
+    // Discovery, social trust, feedback and comments in one command share the
+    // same connections. A silent relay must not add another connection wait to
+    // every phase of the operation.
+    static BUSES: std::sync::OnceLock<
+        tokio::sync::Mutex<std::collections::BTreeMap<Vec<String>, RelayEventBus>>,
+    > = std::sync::OnceLock::new();
+    let buses = BUSES.get_or_init(Default::default);
+    if let Some(bus) = buses.lock().await.get(&relays).cloned() {
+        return Ok(bus);
+    }
+    let bus = RelayEventBus::new(relays.clone(), Duration::from_secs(3)).await?;
+    // Wait only for the first usable connection, never for every configured
+    // relay. Query streams will deliver other relays' events when they arrive.
+    let mut notifications = bus.client().notifications();
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if bus
+                .client()
+                .relays()
+                .await
+                .values()
+                .any(|relay| relay.is_connected())
+            {
+                break;
+            }
+            if notifications.recv().await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+    buses.lock().await.insert(relays, bus.clone());
     Ok(bus)
 }

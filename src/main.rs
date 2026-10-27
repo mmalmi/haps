@@ -4,6 +4,7 @@ mod cli_dependencies;
 mod cli_hash;
 mod cli_install;
 mod cli_repair;
+mod cli_search;
 mod cli_source;
 
 use anyhow::{Context, Result, ensure};
@@ -299,6 +300,9 @@ enum Command {
         /// Emit one JSON array and never prompt.
         #[arg(long)]
         json: bool,
+        /// Emit complete verified JSON result snapshots as sources respond.
+        #[arg(long, requires = "json")]
+        stream: bool,
     },
     /// Inspect the publisher, exact release ID, and social evidence.
     Info {
@@ -323,6 +327,9 @@ enum Command {
         recipe_file: Option<PathBuf>,
         #[arg(long)]
         version: Option<semver::Version>,
+        /// Require this exact signed release event (for selections from a live list).
+        #[arg(long = "release")]
+        release_id: Option<EventId>,
         #[arg(long)]
         allow_untrusted: bool,
         /// Override trusted release warnings for this operation only.
@@ -747,21 +754,12 @@ async fn record_audit(
         &home.join("audits").join(format!("{}.json", event.id)),
         &serde_json::to_vec_pretty(&event)?,
     )?;
-    eprintln!("Audit: {}", terminal_text(&parse_attestation(&event)?.note));
-    eprintln!("Provenance: {}", terminal_text(&evidence.provenance));
-    if let Some(reviewer) = &evidence.reviewer {
-        eprintln!(
-            "Reviewer: {} | requested model: {} | reported model: {}",
-            terminal_text(&reviewer.agent),
-            terminal_text(
-                reviewer
-                    .requested_model
-                    .as_deref()
-                    .unwrap_or("agent default")
-            ),
-            terminal_text(reviewer.reported_model.as_deref().unwrap_or("not reported"))
-        );
-    }
+    eprintln!(
+        "Audit passed. Full report: {}",
+        home.join("audits")
+            .join(format!("{}.json", event.id))
+            .display()
+    );
     let publish = if let Some(value) = publication.0.or(config.audit.publish) {
         value
     } else if publication.1 {
@@ -2075,30 +2073,20 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 save_config(&home, &config)?;
             }
         },
-        Command::Search { query, json } => {
-            refresh_discovery(&home, &mut config, &mut trust, None, None, Some(&query)).await?;
-            let mut results = candidates(&home, &mut config, Some(&query), None).await?;
-            let releases: Vec<_> = results.iter().map(|c| c.release.clone()).collect();
-            refresh_feedback(&home, &config, &mut trust, &releases).await?;
-            results.retain(|c| trust.socially_trusted(&c.release));
-            // Known authors sort before publishers vouched for by the graph; fewer hops first.
-            results.sort_by_key(|c| {
-                (
-                    trust.distance(&c.release.author()).unwrap_or(u32::MAX),
-                    std::cmp::Reverse(trust.attesters(&c.release).len()),
-                )
-            });
-            if json {
-                let releases: Vec<_> = results
-                    .iter()
-                    .map(|c| release_json(&c.release, &trust, &config.aliases))
-                    .collect();
-                println!("{}", serde_json::to_string(&releases)?);
-            } else {
-                for candidate in results {
-                    print_release(&candidate.release, &trust, &config.aliases)?;
-                }
-            }
+        Command::Search {
+            query,
+            json,
+            stream,
+        } => {
+            Box::pin(cli_search::run(
+                &home,
+                &mut config,
+                &mut trust,
+                &query,
+                json,
+                stream,
+            ))
+            .await?;
         }
         Command::Info {
             package, version, ..
@@ -2682,10 +2670,15 @@ async fn refresh_feedback(
         let lookup = Discovery::open(home)?
             .event_lookup(relay, &indexes, std::time::Duration::from_secs(3))
             .await?;
-        let mut events = Vec::new();
-        for batch in releases.chunks(128) {
-            events.extend(haps::feedback::refresh(&lookup, batch).await?);
-        }
+        let events: Vec<Event> = futures::future::try_join_all(
+            releases
+                .chunks(128)
+                .map(|batch| haps::feedback::refresh(&lookup, batch)),
+        )
+        .await?
+        .into_iter()
+        .flatten()
+        .collect();
         Ok::<_, anyhow::Error>(events)
     }
     .await;

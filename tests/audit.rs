@@ -268,3 +268,23 @@ async fn recorded_output_must_match_before_it_can_approve_a_binary() -> anyhow::
     assert!(evidence.validate().is_err());
     Ok(())
 }
+
+#[test]
+fn terminal_audit_summary_is_short_without_losing_retained_findings() {
+    let note = format!(
+        "Action required: unsafe dependency. {}",
+        "Additional review detail. ".repeat(40)
+    );
+    let finding = haps::audit::Finding {
+        verdict: "block".into(),
+        note: note.clone(),
+    };
+    assert!(finding.to_string().chars().count() < 310);
+    assert!(finding.to_string().contains("Action required"));
+    assert_eq!(finding.note, note);
+    assert_eq!(
+        haps::audit::summary("Short finding.\nOne limitation."),
+        "Short finding. One limitation."
+    );
+    assert!(haps::audit::summary(&"安全 ".repeat(300)).chars().count() <= 281);
+}

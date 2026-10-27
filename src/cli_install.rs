@@ -16,6 +16,7 @@ pub(super) async fn install(
         from_source,
         recipe_file,
         version,
+        release_id,
         allow_untrusted,
         allow_warnings,
         require_attestations,
@@ -34,11 +35,18 @@ pub(super) async fn install(
         "--select is only used when installing by hash"
     );
     progress.stage("Reading package catalogs");
-    let choices = if let Some(reference) = &immutable {
+    let mut choices = if let Some(reference) = &immutable {
         cli_hash::candidates(home, reference).await?
     } else {
         candidates(home, config, None, Some(&package)).await?
     };
+    if let Some(expected) = release_id {
+        choices.retain(|candidate| candidate.release.event.id == expected);
+        ensure!(
+            !choices.is_empty(),
+            "the selected release changed; refresh the package list before installing"
+        );
+    }
     let package = if immutable.is_some() {
         let selected = select_package
             .as_deref()

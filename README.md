@@ -168,12 +168,11 @@ Enter to install the selected version. **Update > Haps** and **Remove > Haps**
 show installed packages in the same picker. These actions retain Haps' normal
 signature, audit, and trust checks. System packages remain managed by Omarchy.
 
-From Haps 0.1.22, the install picker reuses its last successful package list so
-reopening does not repeat the network search. The saved list's date is shown;
-press **Ctrl-R** to refresh packages and preview details. Changes to the saved configuration or social
-graph invalidate the list, and installation always runs fresh trust checks.
-Network searches report elapsed time every five seconds and stop after two
-minutes if they cannot finish. A failed refresh keeps the previous list available.
+From Haps 0.1.22, the install picker opens immediately and displays verified
+cached packages while index and relay updates arrive. The list changes as package
+heads and social trust change; it does not wait for every source to finish.
+Press **Ctrl-R** to refresh. Installation pins both the selected version and its
+signed release ID and runs fresh trust checks.
 After upgrading Haps, run `haps omarchy` again to update the installed menu helper.
 
 This integration needs Omarchy v4, Python 3, Bash, and `fzf`. It preserves
@@ -624,6 +623,8 @@ review are claims, not guarantees of safety. Reports and signed events are saved
 under `HAPS_HOME/audits`. Publication shares the signed review note, provenance,
 and agent/model metadata through the existing relay outbox; it does not upload
 the source checkout. Inspect what the note contains before sharing it.
+The terminal shows a short result and the report location rather than printing
+the build recipe or full audit report. Detailed findings remain in the saved report.
 
 For a separate person or agent to review at their own pace:
 
@@ -1114,11 +1115,15 @@ file hashes; it does not need a mutable catalog root for these package heads.
 Existing catalog-location announcements and signed directory catalogs remain
 readable for compatibility.
 
-`nostr-pubsub` routes the same event filters to Hashtree-backed Nostr indexes and
-relays. Indexes contribute independent results, duplicates are merged, and
-addressable events use newest timestamp/lowest-event-ID ordering. Live relay
-observations remain open past EOSE for a bounded window. Unavailable sources are
-reported; a quiet relay cannot establish that a package does not exist.
+The same event filters query Hashtree-backed Nostr indexes and relays. Verified
+batches arrive independently; one slow source does not hold up another's
+results. Search starts with the existing discovery cache, then updates packages
+and social trust as responses arrive. `haps search --json --stream QUERY` emits
+one full result array per update. Duplicates are merged and addressable events
+use newest timestamp/lowest-event-ID ordering. Connections are shared across
+discovery, trust, and feedback queries. EOSE ends a relay's current response,
+not a mandatory waiting period or proof of global completeness. Unavailable
+sources are reported; a quiet relay cannot establish that a package does not exist.
 
 Your catalog is an ordinary `hashtree-nostr` event index containing a selected
 collection of original signed events, separate from
