@@ -14,6 +14,31 @@ spec.loader.exec_module(module)
 
 
 class BuildInputs(unittest.TestCase):
+    def test_macos_helper_loads_only_the_compilers_bundled_llvm(self):
+        target = 'aarch64-apple-darwin'
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(module.subprocess, 'run') as execute:
+            prefix = Path(temporary)
+            library = prefix / 'lib/libLLVM.dylib'
+            destination = prefix / 'lib/rustlib' / target / 'lib/libLLVM.dylib'
+            destination.parent.mkdir(parents=True)
+            library.write_bytes(b'archive-verified LLVM')
+            module.prepare_rust_helpers(prefix, target)
+            self.assertEqual(destination.resolve(), library.resolve())
+            execute.assert_called_once()
+            self.assertEqual(execute.call_args.args[0],
+                             [str(prefix / 'lib/rustlib' / target / 'bin/rust-objcopy'), '--version'])
+            self.assertTrue(execute.call_args.kwargs['check'])
+            self.assertTrue('DYLD_LIBRARY_PATH' not in execute.call_args.kwargs['env'])
+            self.assertTrue('DYLD_FALLBACK_LIBRARY_PATH' not in execute.call_args.kwargs['env'])
+            destination.unlink()
+            destination.write_bytes(b'unrelated LLVM')
+            execute.reset_mock()
+            with self.assertRaisesRegex(ValueError, 'another input'):
+                module.prepare_rust_helpers(prefix, target)
+            execute.assert_not_called()
+            self.assertEqual(destination.read_bytes(), b'unrelated LLVM')
+
     def test_corrupt_download_never_reaches_extraction(self):
         lock = {'rust': {'version': '1.99.1', 'archives': {'fixture': {
             'url': 'https://example.invalid/rust.tar.xz',

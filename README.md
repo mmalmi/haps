@@ -1285,7 +1285,10 @@ release. Binaries are built once and promoted unchanged to every download channe
 CI and binary releases install Rust/Cargo 1.99.1 from the native archives pinned
 by SHA-256 in `scripts/build-inputs.json`; verification precedes extraction and
 execution. The compiler lives under the normal `.rustup/toolchains` directory,
-which the existing source-build isolation exposes read-only. Workflow actions
+which the existing source-build isolation exposes read-only. On macOS, setup
+links the bundled LLVM library into the object-copy helper's relative library
+path and checks that the helper starts without rustup's library environment.
+Workflow actions
 use full commits. Builds use default Cargo features,
 `--release --locked`, and the selected native target. The five release targets
 are Linux GNU x86_64/aarch64, macOS x86_64/aarch64, and Windows x86_64 MSVC.

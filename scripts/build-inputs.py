@@ -52,6 +52,27 @@ def host_target():
     return arch + '-' + system
 
 
+def prepare_rust_helpers(prefix, target):
+    if not target.endswith('-apple-darwin'):
+        return
+    # The official rustc component puts LLVM in prefix/lib, but rust-objcopy's
+    # LC_RPATH is @loader_path/../lib. Direct compiler use (including isolation)
+    # must work without rustup's inherited dynamic-library environment.
+    library = prefix / 'lib/libLLVM.dylib'
+    destination = prefix / 'lib/rustlib' / target / 'lib/libLLVM.dylib'
+    if not library.is_file():
+        raise ValueError('Pinned compiler is missing its bundled LLVM library')
+    if destination.exists() or destination.is_symlink():
+        if not destination.samefile(library):
+            raise ValueError('Compiler helper library path already contains another input')
+    else:
+        destination.symlink_to('../../../libLLVM.dylib')
+    environment = {key: value for key, value in os.environ.items()
+                   if key not in ('DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH')}
+    subprocess.run([str(prefix / 'lib/rustlib' / target / 'bin/rust-objcopy'), '--version'],
+                   check=True, stdout=subprocess.PIPE, env=environment)
+
+
 def install_rust(lock, work, target=None, bash=None):
     target = target or host_target()
     if target != host_target():
@@ -77,6 +98,7 @@ def install_rust(lock, work, target=None, bash=None):
         if not output.startswith(name + ' ' + rust['version'] + ' '):
             raise ValueError('Installed toolchain version mismatch: ' + output)
         print(output.strip())
+    prepare_rust_helpers(prefix, target)
     if 'GITHUB_PATH' in os.environ:
         with open(os.environ['GITHUB_PATH'], 'a') as output:
             output.write(str(prefix / 'bin') + '\n')
