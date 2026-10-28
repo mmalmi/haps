@@ -680,19 +680,27 @@ pub async fn relay_bus(home: &Path) -> Result<RelayEventBus> {
     let bus = RelayEventBus::new(relays.clone(), Duration::from_secs(3)).await?;
     // Wait only for the first usable connection, never for every configured
     // relay. Query streams will deliver other relays' events when they arrive.
-    let mut notifications = bus.client().notifications();
-    let _ = tokio::time::timeout(Duration::from_secs(3), async {
-        loop {
-            if bus
-                .client()
-                .relays()
-                .await
-                .values()
-                .any(|relay| relay.is_connected())
-            {
-                break;
+    // Pool notifications contain events/messages, not connection status. Waiting
+    // on that channel before sending a query needlessly consumes the deadline.
+    // Subscribe to each relay's status channel before checking its state, so a
+    // connection racing with setup cannot be missed.
+    let mut connections = FuturesUnordered::new();
+    for relay in bus.client().relays().await.into_values() {
+        connections.push(async move {
+            let mut notifications = relay.notifications();
+            loop {
+                if relay.is_connected() {
+                    return true;
+                }
+                if notifications.recv().await.is_err() {
+                    return false;
+                }
             }
-            if notifications.recv().await.is_err() {
+        });
+    }
+    let _ = tokio::time::timeout(Duration::from_secs(3), async {
+        while let Some(connected) = connections.next().await {
+            if connected {
                 break;
             }
         }

@@ -229,9 +229,15 @@ async fn publisher_cli_to_fresh_second_user_search_install_and_run() -> Result<(
     drop(cache);
     // Removing the publisher's catalog also rules out accidental local reads.
     fs::remove_dir_all(publisher.home.join("catalog"))?;
-    let found: serde_json::Value =
-        serde_json::from_slice(&reader.run(&["search", "hello-two-users", "--json"])?.stdout)?;
-    assert_eq!(found.as_array().unwrap().len(), 1);
+    let search = reader.run(&["search", "hello-two-users", "--json"])?;
+    let found: serde_json::Value = serde_json::from_slice(&search.stdout)?;
+    assert_eq!(
+        found.as_array().unwrap().len(),
+        1,
+        "cold reader search: {} {}",
+        String::from_utf8_lossy(&search.stderr),
+        String::from_utf8_lossy(&search.stdout)
+    );
     assert_eq!(found[0]["publisher"], publisher_id);
     assert_eq!(found[0]["package"]["name"], "hello-two-users");
     assert_eq!(found[0]["release_id"], release.id.to_hex());

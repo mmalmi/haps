@@ -169,7 +169,13 @@ async fn package_lookup_from_relay_or_index_installs_without_catalog_head() -> a
             String::from_utf8_lossy(&search.stdout)
         );
         let results: serde_json::Value = serde_json::from_slice(&search.stdout)?;
-        assert_eq!(results.as_array().unwrap().len(), 1);
+        assert_eq!(
+            results.as_array().unwrap().len(),
+            1,
+            "cold {mode} search: {} {}",
+            String::from_utf8_lossy(&search.stderr),
+            String::from_utf8_lossy(&search.stdout)
+        );
         assert_eq!(results[0]["package"]["name"], "hello");
         audit::local(&home, release.event.id)?;
         let package = format!("{}/hello", publisher.public_key().to_bech32()?);
