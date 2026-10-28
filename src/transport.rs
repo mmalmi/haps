@@ -44,8 +44,11 @@ impl CatalogTransport {
         let root = self
             .root
             .get_or_try_init(|| {
-                self.client
-                    .resolve_ready(self.reference.as_ref().expect("unresolved named root"))
+                // Keep the concurrent resolver state off callers' native stacks.
+                Box::pin(
+                    self.client
+                        .resolve_ready(self.reference.as_ref().expect("unresolved named root")),
+                )
             })
             .await?;
         self.client.read_file(root, path, limit).await
