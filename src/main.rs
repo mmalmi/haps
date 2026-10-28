@@ -506,6 +506,9 @@ enum CatalogAction {
     Publish {
         #[arg(default_value = "default")]
         name: String,
+        /// Use an existing publisher key without changing the local identity.
+        #[arg(long, env = "HAPS_KEY_FILE")]
+        key_file: Option<PathBuf>,
     },
 }
 

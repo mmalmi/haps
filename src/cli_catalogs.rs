@@ -95,10 +95,14 @@ pub(super) async fn run(
             );
             save_config(home, config)?;
         }
-        CatalogAction::Publish { name } => {
+        CatalogAction::Publish { name, key_file } => {
             let path = directory(home, &name)?;
             ensure!(path.exists(), "catalog does not exist; add a package first");
-            let keys = publishing_keys(home, config)?;
+            let keys = if let Some(path) = key_file {
+                load_keys(&path)?
+            } else {
+                publishing_keys(home, config)?
+            };
             let selected = Discovery::open(&path)?;
             // Local package records are built once; public indexes retain
             // original signatures for packages curated from elsewhere.

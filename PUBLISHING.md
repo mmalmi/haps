@@ -139,6 +139,12 @@ identity is created on the first staged `add` if none is configured. Keep that
 identity for subsequent releases. An identity configured with `identity use`
 contains only a public key and cannot sign releases.
 
+To publish an already prepared catalog with an external signing key, use
+`haps catalog publish NAME --key-file PATH` (or `HAPS_KEY_FILE`). The key must
+match the catalog signer. This preserves the prepared releases and does not
+create or change the local publishing identity. Keep the same Haps home,
+uploader, storage, and file-server configuration to reuse upload checkpoints.
+
 Adding a staged release does not upload or install it. Publishing uploads its
 content, signs package heads that reference exact releases and immutable
 Hashtree roots, and publishes an ordinary `hashtree-nostr` event index. Its root
@@ -326,7 +332,11 @@ only when those can be installed as ordinary files.
 From 0.1.22, `--publish-source` pushes the exact owned Hashtree source revision
 and checks its complete Git history from an empty cache. It does not publish
 binary assets. Normal package publication repeats the source check before
-announcing packages. See [source publication](README.md#package-discovery-and-event-catalogs)
+announcing packages. It groups all retained source revisions by exact repository
+URL, pushes locally available owned revisions together, and checks every revision
+and its history in one fresh clone per URL. Missing, shallow, or corrupt history
+blocks publication; earlier verification and publisher caches are not reused.
+See [source publication](README.md#package-discovery-and-event-catalogs)
 for checkout and identity requirements. CI can independently run
 `scripts/verify-public-source.py` with checksum-pinned Git helpers, without a
 signing key, before creating a public binary release.

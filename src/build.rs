@@ -109,12 +109,23 @@ impl SourceCheckout {
     }
 
     fn fetch_inner(source: SourceInfo, work: &Path, public: bool) -> Result<Self> {
+        let directory = Self::clone_source(&source, work, public)?;
+        let root = directory.path().join("repo");
+        let commit = Self::verify_source_revision(&root, &source.rev)?;
+        git_ok(
+            git()
+                .current_dir(&root)
+                .args(["checkout", "--detach", &commit]),
+        )?;
+        Ok(Self { directory, source })
+    }
+
+    fn clone_source(source: &SourceInfo, work: &Path, public: bool) -> Result<tempfile::TempDir> {
         source.validate()?;
         fs::create_dir_all(work)?;
         let directory = tempfile::Builder::new()
             .prefix("source-")
             .tempdir_in(work)?;
-        let root = directory.path().join("repo");
         let mut clone = git();
         if source.git.starts_with("htree://") {
             crate::helpers::configure_git(&mut clone)?;
@@ -132,37 +143,71 @@ impl SourceCheckout {
                 .args(["clone", "--no-local", "--no-checkout", "--", &source.git])
                 .arg("repo"),
         )?;
-        let commit = git_ok(git().current_dir(&root).args([
+        Ok(directory)
+    }
+
+    fn verify_source_revision(root: &Path, revision: &str) -> Result<String> {
+        let commit = git_ok(git().current_dir(root).args([
             "rev-parse",
             "--verify",
-            &format!("{}^{{commit}}", source.rev),
+            &format!("{revision}^{{commit}}"),
         ]))?;
         ensure!(
-            commit.eq_ignore_ascii_case(&source.rev),
+            commit.eq_ignore_ascii_case(revision),
             "source did not resolve to the requested commit"
         );
         let shallow = git_ok(
             git()
-                .current_dir(&root)
+                .current_dir(root)
                 .args(["rev-parse", "--is-shallow-repository"]),
         )?;
         ensure!(
             shallow == "false",
             "source history is incomplete (shallow repository)"
         );
-        git_ok(git().current_dir(&root).args([
+        git_ok(git().current_dir(root).args([
             "rev-list",
             "--objects",
             "--missing=error",
             &commit,
             "--",
         ]))?;
-        git_ok(
-            git()
-                .current_dir(&root)
-                .args(["checkout", "--detach", &commit]),
-        )?;
-        Ok(Self { directory, source })
+        Ok(commit)
+    }
+
+    /// Check every retained revision using one independent public clone of its
+    /// exact source URL. No publisher cache or proof from an earlier run is reused.
+    pub(crate) fn verify_public_revisions(
+        source_url: &str,
+        revisions: &std::collections::BTreeSet<String>,
+        work: &Path,
+    ) -> Result<()> {
+        let first = revisions.first().context("source revisions are empty")?;
+        for rev in revisions {
+            SourceInfo {
+                git: source_url.into(),
+                rev: rev.clone(),
+            }
+            .validate()?;
+        }
+        let source = SourceInfo {
+            git: source_url.into(),
+            rev: first.clone(),
+        };
+        let directory = Self::clone_source(&source, work, true)?;
+        let root = directory.path().join("repo");
+        for revision in revisions {
+            Self::verify_source_revision(&root, revision)?;
+        }
+        // Traversal proves completeness; fsck also detects corrupt contents.
+        git_ok(git().current_dir(&root).args([
+            "fsck",
+            "--full",
+            "--no-reflogs",
+            "--no-dangling",
+            "--no-progress",
+        ]))?;
+        Ok(())
     }
 
     pub fn root(&self) -> PathBuf {
