@@ -188,13 +188,14 @@ async fn install_reports_waits_and_verified_download_before_completion() -> anyh
         "/catalog.json"
     );
     cli.until("Reading package catalogs", Duration::from_secs(2));
-    // The remote is deliberately stalled: output must arrive before it replies.
-    cli.until("elapsed", Duration::from_secs(7));
+    // Metadata now has a short deadline. Its initial status must still arrive
+    // before the server replies; exercise periodic waiting on the payload below.
     assert!(cli.child.try_wait()?.is_none());
     resume.send(())?;
     requested.recv_timeout(Duration::from_secs(5))?;
     cli.until("Downloading and verifying", Duration::from_secs(2));
     cli.until("0 B / 2.0 MiB", Duration::from_secs(7));
+    cli.until("elapsed", Duration::from_secs(7));
     assert!(cli.child.try_wait()?.is_none());
     resume.send(())?;
     requested.recv_timeout(Duration::from_secs(5))?;

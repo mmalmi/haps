@@ -63,7 +63,7 @@ jobs:
       - name: Check all targets with Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test native installation and package lifecycle
-        run: cargo test --locked
+        run: cargo test --locked --no-fail-fast
       - name: Test installers and audit integration
         if: runner.os == 'Linux'
         run: |
