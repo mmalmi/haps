@@ -4,7 +4,7 @@ use crate::{
     model::*,
     repository::Repository,
 };
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use hashtree_core::Cid;
 use hashtree_index::{SearchIndex, SearchIndexOptions, SearchOptions};
@@ -15,13 +15,17 @@ use nostr_pubsub::{
     VerifiedEvent,
 };
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 #[derive(Clone)]
 pub struct IndexReader {
     location: String,
     author: String,
     home: PathBuf,
+    timeout: Duration,
 }
 impl IndexReader {
     pub fn new(home: &Path, location: &str, author: &str) -> Self {
@@ -29,7 +33,13 @@ impl IndexReader {
             home: home.into(),
             location: location.into(),
             author: author.into(),
+            timeout: Duration::from_secs(3),
         }
+    }
+    /// Bound the complete index query, including its background reader.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
     async fn read(&self, filters: Vec<Filter>, options: QueryOptions) -> Result<QueryReport> {
         if self.location.starts_with("htree://") || self.location.starts_with("nhash") {
@@ -155,9 +165,18 @@ impl EventBus for IndexReader {
         // Hashtree Nostr adapter. Keep it off the async router's worker threads.
         let reader = self.clone();
         let runtime = tokio::runtime::Handle::current();
-        tokio::task::spawn_blocking(move || runtime.block_on(reader.read(filters, options)))
-            .await
-            .map_err(|error| PubsubError::Storage(error.to_string()))?
-            .map_err(|error| PubsubError::Storage(format!("{error:#}")))
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        // Cancelling only the JoinHandle leaves the blocking reader alive and
+        // can make CLI shutdown wait for a full content-download timeout.
+        tokio::task::spawn_blocking(move || {
+            runtime.block_on(async {
+                tokio::time::timeout_at(deadline, reader.read(filters, options))
+                    .await
+                    .context("event index response deadline elapsed")?
+            })
+        })
+        .await
+        .map_err(|error| PubsubError::Storage(error.to_string()))?
+        .map_err(|error| PubsubError::Storage(format!("{error:#}")))
     }
 }

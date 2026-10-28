@@ -417,7 +417,8 @@ impl Discovery {
         let mut lookup =
             crate::lookup::Lookup::default().index("haps-private", std::sync::Arc::new(bus))?;
         for (location, author) in indexes {
-            let reader = crate::index_reader::IndexReader::new(&self.home, location, author);
+            let reader = crate::index_reader::IndexReader::new(&self.home, location, author)
+                .with_timeout(window);
             lookup = lookup.index(&format!("{author}:{location}"), std::sync::Arc::new(reader))?;
         }
         if let Some(relay) = relay {

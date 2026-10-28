@@ -1022,6 +1022,12 @@ fn check_checkpoint(source: &mut Source, snapshot: &Snapshot) -> Result<()> {
     Ok(())
 }
 
+async fn query_metadata<T>(read: impl std::future::Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(std::time::Duration::from_secs(3), read)
+        .await
+        .context("package metadata response deadline elapsed")?
+}
+
 async fn direct_candidates(
     home: &Path,
     query: Option<&str>,
@@ -1036,7 +1042,7 @@ async fn direct_candidates(
         .map(|event| (event.id.to_hex(), event))
         .collect();
     drop(discovery);
-    let mut found = Vec::new();
+    let mut reads = Vec::new();
     for announcement in announcements {
         let Some(ref head) = announcement.head else {
             continue;
@@ -1055,24 +1061,39 @@ async fn direct_candidates(
                 continue;
             }
         }
-        let result: Result<Vec<Candidate>> = async {
-            let repo = Arc::new(Repository::open(&head.payload, &home.join("cache"))?);
-            let mut releases = Vec::new();
-            for pointer in &head.releases {
-                let event: Event = match cached.get(&pointer.id) {
-                    Some(event) => event.clone(),
-                    None => repo.json(&pointer.cid).await?,
-                };
-                let release = head.verify_release(pointer, event, &author, &announcement.name)?;
-                releases.push(Candidate {
-                    repository: repo.clone(),
-                    package_card: Some(head.card.clone()),
-                    release,
-                });
+        reads.push((identity, author, announcement));
+    }
+    use futures::StreamExt;
+    let mut responses = futures::stream::iter(reads)
+        .map(|(identity, author, announcement)| {
+            let cached = &cached;
+            async move {
+                let head = announcement.head.expect("direct announcement");
+                let result = query_metadata(async {
+                    let repo = Arc::new(Repository::open(&head.payload, &home.join("cache"))?);
+                    let mut releases = Vec::new();
+                    for pointer in &head.releases {
+                        let event: Event = match cached.get(&pointer.id) {
+                            Some(event) => event.clone(),
+                            None => repo.json(&pointer.cid).await?,
+                        };
+                        let release =
+                            head.verify_release(pointer, event, &author, &announcement.name)?;
+                        releases.push(Candidate {
+                            repository: repo.clone(),
+                            package_card: Some(head.card.clone()),
+                            release,
+                        });
+                    }
+                    Ok(releases)
+                })
+                .await;
+                (identity, result)
             }
-            Ok(releases)
-        }
-        .await;
+        })
+        .buffer_unordered(8);
+    let mut found = Vec::new();
+    while let Some((identity, result)) = responses.next().await {
         match result {
             Ok(releases) => found.extend(releases),
             Err(error) => eprintln!(
@@ -1096,33 +1117,45 @@ async fn candidates(
         .map(|c| (c.release.coordinate(), c.release.event.id))
         .collect();
     let direct_authors: BTreeSet<_> = found.iter().map(|c| c.release.author()).collect();
-    for (name, source) in &mut config.sources {
-        if package.is_some() && direct_authors.contains(&source.author) {
-            continue;
-        }
-        let repo = match Repository::open(&source.location, &home.join("cache")) {
-            Ok(repo) => Arc::new(repo),
-            Err(error) => {
-                eprintln!(
-                    "Package source {name} unavailable; results may be incomplete: {error:#}"
-                );
-                continue;
-            }
-        };
-        let snapshot = match repo.catalog(&source.author).await {
-            Ok(snapshot) => Arc::new(snapshot),
+    use futures::StreamExt;
+    let sources: Vec<_> = config
+        .sources
+        .iter()
+        .filter(|(_, source)| !(package.is_some() && direct_authors.contains(&source.author)))
+        .map(|(name, source)| (name.clone(), source.location.clone(), source.author.clone()))
+        .collect();
+    let mut responses = futures::stream::iter(sources)
+        .map(|(name, location, author)| async move {
+            let result = query_metadata(async {
+                let repo = Arc::new(Repository::open(&location, &home.join("cache"))?);
+                let snapshot = repo.catalog(&author).await?;
+                let releases = if let Some(query) = query {
+                    repo.search(&snapshot, query).await?
+                } else {
+                    repo.releases(&snapshot).await?
+                };
+                Ok((repo, snapshot, releases))
+            })
+            .await;
+            (name, result)
+        })
+        .buffer_unordered(8);
+    while let Some((name, result)) = responses.next().await {
+        let (repo, snapshot, releases) = match result {
+            Ok(response) => response,
             Err(error) => {
                 eprintln!("Package source {name} unavailable or invalid: {error:#}");
                 continue;
             }
         };
-        check_checkpoint(source, &snapshot)?;
+        check_checkpoint(
+            config
+                .sources
+                .get_mut(&name)
+                .expect("source remains configured"),
+            &snapshot,
+        )?;
         available += 1;
-        let releases = if let Some(query) = query {
-            repo.search(&snapshot, query).await?
-        } else {
-            repo.releases(&snapshot).await?
-        };
         for release in releases {
             if let Some(id) = seen.insert(release.coordinate(), release.event.id) {
                 ensure!(

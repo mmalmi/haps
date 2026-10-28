@@ -368,13 +368,16 @@ impl Pending {
                 let fetch = futures::future::Abortable::new(
                     async move {
                         let _permit = permits.acquire().await?;
-                        let repo = Repository::open(&location, &home.join("cache"))?;
-                        let event: Event = repo.json(&cid).await?;
-                        ensure!(
-                            event.id == id,
-                            "package pointer returned a different release"
-                        );
-                        Ok(Update::Events(vec![event]))
+                        query_metadata(async {
+                            let repo = Repository::open(&location, &home.join("cache"))?;
+                            let event: Event = repo.json(&cid).await?;
+                            ensure!(
+                                event.id == id,
+                                "package pointer returned a different release"
+                            );
+                            Ok(Update::Events(vec![event]))
+                        })
+                        .await
                     },
                     registration,
                 );
@@ -426,19 +429,22 @@ impl Pending {
             self.streams.push(
                 stream::once(async move {
                     let _permit = permits.acquire().await?;
-                    let repo = Repository::open(&location, &home.join("cache"))?;
-                    let snapshot = repo.catalog(&author).await?;
-                    let releases = if query.trim().is_empty() {
-                        repo.releases(&snapshot).await?
-                    } else {
-                        repo.search(&snapshot, &query).await?
-                    };
-                    Ok(Update::Catalog {
-                        author,
-                        location,
-                        snapshot: Box::new(snapshot),
-                        releases,
+                    query_metadata(async {
+                        let repo = Repository::open(&location, &home.join("cache"))?;
+                        let snapshot = repo.catalog(&author).await?;
+                        let releases = if query.trim().is_empty() {
+                            repo.releases(&snapshot).await?
+                        } else {
+                            repo.search(&snapshot, &query).await?
+                        };
+                        Ok(Update::Catalog {
+                            author,
+                            location,
+                            snapshot: Box::new(snapshot),
+                            releases,
+                        })
                     })
+                    .await
                 })
                 .boxed_local(),
             );

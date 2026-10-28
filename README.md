@@ -1125,6 +1125,11 @@ use newest timestamp/lowest-event-ID ordering. Connections are shared across
 discovery, trust, and feedback queries. EOSE ends a relay's current response,
 not a mandatory waiting period or proof of global completeness. Unavailable
 sources are reported; a quiet relay cannot establish that a package does not exist.
+Index reads share the lookup's short response deadline (three seconds by default),
+including their background reader. A stalled index cannot keep a command waiting
+for the longer package-download timeout; verified results from other sources remain usable.
+Release metadata and legacy catalog lookups use the same short deadline. Legacy
+catalogs are read concurrently, so their timeouts do not accumulate one by one.
 
 Your catalog is an ordinary `hashtree-nostr` event index containing a selected
 collection of original signed events, separate from
