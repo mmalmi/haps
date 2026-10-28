@@ -334,6 +334,22 @@ Large repositories can set `--clone-timeout 1800` (seconds; default 300,
 maximum 1800). Allow additional time in the CI job for the revision and
 complete-history checks, which retain their own command deadlines.
 
+To select established public read servers explicitly:
+
+```sh
+python3 scripts/verify-public-source.py --commit FULL_COMMIT --helpers PATH_TO_HELPERS \
+  --read-server https://cdn.iris.to --read-server https://upload.iris.to \
+  --clone-timeout 1800
+```
+
+Only these two exact HTTPS origins are accepted. With both selected, the pinned
+helper tries CDN then upload. Without `--read-server`, helper defaults remain
+unchanged. Selection writes a temporary isolated configuration; the local data
+cache starts empty and helper pins, hash checks and full-history checks remain
+unchanged. Shared public caches may already be warm: this proves availability
+through the selected servers, not cold public-cache speed or default-route
+performance. A first fetch of large histories can still take many minutes.
+
 Publication keeps original release events on a byte-identical retry, refuses
 changed bytes at an existing version, uploads immutable packages and a native
 Hashtree Nostr event index, and requires relay acknowledgement. Failed events

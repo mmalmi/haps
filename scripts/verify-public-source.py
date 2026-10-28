@@ -8,6 +8,8 @@ import re
 import subprocess
 import tempfile
 
+PUBLIC_READ_SERVERS = ('https://cdn.iris.to', 'https://upload.iris.to')
+
 
 def clone_timeout_seconds(value):
     try:
@@ -19,12 +21,23 @@ def clone_timeout_seconds(value):
     return seconds
 
 
-def verify(source, revision, helpers, clone_timeout=300):
+def verify(source, revision, helpers, clone_timeout=300, read_servers=None):
     clone_timeout = clone_timeout_seconds(clone_timeout)
+    servers = sorted(set(read_servers or ()))
+    if any(server not in PUBLIC_READ_SERVERS for server in servers):
+        raise ValueError('Read servers must be https://cdn.iris.to or https://upload.iris.to')
     if not source.startswith('htree://') or not re.fullmatch(r'[0-9a-fA-F]{40}|[0-9a-fA-F]{64}', revision):
         raise ValueError('Expected an explicit Hashtree source URL and full commit hash')
     with tempfile.TemporaryDirectory(prefix='public-source-') as temporary:
         root = Path(temporary)
+        if servers:
+            config = root / 'config'
+            config.mkdir()
+            (config / 'config.toml').write_text(
+                '[blossom]\nservers = []\nread_servers = ' + json.dumps(servers)
+                + '\nwrite_servers = []\n', encoding='utf-8')
+            print('Public source read servers:', ', '.join(servers),
+                  f'(clone timeout: {clone_timeout}s)', flush=True)
         env = dict(os.environ, HTREE_CONFIG_DIR=str(root / 'config'),
                    HTREE_DATA_DIR=str(root / 'data'), HTREE_PREFER_LOCAL_DAEMON='false',
                    HTREE_LOCAL_DAEMON_ONLY='false', GIT_CONFIG_NOSYSTEM='1',
@@ -55,5 +68,8 @@ if __name__ == '__main__':
     parser.add_argument('--helpers', type=Path, required=True)
     parser.add_argument('--clone-timeout', type=clone_timeout_seconds, default=300, metavar='SECONDS',
                         help='Cold clone deadline, from 1 to 1800 seconds (default: 300)')
+    parser.add_argument('--read-server', action='append', choices=PUBLIC_READ_SERVERS,
+                        help='Public read server; repeat to select both (default: helper defaults)')
     args = parser.parse_args()
-    verify(json.loads(args.config.read_text())['source'], args.commit, args.helpers, args.clone_timeout)
+    verify(json.loads(args.config.read_text())['source'], args.commit, args.helpers,
+           args.clone_timeout, args.read_server)
