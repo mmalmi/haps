@@ -166,17 +166,25 @@ impl EventBus for IndexReader {
         let reader = self.clone();
         let runtime = tokio::runtime::Handle::current();
         let deadline = tokio::time::Instant::now() + self.timeout;
+        let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
         // Cancelling only the JoinHandle leaves the blocking reader alive and
         // can make CLI shutdown wait for a full content-download timeout.
-        tokio::task::spawn_blocking(move || {
+        let result = tokio::task::spawn_blocking(move || {
             runtime.block_on(async {
-                tokio::time::timeout_at(deadline, reader.read(filters, options))
-                    .await
-                    .context("event index response deadline elapsed")?
+                tokio::select! {
+                    _ = cancelled => anyhow::bail!("event index query cancelled"),
+                    result = tokio::time::timeout_at(deadline, reader.read(filters, options)) => {
+                        result.context("event index response deadline elapsed")?
+                    }
+                }
             })
         })
-        .await
-        .map_err(|error| PubsubError::Storage(error.to_string()))?
-        .map_err(|error| PubsubError::Storage(format!("{error:#}")))
+        .await;
+        // Keep the sender alive across the await. Dropping this query closes
+        // the channel and drops the network future inside the blocking worker.
+        drop(cancel);
+        result
+            .map_err(|error| PubsubError::Storage(error.to_string()))?
+            .map_err(|error| PubsubError::Storage(format!("{error:#}")))
     }
 }

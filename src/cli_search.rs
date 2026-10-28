@@ -498,6 +498,9 @@ pub(super) async fn run(
             &mut std::io::stdout(),
         )?;
     }
+    // A snapshot has one network budget, including queued follow-up queries.
+    // Streaming callers already receive ready rows and can keep discovering.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     let mut pending = Pending::default();
     // Do not wait for relay setup before starting independent index readers.
     if networking_enabled(config) {
@@ -520,7 +523,19 @@ pub(super) async fn run(
     let permits = Arc::new(tokio::sync::Semaphore::new(8));
     results.sources(config, trust, query)?;
     pending.plan(home, config, trust, &results, query, &permits)?;
-    while let Some(update) = pending.streams.next().await {
+    loop {
+        let update = if streaming {
+            pending.streams.next().await
+        } else {
+            match tokio::time::timeout_at(deadline, pending.streams.next()).await {
+                Ok(update) => update,
+                Err(_) => {
+                    eprintln!("Showing available results; some sources are still pending.");
+                    break;
+                }
+            }
+        };
+        let Some(update) = update else { break };
         // Drain only already-ready work: no quiet timer and no wait for another
         // source. This coalesces relay bursts before planning follow-up queries.
         let mut updates = vec![update];
@@ -590,6 +605,7 @@ pub(super) async fn run(
         results.sources(config, trust, query)?;
         pending.plan(home, config, trust, &results, query, &permits)?;
     }
+    drop(pending);
     save_config(home, config)?;
     if !streaming {
         if json {

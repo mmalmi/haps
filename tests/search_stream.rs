@@ -57,7 +57,7 @@ fn wait_for_exit(child: &mut ChildGuard) -> anyhow::Result<ExitStatus> {
     }
 }
 
-async fn fixture(cache_release: bool) -> anyhow::Result<Fixture> {
+async fn fixture(cache_release: bool, source_count: usize) -> anyhow::Result<Fixture> {
     let root = tempfile::tempdir()?;
     let home = root.path().join("reader");
     let publisher = Keys::generate();
@@ -95,12 +95,12 @@ async fn fixture(cache_release: bool) -> anyhow::Result<Fixture> {
     drop(discovery);
 
     let other = Keys::generate();
-    let sources: BTreeMap<_, _> = (0..4)
+    let sources: BTreeMap<_, _> = (0..source_count)
         .map(|i| {
             (
                 format!("slow-{i}"),
                 serde_json::json!({
-                    "location": location, "author": other.public_key().to_hex(),
+                    "location": format!("{location}/slow-{i}"), "author": other.public_key().to_hex(),
                     "sequence": 0, "event_id": ""
                 }),
             )
@@ -124,7 +124,7 @@ async fn fixture(cache_release: bool) -> anyhow::Result<Fixture> {
 
 #[tokio::test]
 async fn cached_snapshot_is_flushed_before_an_unresponsive_source_finishes() -> anyhow::Result<()> {
-    let fixture = fixture(true).await?;
+    let fixture = fixture(true, 4).await?;
     let mut child = ChildGuard(
         fixture
             .command(&["search", "--json", "--stream", "--", "friendly"])
@@ -152,7 +152,7 @@ async fn cached_snapshot_is_flushed_before_an_unresponsive_source_finishes() -> 
 #[tokio::test]
 async fn snapshot_search_and_info_finish_with_cached_results_despite_stalled_catalogs()
 -> anyhow::Result<()> {
-    let fixture = fixture(true).await?;
+    let fixture = fixture(true, 4).await?;
     for args in [
         vec!["search", "--json", "friendly"],
         vec!["info", "hello", "--json"],
@@ -168,10 +168,27 @@ async fn snapshot_search_and_info_finish_with_cached_results_despite_stalled_cat
 
 #[tokio::test]
 async fn missing_release_metadata_uses_the_short_query_deadline() -> anyhow::Result<()> {
-    let fixture = fixture(false).await?;
+    let fixture = fixture(false, 4).await?;
     let mut child = ChildGuard(fixture.command(&["search", "--json", "friendly"]).spawn()?);
     assert!(wait_for_exit(&mut child)?.success());
     let response: serde_json::Value = serde_json::from_reader(child.0.stdout.take().unwrap())?;
     assert_eq!(response, serde_json::json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn snapshot_budget_includes_catalogs_waiting_for_a_network_permit() -> anyhow::Result<()> {
+    // More than two batches at the eight-reader limit. Per-reader deadlines
+    // alone take at least nine seconds; the snapshot must not drain the queue.
+    let fixture = fixture(true, 17).await?;
+    for args in [
+        vec!["search", "--json", "friendly"],
+        vec!["info", "hello", "--json"],
+    ] {
+        let mut child = ChildGuard(fixture.command(&args).spawn()?);
+        assert!(wait_for_exit(&mut child)?.success());
+        let response: serde_json::Value = serde_json::from_reader(child.0.stdout.take().unwrap())?;
+        assert!(serde_json::to_string(&response)?.contains(&fixture.release_id));
+    }
     Ok(())
 }

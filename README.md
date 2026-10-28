@@ -1032,8 +1032,9 @@ through its relay and raw blocks through its shared cache and peer connections.
 Without a daemon, the same binary uses the relays and Blossom servers from the
 shared Hashtree configuration. No public directory gateway is required.
 
-Haps observes signed roots for a bounded window, then reads one immutable catalog
-snapshot. Hosting signatures, catalog signatures, publisher pins, block hashes,
+Haps reads one immutable catalog snapshot as soon as a signed root is available.
+Discovery streams available results while response deadlines bound unavailable sources.
+Hosting signatures, catalog signatures, publisher pins, block hashes,
 and catalog rollback protection remain separate checks. No daemon is started
 and no identity is created just to download a package.
 
@@ -1130,6 +1131,10 @@ including their background reader. A stalled index cannot keep a command waiting
 for the longer package-download timeout; verified results from other sources remain usable.
 Release metadata and legacy catalog lookups use the same short deadline. Legacy
 catalogs are read concurrently, so their timeouts do not accumulate one by one.
+Snapshot searches share one three-second network budget across queued sources
+and follow-up queries, then return the verified results available so far.
+Streaming searches continue delivering updates. Cancelling a query also stops
+its background index readers.
 
 Your catalog is an ordinary `hashtree-nostr` event index containing a selected
 collection of original signed events, separate from
@@ -1160,6 +1165,12 @@ instead of the current directory. Run these publishing commands from the source
 repository when publishing locally prepared packages; if the source is already
 public, a local source checkout is not required. Other publishers' source is
 checked without pushing changes to their repositories.
+
+Source pushes prefer the qualified bundled Git helper. Separately installed
+helpers must match a pinned companion binary or report the
+`complete-blob-dag-v1` publication capability. Unsupported helpers stop
+publication before any source refs change. Source reading retains its existing
+helper compatibility.
 
 You can also curate other publishers' packages without changing their signatures:
 
@@ -1315,8 +1326,9 @@ published-binary match.
 After committing a version bump, pushing `master`, and waiting for CI:
 
 ```sh
+python3 scripts/bundle.py --target "$(haps target)" --destination work/release-helpers
 git tag vX.Y.Z
-git push origin master
+PATH="$PWD/work/release-helpers/libexec:$PATH" git push origin master
 git push github vX.Y.Z
 gh workflow run release.yml --repo mmalmi/haps -f tag=vX.Y.Z
 # Once the workflow succeeds, mirror its exact assets using the maintainer's htree identity:
@@ -1325,7 +1337,8 @@ python3 scripts/publish-hashtree-release.py --tag vX.Y.Z --expected-root VERIFIE
 
 GitHub release workflow first cold-fetches the tagged commit from the configured
 Hashtree source and refuses to publish binaries if its history is incomplete.
-The `origin` push above uploads source through this repository's Hashtree remote.
+The `origin` push above uses the checksum-pinned Git helper to upload source
+through this repository's Hashtree remote.
 Resolve and verify the current `releases/haps` root before mirroring; the
 `--expected-root` check protects existing release history. The mirror command
 verifies asset sizes/checksums and the tag's source commit,

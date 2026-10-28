@@ -54,6 +54,8 @@ def stage_helpers(target, destination, cache):
                 if not info.isfile():
                     raise ValueError('Helper must be a regular file')
                 data = bundle.extractfile(info).read()
+        if tool == 'git-remote-htree' and hashlib.sha256(data).hexdigest() != asset['git_remote_htree_sha256']:
+            raise ValueError('Git publisher helper checksum mismatch')
         (destination / name).write_bytes(data)
         (destination / name).chmod(0o755)
     version = subprocess.check_output([str(destination / ('htree' + suffix)), '--version'], text=True).strip()

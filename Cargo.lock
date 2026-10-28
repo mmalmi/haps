@@ -1078,9 +1078,9 @@ dependencies = [
 
 [[package]]
 name = "hashtree-index"
-version = "0.2.84"
+version = "0.2.85"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "267e76a258ae8500cd917e502f105d2fcd884265a3116e17cee4dd159e8539f7"
+checksum = "2042fb6a69c0ac7fe06e0da4620f0460a08c235a1fb8c87007990d6347d486ce"
 dependencies = [
  "futures",
  "hashtree-core",
@@ -1090,9 +1090,9 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr"
-version = "0.2.88"
+version = "0.2.90"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd941c6b56fded4be867db3e3da2da7fdb4b0b8cb266e0e68b1476f1caaf8afa"
+checksum = "06bdf0a61b4dbcd0e96f8a347a98b91e8d37084d9fa72c3e27b01490a135d67a"
 dependencies = [
  "futures",
  "hashtree-collection",
@@ -1100,6 +1100,7 @@ dependencies = [
  "hashtree-index",
  "hex",
  "libc",
+ "negentropy",
  "nostr",
  "nostr-relay-pool",
  "nostr-sdk",
@@ -1113,9 +1114,9 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr-pubsub"
-version = "0.2.85"
+version = "0.2.87"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "923e4ef7e715622543e41b2214e0fcd8b6f501643cc42879b728e5c7836bc4f6"
+checksum = "f6b5e2399dcaf755ace9f7688f2805844e5bffe90e9f5672cceac3ca9890e932"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -1653,9 +1654,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub"
-version = "0.1.16"
+version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d8ed6dc361119da85a52e7adce2d79b7502255f8a2eb7456c43dfc13c1e99c2"
+checksum = "afd77c862de316d52c9996a406ba7f5b3614e9574666021a01ac733986a8def4"
 dependencies = [
  "async-trait",
  "nostr",

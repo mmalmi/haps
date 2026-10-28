@@ -37,7 +37,7 @@ pub(crate) fn ensure_available<'a>(
         if owned && local.status.success() {
             eprintln!("Publishing source revision {} to Hashtree", source.rev);
             let mut push = git();
-            crate::helpers::configure_git(&mut push)?;
+            crate::helpers::configure_git_publisher(&mut push)?;
             let status = push
                 .current_dir(repository)
                 .args([

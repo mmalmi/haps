@@ -1032,6 +1032,7 @@ async fn direct_candidates(
     home: &Path,
     query: Option<&str>,
     package: Option<&str>,
+    deadline: tokio::time::Instant,
 ) -> Result<Vec<Candidate>> {
     let discovery = Discovery::open(home)?;
     let announcements = discovery.announcements(None).await?;
@@ -1093,7 +1094,9 @@ async fn direct_candidates(
         })
         .buffer_unordered(8);
     let mut found = Vec::new();
-    while let Some((identity, result)) = responses.next().await {
+    while let Ok(Some((identity, result))) =
+        tokio::time::timeout_at(deadline, responses.next()).await
+    {
         match result {
             Ok(releases) => found.extend(releases),
             Err(error) => eprintln!(
@@ -1110,7 +1113,9 @@ async fn candidates(
     query: Option<&str>,
     package: Option<&str>,
 ) -> Result<Vec<Candidate>> {
-    let mut found = direct_candidates(home, query, package).await?;
+    // One metadata budget covers both direct heads and queued legacy catalogs.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    let mut found = direct_candidates(home, query, package, deadline).await?;
     let mut available = usize::from(!found.is_empty());
     let mut seen: BTreeMap<_, _> = found
         .iter()
@@ -1140,7 +1145,7 @@ async fn candidates(
             (name, result)
         })
         .buffer_unordered(8);
-    while let Some((name, result)) = responses.next().await {
+    while let Ok(Some((name, result))) = tokio::time::timeout_at(deadline, responses.next()).await {
         let (repo, snapshot, releases) = match result {
             Ok(response) => response,
             Err(error) => {

@@ -4,23 +4,28 @@
   "assets": {
     "aarch64-apple-darwin": {
       "name": "hashtree-aarch64-apple-darwin.tar.gz",
-      "sha256": "ea575ecfb06d5dc461010fd577a6d3a7397f0bd82dc64fdddf0261d0a11706ad"
+      "sha256": "ea575ecfb06d5dc461010fd577a6d3a7397f0bd82dc64fdddf0261d0a11706ad",
+      "git_remote_htree_sha256": "d60f75bc324e128b20b0bd1a1ba76b87c3161cbbb45cb656c79712bd9ee22ec4"
     },
     "x86_64-apple-darwin": {
       "name": "hashtree-x86_64-apple-darwin.tar.gz",
-      "sha256": "934841b6ff1e413be399f44408423f02cad49d77d8006eeebb721c073892108d"
+      "sha256": "934841b6ff1e413be399f44408423f02cad49d77d8006eeebb721c073892108d",
+      "git_remote_htree_sha256": "5c8dc0e869254bed5fb8fc0098d0d26a89bf4566d27aab04d310b50a7c736e5b"
     },
     "aarch64-unknown-linux-gnu": {
       "name": "hashtree-aarch64-unknown-linux-musl.tar.gz",
-      "sha256": "9ea661e38039fb876b52a6cda240da6a4ddae6166cf6548b8eb0ae7ecae98b0b"
+      "sha256": "9ea661e38039fb876b52a6cda240da6a4ddae6166cf6548b8eb0ae7ecae98b0b",
+      "git_remote_htree_sha256": "85063f5be4a1783e5757a986d1d0090b16b8b0e2054c3b9d7d32dd49d0d55db9"
     },
     "x86_64-unknown-linux-gnu": {
       "name": "hashtree-x86_64-unknown-linux-musl.tar.gz",
-      "sha256": "d309f938ead838fabaf1c072c89d9b844bfdfb7d3a3549f90804109a26f536de"
+      "sha256": "d309f938ead838fabaf1c072c89d9b844bfdfb7d3a3549f90804109a26f536de",
+      "git_remote_htree_sha256": "ab3177515c89b59c82dd433b43361314a7b6e31c6f493469309257c8019ec21c"
     },
     "x86_64-pc-windows-msvc": {
       "name": "hashtree-x86_64-pc-windows-msvc.zip",
-      "sha256": "bb181a959a58ac0641ed9e1cf443ad3803bdd7ed87f864cd26aa910b5d4b0079"
+      "sha256": "bb181a959a58ac0641ed9e1cf443ad3803bdd7ed87f864cd26aa910b5d4b0079",
+      "git_remote_htree_sha256": "6574fe5149b289941dbdeb5c9fd7319545b6ffff97a9f8490f159bc99f700c54"
     }
   }
 }

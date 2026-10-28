@@ -74,7 +74,18 @@ async fn publishing_pushes_pinned_source_and_blocks_announcement_on_cold_fetch_f
     fs::create_dir(&tools)?;
     executable(
         &tools.join("git-remote-htree"),
-        "#!/bin/sh\necho 'Usage: git-remote-htree' >&2\nexit 1\n",
+        r#"#!/usr/bin/env python3
+import json, os, sys
+if sys.argv[1:] == ['--publisher-capabilities'] and not os.environ.get('OLD_HELPER'):
+    if os.environ.get('BAD_CAPABILITIES'):
+        print('{"schema": 1, "helper": "git-remote-htree", "capabilities": ["push"]}')
+    else:
+        print(json.dumps({'schema': 1, 'helper': 'git-remote-htree', 'version': '0.2.93',
+                          'capabilities': ['complete-blob-dag-v1']}))
+    sys.exit(0)
+print('Usage: git-remote-htree', file=sys.stderr)
+sys.exit(1)
+"#,
     )?;
     executable(
         &tools.join("htree"),
@@ -113,9 +124,14 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT']] + args)
     )?;
     let marker = root.join("marker");
     let mut paths = vec![tools];
-    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap()));
+    paths.extend(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap())
+            .filter(|directory| !directory.join("git-remote-htree").exists()),
+    );
     let path = std::env::join_paths(paths)?;
     for (failure, expected) in [
+        ("OLD_HELPER", ""),
+        ("BAD_CAPABILITIES", ""),
         ("FAIL_PUSH", "source-push\n"),
         ("FAIL_FETCH", "source-push\ncold-fetch\n"),
         ("NONE", "source-push\ncold-fetch\npackage-upload\n"),
@@ -152,6 +168,9 @@ os.execv(os.environ['REAL_GIT'], [os.environ['REAL_GIT']] + args)
             assert!(
                 String::from_utf8_lossy(&result.stderr).contains("public source is incomplete")
             );
+        }
+        if matches!(failure, "OLD_HELPER" | "BAD_CAPABILITIES") {
+            assert!(String::from_utf8_lossy(&result.stderr).contains("updated Git helper"));
         }
     }
     Ok(())
