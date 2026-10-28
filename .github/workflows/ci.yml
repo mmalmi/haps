@@ -12,23 +12,28 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+        include:
+          - os: ubuntu-latest
+            runner: ubuntu-24.04
+          - os: macos-latest
+            runner: macos-14
+          - os: windows-latest
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install hash-pinned Rust toolchain
+        shell: bash
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/build-inputs.py rust --work "$RUNNER_TEMP/build-inputs"
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Install Linux build isolation
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y bubblewrap apparmor apparmor-profiles
+          python3 scripts/build-inputs.py ubuntu-test-tools --work "$RUNNER_TEMP/build-inputs"
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] &&
              [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1 ]; then
             # Load Ubuntu's scoped bwrap profile; retain the host-wide restriction.
@@ -77,7 +82,7 @@ jobs:
         run: cargo publish --dry-run --locked
       - name: Retain the verified crate
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: haps-crate-verified
           path: target/package/**/haps-*.crate
@@ -108,7 +113,7 @@ jobs:
         run: cargo test --locked --test published_apps -- --ignored --nocapture
       - name: Retain the verified Linux worker binary
         if: runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: haps-linux-verified
           path: target/debug/haps

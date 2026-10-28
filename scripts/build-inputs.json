@@ -1,0 +1,45 @@
+{
+  "rust": {
+    "version": "1.99.1",
+    "archives": {
+      "x86_64-unknown-linux-gnu": {
+        "url": "https://static.rust-lang.org/dist/2026-10-15/rust-1.99.1-x86_64-unknown-linux-gnu.tar.xz",
+        "sha256": "231fcae47ee950621374725b5fc3b5441d2fbda2955ac45dd7dc816d8876cfe7"
+      },
+      "aarch64-unknown-linux-gnu": {
+        "url": "https://static.rust-lang.org/dist/2026-10-15/rust-1.99.1-aarch64-unknown-linux-gnu.tar.xz",
+        "sha256": "a48fb1e853be56ce9b8e2751f5464dbd5e16440cd81e237920f3a5e7e806333e"
+      },
+      "x86_64-apple-darwin": {
+        "url": "https://static.rust-lang.org/dist/2026-10-15/rust-1.99.1-x86_64-apple-darwin.tar.xz",
+        "sha256": "13b237d0294bad3bb7b18d559517947ed8348ea25812fa3b468c904996f80e34"
+      },
+      "aarch64-apple-darwin": {
+        "url": "https://static.rust-lang.org/dist/2026-10-15/rust-1.99.1-aarch64-apple-darwin.tar.xz",
+        "sha256": "30976378b6aaefd1861ba475905c6ba22a44c981418ce52285006af26337f98c"
+      },
+      "x86_64-pc-windows-msvc": {
+        "url": "https://static.rust-lang.org/dist/2026-10-15/rust-1.99.1-x86_64-pc-windows-msvc.tar.xz",
+        "sha256": "4048445c5fa6fae8d5ca1a956e42c37ac2bdd1456c5f56a1139c0b074a7d1f6c"
+      }
+    }
+  },
+  "ubuntu_test_packages": [
+    {
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261028T000000Z/pool/main/b/bubblewrap/bubblewrap_0.9.0-1ubuntu0.3_amd64.deb",
+      "sha256": "2461f1beee9cb04c8942739fe1a2b37e7b7c2a3d518f0779dc75f9245baa3094"
+    },
+    {
+      "url": "https://snapshot.ubuntu.com/ubuntu/20261028T000000Z/pool/main/a/apparmor/apparmor-profiles_4.0.1really4.0.1-0ubuntu0.24.04.9_all.deb",
+      "sha256": "90b02aa006eea7702cd4e851343e469e41365dda42145a3cb035de1d6c773b8c"
+    }
+  ],
+  "arch": {
+    "image": "archlinux@sha256:624bdc7fc6615155d67bc34cf7146c0c9fd0e3c92943977da63a630e4ca49c30",
+    "snapshot": "2026/10/27",
+    "databases": {
+      "core": "c79cc056469df319b4d2f02e811d9ea3763c089af4db695073e600378745ab18",
+      "extra": "54c7b6f12d949b37995f340b5c0ea80a4211529f1011884364dc6b079479363c"
+    }
+  }
+}

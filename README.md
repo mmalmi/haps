@@ -571,7 +571,7 @@ When an interactive install lacks an audit, Haps asks **Audit and install? y/N**
    resolved to an already-installed executable without installing or updating it. Haps does not install
    agents or sign you in. Python 3 and Git are required.
 2. Haps clones the exact source commit into a private temporary directory and
-   prints its location and resolved build instructions. `haps.toml` is preferred;
+   prints its location. `haps.toml` is preferred;
    `haps-build.toml` is supported for older projects. Source preparation does
    not run build commands. Agent review sends the supplied source snapshot to the
    selected agent's configured service. The reviewer can read public dependency
@@ -1276,6 +1276,33 @@ existing stable version tag. It requires green Linux/macOS/Windows CI for that
 exact commit, checks the crate version against the tag, then extracts each archive
 and tests publishing, installing, and running its binary before creating a GitHub
 release. Binaries are built once and promoted unchanged to every download channel.
+
+CI and binary releases install Rust/Cargo 1.99.1 from the native archives pinned
+by SHA-256 in `scripts/build-inputs.json`; verification precedes extraction and
+execution. The compiler lives under the normal `.rustup/toolchains` directory,
+which the existing source-build isolation exposes read-only. Workflow actions
+use full commits. Builds use default Cargo features,
+`--release --locked`, and the selected native target. The five release targets
+are Linux GNU x86_64/aarch64, macOS x86_64/aarch64, and Windows x86_64 MSVC.
+Linux release runners use Ubuntu 22.04 and its preinstalled GNU linker/glibc;
+macOS uses Xcode/Apple SDKs on macOS 14 ARM or macOS 15 Intel with
+`MACOSX_DEPLOYMENT_TARGET=11.0`; Windows uses the preinstalled Visual Studio/MSVC
+and Windows SDK on Windows Server 2025. Git, Python 3 (with tar extraction
+filters), Bash, curl, archive tools, and the platform C toolchain must already be
+installed. Ubuntu's source-check job additionally requires Python 3.11+.
+Runner OS images and system libraries are external prerequisites, recorded in
+the hosted job logs; this does not claim bit-for-bit OS or compiler bootstrapping.
+
+Linux CI uses Ubuntu 24.04 with its existing AppArmor parser and runtime libraries.
+Its two additional test-tool packages are hash-pinned and installed without
+downloading dependencies. The Arch acceptance container is pinned by digest;
+fixed repository database hashes pin the downloaded package versions and
+checksums, which pacman verifies without refreshing the databases. These are CI
+setup steps. The canonical `haps.toml` source-build recipe installs no privileged
+host prerequisites and uses the caller's preinstalled Rust/Python tools and
+explicit build permissions. Different tools or system libraries can produce a
+different local payload; only Haps's complete payload comparison establishes a
+published-binary match.
 
 After committing a version bump, pushing `master`, and waiting for CI:
 

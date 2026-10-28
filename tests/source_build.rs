@@ -173,6 +173,7 @@ commands = [["rustc", "hello.rs", "-o", "hello{exe}"]]
         String::from_utf8_lossy(&preview.stderr)
     );
     assert!(String::from_utf8_lossy(&preview.stdout).contains("Preview only"));
+    assert!(String::from_utf8_lossy(&preview.stdout).contains("\"artifacts\""));
     assert!(!home.join("built-packages").exists());
     assert!(!run(&["build", &url, "--rev", "master"]).status.success());
     assert!(run(&["identity", "init"]).status.success());
@@ -192,6 +193,9 @@ commands = [["rustc", "hello.rs", "-o", "hello{exe}"]]
         "{}",
         String::from_utf8_lossy(&build.stderr)
     );
+    let output = String::from_utf8_lossy(&build.stdout);
+    assert!(output.starts_with("Built "), "{output}");
+    assert_eq!(output.lines().count(), 1, "{output}");
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let repo = haps::repository::Repository::local(home.join("built-packages")).unwrap();
     let keys = haps::install::load_keys(&home.join("identity.key")).unwrap();

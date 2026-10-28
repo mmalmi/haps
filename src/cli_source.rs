@@ -468,7 +468,6 @@ pub(super) async fn execute_build(
             )?
     };
     let checkout = haps::build::Checkout::with_recipe(source, recipe)?;
-    println!("{}", serde_json::to_string_pretty(&checkout.recipe)?);
     if execute && install {
         ensure!(
             !attest_scan || haps::security::enabled(home),
@@ -547,6 +546,7 @@ pub(super) async fn execute_build(
         }
         println!("Built {} {}", release.identity(), release.event.id);
     } else {
+        println!("{}", serde_json::to_string_pretty(&checkout.recipe)?);
         println!(
             "Preview only. Add --execute to build in isolation with network disabled; add --install to review and activate the result. Downloads require --allow-build-network."
         );

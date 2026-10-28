@@ -994,9 +994,9 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hashtree-client"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6f58e26bec24e1aaeab0ff8ba2c2ca9f3e187273a481802a962f344a78374205"
+checksum = "24d997547bb950fbb85e7f7d09bf6a062b9579ef7496751f37ab2467f9ceb58d"
 dependencies = [
  "anyhow",
  "async-trait",
