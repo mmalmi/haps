@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Install hash-pinned Rust toolchain
         shell: bash
-        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/build-inputs.py rust --work "$RUNNER_TEMP/build-inputs"
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/build-inputs.py rust --work "$RUNNER_TEMP/build-inputs" --bash "$BASH"
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Install Linux build isolation

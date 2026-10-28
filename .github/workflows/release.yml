@@ -101,7 +101,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         shell: bash
-        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/build-inputs.py rust --target "$TARGET" --work "$RUNNER_TEMP/build-inputs"
+        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/build-inputs.py rust --target "$TARGET" --work "$RUNNER_TEMP/build-inputs" --bash "$BASH"
       - name: Build tagged release binary
         env:
           TARGET: ${{ matrix.target }}

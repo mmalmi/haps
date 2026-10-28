@@ -24,9 +24,18 @@ class BuildInputs(unittest.TestCase):
                 patch.object(module.urllib.request, 'urlopen', return_value=io.BytesIO(b'corrupt')), \
                 patch.object(module.subprocess, 'run') as execute:
             with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
-                module.install_rust(lock, Path(temporary))
+                module.install_rust(lock, Path(temporary), bash='unused-bash')
             execute.assert_not_called()
             self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_windows_requires_git_bash_before_downloading(self):
+        with patch.object(module, 'platform') as platform, \
+                patch.object(module, 'host_target', return_value='x86_64-pc-windows-msvc'), \
+                patch.object(module, 'download') as fetch:
+            platform.system.return_value = 'Windows'
+            with self.assertRaisesRegex(ValueError, 'Git Bash'):
+                module.install_rust({}, Path('unused'))
+            fetch.assert_not_called()
 
     def test_cached_inputs_are_verified_before_reuse(self):
         data = b'reviewed input'

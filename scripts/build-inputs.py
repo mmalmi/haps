@@ -52,10 +52,12 @@ def host_target():
     return arch + '-' + system
 
 
-def install_rust(lock, work, target=None):
+def install_rust(lock, work, target=None, bash=None):
     target = target or host_target()
     if target != host_target():
         raise ValueError('Use the native runner for the selected target')
+    if platform.system() == 'Windows' and bash is None:
+        raise ValueError('Pass the installed Git Bash executable with --bash')
     rust = lock['rust']
     archive = download(rust['archives'][target], work / ('rust-' + target + '.tar.xz'))
     # Use an existing trusted-tool root so Haps's unchanged isolation policy can
@@ -67,7 +69,7 @@ def install_rust(lock, work, target=None):
     with tempfile.TemporaryDirectory(dir=work, prefix='rust-installer-') as temporary:
         subprocess.run(['tar', '-xJf', str(archive), '-C', temporary], check=True)
         installer = Path(temporary) / ('rust-' + rust['version'] + '-' + target) / 'install.sh'
-        subprocess.run(['bash', installer.as_posix(), '--prefix=' + prefix.as_posix(),
+        subprocess.run([bash or 'bash', installer.as_posix(), '--prefix=' + prefix.as_posix(),
                         '--components=' + ','.join(components), '--disable-ldconfig'], check=True)
     suffix = '.exe' if platform.system() == 'Windows' else ''
     for name in ('rustc', 'cargo'):
@@ -95,10 +97,11 @@ if __name__ == '__main__':
     parser.add_argument('action', choices=['rust', 'ubuntu-test-tools'])
     parser.add_argument('--work', type=Path, required=True)
     parser.add_argument('--target')
+    parser.add_argument('--bash', help='Installer shell; required for Git Bash on Windows')
     args = parser.parse_args()
     args.work.mkdir(parents=True, exist_ok=True)
     lock = json.loads(LOCK.read_text())
     if args.action == 'rust':
-        install_rust(lock, args.work, args.target)
+        install_rust(lock, args.work, args.target, args.bash)
     else:
         install_ubuntu_test_tools(lock, args.work)
