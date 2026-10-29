@@ -303,14 +303,14 @@ impl Drop for ChildGuard {
     }
 }
 
-fn info(fixture: &Fixture, server: &Server, label: &str) -> anyhow::Result<(bool, String)> {
+fn info(fixture: &Fixture, location: &str, label: &str) -> anyhow::Result<(bool, String)> {
     let home = fixture.temp.path().join(label);
     fs::create_dir_all(&home)?;
     fs::write(
         home.join("config.json"),
         serde_json::to_vec(&serde_json::json!({
             "identity": fixture.release.author(),
-            "sources": {"fixture": {"location": server.url, "author": fixture.release.author(), "sequence": 0, "event_id": ""}},
+            "sources": {"fixture": {"location": location, "author": fixture.release.author(), "sequence": 0, "event_id": ""}},
             "indexes": {}, "starting_point": null, "discovery_defaults_version": 2
         }))?,
     )?;
@@ -366,7 +366,7 @@ async fn exact_cli_ignores_unavailable_unrelated_releases_but_fails_on_selected_
     );
     for stall in [false, true] {
         let server = Server::new(fixture.repo.path().unwrap().into(), stall);
-        let (success, output) = info(&fixture, &server, &format!("reader-{stall}"))?;
+        let (success, output) = info(&fixture, &server.url, &format!("reader-{stall}"))?;
         assert!(
             success,
             "exact CLI must ignore unrelated unavailable records: {output}"
@@ -382,7 +382,7 @@ async fn exact_cli_ignores_unavailable_unrelated_releases_but_fails_on_selected_
     }
     fs::remove_file(fixture.repo.path().unwrap().join(&requested))?;
     let server = Server::new(fixture.repo.path().unwrap().into(), true);
-    let (success, output) = info(&fixture, &server, "missing-selected")?;
+    let (success, output) = info(&fixture, &server.url, "missing-selected")?;
     assert!(!success);
     assert!(output.contains("unavailable or incomplete"), "{output}");
     assert!(server.requests.lock().unwrap().contains(&requested));
@@ -430,12 +430,72 @@ async fn exact_direct_head_skips_other_versions_and_targets() -> anyhow::Result<
     let discovery = Discovery::open(&fixture.temp.path().join("direct"))?;
     discovery.ingest([event]).await?;
     drop(discovery);
-    let (success, output) = info(&fixture, &server, "direct")?;
+    let (success, output) = info(&fixture, &server.url, "direct")?;
     assert!(
         success,
         "exact direct head must skip unrelated pointers: {output}"
     );
     assert!(output.contains(&fixture.release.event.id.to_hex()));
     assert_eq!(server.requests.lock().unwrap().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn missing_local_index_value_is_unavailable_and_does_not_advance_checkpoint()
+-> anyhow::Result<()> {
+    let mut fixture = Fixture::new("iris").await?;
+    let root = BTree::new(fixture.repo.store.clone(), BTreeOptions::default())
+        .build([(
+            format!("iris:{}", fixture.release.coordinate()),
+            fixture.cid.clone(),
+        )])
+        .await?
+        .unwrap();
+    fixture.catalog.search = Some(root.to_string());
+    fixture.write_catalog(&fixture.catalog).await?;
+    let snapshot = fixture.repo.catalog(&fixture.release.author()).await?;
+    // A truly absent key in an intact authenticated leaf remains distinguishable.
+    assert!(
+        fixture
+            .repo
+            .exact_release(
+                &snapshot,
+                &fixture.release.identity(),
+                &"1.2.3".parse()?,
+                target()
+            )
+            .await?
+            .is_none()
+    );
+    let entries = fixture.repo.store.tree().list_directory(&root).await?;
+    assert_eq!(entries.len(), 1);
+    fs::remove_file(
+        fixture
+            .repo
+            .path()
+            .unwrap()
+            .join("blobs")
+            .join(block_path(&entries[0].hash)),
+    )?;
+    let result = fixture.exact().await;
+    assert!(
+        result.is_err(),
+        "missing referenced index value must be unavailable, not an absent key"
+    );
+    assert!(
+        format!("{:#}", result.unwrap_err()).contains("referenced catalog index block unavailable")
+    );
+    let (success, output) = info(
+        &fixture,
+        fixture.repo.path().unwrap().to_str().unwrap(),
+        "missing-index-value",
+    )?;
+    assert!(!success);
+    assert!(output.contains("unavailable or incomplete"), "{output}");
+    let config: serde_json::Value = serde_json::from_slice(&fs::read(
+        fixture.temp.path().join("missing-index-value/config.json"),
+    )?)?;
+    assert_eq!(config["sources"]["fixture"]["sequence"], 0);
+    assert_eq!(config["sources"]["fixture"]["event_id"], "");
     Ok(())
 }

@@ -4,7 +4,7 @@ use crate::{
     transport::CatalogTransport,
 };
 use anyhow::{Context, Result, bail, ensure};
-use hashtree_core::Cid;
+use hashtree_core::{Cid, Hash, Store, StoreError};
 use hashtree_index::{BTree, BTreeOptions, SearchIndex, SearchIndexOptions, SearchOptions};
 use nostr::{Event, Keys};
 use serde::{Deserialize, Serialize};
@@ -48,6 +48,38 @@ enum Location {
     Local(PathBuf),
     Http(reqwest::Url),
     Hashtree(Arc<CatalogTransport>),
+}
+
+/// BTree::get treats an absent value block like an absent key. For an
+/// authenticated index, every referenced block must be readable before an
+/// exact lookup may report no matching key or advance a catalog checkpoint.
+struct RequiredIndexBlocks(Arc<VerifiedStore>);
+
+#[async_trait::async_trait]
+impl Store for RequiredIndexBlocks {
+    async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        self.0
+            .get(hash)
+            .await?
+            .map(Some)
+            .ok_or_else(|| StoreError::Other("referenced catalog index block unavailable".into()))
+    }
+
+    async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.0.has(hash).await
+    }
+
+    async fn put(&self, _hash: Hash, _data: Vec<u8>) -> Result<bool, StoreError> {
+        Err(StoreError::Other(
+            "catalog index lookup is read-only".into(),
+        ))
+    }
+
+    async fn delete(&self, _hash: &Hash) -> Result<bool, StoreError> {
+        Err(StoreError::Other(
+            "catalog index lookup is read-only".into(),
+        ))
+    }
 }
 
 impl Repository {
@@ -222,7 +254,10 @@ impl Repository {
             allowed.len() == snapshot.catalog.releases.len(),
             "duplicate release in catalog"
         );
-        let tree = BTree::new(self.store.clone(), BTreeOptions::default());
+        let tree = BTree::new(
+            Arc::new(RequiredIndexBlocks(self.store.clone())),
+            BTreeOptions::default(),
+        );
         let mut selected = BTreeSet::new();
         for keyword in keywords {
             // SearchIndex stores `<keyword>:<coordinate>` keys. An exact read
