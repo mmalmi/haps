@@ -1235,11 +1235,17 @@ fn select(
     }
     let authors: BTreeSet<_> = candidates.iter().map(|c| c.release.author()).collect();
     let confirm_single = selection.confirm_install && !package.contains('/') && authors.len() == 1;
-    ensure!(
-        !candidates.is_empty(),
-        "no matching release for {} in the selected scope; packages outside your social graph require an explicit npub/package",
-        target_filter
-    );
+    if candidates.is_empty() {
+        let requested = version.map(|v| format!(" version {v}")).unwrap_or_default();
+        if package.contains('/') {
+            anyhow::bail!(
+                "no matching release for {package}{requested} on {target_filter} was observed; discovery may be incomplete"
+            );
+        }
+        anyhow::bail!(
+            "no matching release for {target_filter} in the selected scope was observed; discovery may be incomplete. Packages outside your social graph require an explicit npub/package"
+        );
+    }
     if authors.len() > 1 {
         let mut choices: Vec<_> = authors.into_iter().collect();
         let approvals = |author: &str| {
@@ -2921,6 +2927,32 @@ async fn refresh_discovery(
 #[cfg(test)]
 mod stack_tests {
     use super::*;
+
+    #[test]
+    fn missing_explicit_release_reports_incomplete_observation_without_social_hint() {
+        let keys = Keys::generate();
+        let package = format!("{}/hello", keys.public_key().to_hex());
+        let version = "2.0.0".parse().unwrap();
+        let error = select(
+            vec![],
+            &package,
+            Some(&version),
+            &BTreeMap::new(),
+            &Trust::new(keys.public_key().to_hex()),
+            target(),
+            Selection {
+                non_interactive: true,
+                include_untrusted: false,
+                confirm_install: false,
+            },
+        )
+        .err()
+        .expect("no observed release")
+        .to_string();
+        assert!(error.contains("version 2.0.0"));
+        assert!(error.contains("discovery may be incomplete"));
+        assert!(!error.contains("require an explicit"));
+    }
 
     #[test]
     fn command_dispatch_runs_on_a_small_stack() {

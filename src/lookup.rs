@@ -99,40 +99,84 @@ impl Lookup {
                 let window = *window;
                 streams.push(
                     futures::stream::once(async move {
-                        // Pending/offline connections are not a reason to delay a
-                        // snapshot from live relays. They remain connected by the
-                        // shared client and can participate in subsequent queries.
-                        let ready: Vec<_> = bus
+                        // Each relay joins independently within one deadline.
+                        // Taking only already-connected relays loses updates from
+                        // later connections; the pool's stream setup joins all
+                        // relays before delivering any of their events.
+                        let deadline = tokio::time::Instant::now() + window;
+                        let streams: Vec<_> = bus
                             .client()
                             .relays()
                             .await
                             .into_iter()
-                            .filter_map(|(url, relay)| relay.is_connected().then_some(url))
-                            .collect();
-                        let response = if ready.is_empty() {
-                            bus.client().stream_events(filter.clone(), window).await
-                        } else {
-                            bus.client()
-                                .stream_events_from(ready, filter.clone(), window)
-                                .await
-                        };
-                        match response {
-                            Ok(events) => events
-                                .take(2048)
-                                .map(move |event| {
-                                    let event = VerifiedEvent::try_from(event)?.into_event();
-                                    Ok(if filter.match_event(&event, Default::default()) {
-                                        vec![event]
-                                    } else {
-                                        Vec::new()
+                            .map(|(url, relay)| {
+                                let filter = filter.clone();
+                                futures::stream::once(async move {
+                                    let response = tokio::time::timeout_at(deadline, async {
+                                        // Subscribe before testing state so a
+                                        // connection during setup is not missed.
+                                        let mut notifications = relay.notifications();
+                                        while !relay.is_connected() {
+                                            notifications.recv().await.map_err(|error| {
+                                                PubsubError::Storage(format!(
+                                                    "relay {url}: {error}"
+                                                ))
+                                            })?;
+                                        }
+                                        relay
+                                            .stream_events(
+                                                filter.clone(),
+                                                deadline.saturating_duration_since(
+                                                    tokio::time::Instant::now(),
+                                                ),
+                                                Default::default(),
+                                            )
+                                            .await
+                                            .map_err(|error| {
+                                                PubsubError::Storage(format!(
+                                                    "relay {url}: {error}"
+                                                ))
+                                            })
                                     })
+                                    .await;
+                                    match response {
+                                        Ok(Ok(events)) => events
+                                            .take_until(tokio::time::sleep_until(deadline))
+                                            .map(move |event| {
+                                                let event = event.map_err(|error| {
+                                                    PubsubError::Storage(format!(
+                                                        "relay {url}: {error}"
+                                                    ))
+                                                })?;
+                                                let event =
+                                                    VerifiedEvent::try_from(event)?.into_event();
+                                                Ok(
+                                                    if filter
+                                                        .match_event(&event, Default::default())
+                                                    {
+                                                        vec![event]
+                                                    } else {
+                                                        Vec::new()
+                                                    },
+                                                )
+                                            })
+                                            .boxed(),
+                                        Ok(Err(error)) => {
+                                            futures::stream::once(async move { Err(error) }).boxed()
+                                        }
+                                        Err(_) => futures::stream::once(async move {
+                                            Err(PubsubError::Storage(format!(
+                                                "relay {url}: lookup deadline elapsed"
+                                            )))
+                                        })
+                                        .boxed(),
+                                    }
                                 })
-                                .boxed(),
-                            Err(error) => futures::stream::once(async move {
-                                Err(PubsubError::Storage(format!("relay query: {error}")))
+                                .flatten()
+                                .boxed()
                             })
-                            .boxed(),
-                        }
+                            .collect();
+                        futures::stream::select_all(streams).take(2048).boxed()
                     })
                     .flatten()
                     .boxed(),
