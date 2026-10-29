@@ -38,7 +38,7 @@ pub(super) async fn install(
     let mut choices = if let Some(reference) = &immutable {
         cli_hash::candidates(home, reference).await?
     } else {
-        candidates(home, config, None, Some(&package)).await?
+        candidates_for_version(home, config, &package, version.as_ref(), target()).await?
     };
     if let Some(expected) = release_id {
         choices.retain(|candidate| candidate.release.event.id == expected);

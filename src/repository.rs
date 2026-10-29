@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Context, Result, bail, ensure};
 use hashtree_core::Cid;
-use hashtree_index::{SearchIndex, SearchIndexOptions, SearchOptions};
+use hashtree_index::{BTree, BTreeOptions, SearchIndex, SearchIndexOptions, SearchOptions};
 use nostr::{Event, Keys};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -184,6 +184,80 @@ impl Repository {
         }
         Ok(results)
     }
+
+    /// Resolve one coordinate through the authenticated catalog index before
+    /// fetching release records. The caller retains its overall query deadline.
+    /// This validates the selected record, not unrelated catalog contents.
+    pub async fn exact_release(
+        &self,
+        snapshot: &Snapshot,
+        identity: &str,
+        version: &semver::Version,
+        target: &str,
+    ) -> Result<Option<Release>> {
+        let (_, name) = identity
+            .split_once('/')
+            .context("expected publisher/package")?;
+        safe_name(name)?;
+        let coordinate = format!("{identity}@{version}#{target}");
+        let index = SearchIndex::new(self.store.clone(), SearchIndexOptions::default());
+        let keywords = index.parse_keywords(name);
+        let Some(root) = snapshot
+            .catalog
+            .search
+            .as_deref()
+            .filter(|_| !keywords.is_empty())
+        else {
+            // Legacy or unindexable names keep the existing bounded scan. A
+            // missing index must not be mistaken for an absent release.
+            return Ok(self
+                .releases(snapshot)
+                .await?
+                .into_iter()
+                .find(|release| release.coordinate() == coordinate));
+        };
+        let root = Cid::parse(root)?;
+        let allowed: BTreeSet<_> = snapshot.catalog.releases.iter().collect();
+        ensure!(
+            allowed.len() == snapshot.catalog.releases.len(),
+            "duplicate release in catalog"
+        );
+        let tree = BTree::new(self.store.clone(), BTreeOptions::default());
+        let mut selected = BTreeSet::new();
+        for keyword in keywords {
+            // SearchIndex stores `<keyword>:<coordinate>` keys. An exact read
+            // avoids its ranked-result limit and unrelated index branches.
+            if let Some(cid) = tree
+                .get(Some(&root), &format!("{keyword}:{coordinate}"))
+                .await
+                .context("catalog index unavailable or invalid")?
+            {
+                ensure!(
+                    allowed.contains(&cid),
+                    "search index references a release outside its catalog"
+                );
+                selected.insert(cid);
+            }
+        }
+        ensure!(
+            selected.len() <= 1,
+            "conflicting release coordinates in catalog index"
+        );
+        let Some(cid) = selected.into_iter().next() else {
+            return Ok(None);
+        };
+        let event = self
+            .json(&cid)
+            .await
+            .context("selected release metadata unavailable or invalid")?;
+        let release = Release::verify(event)?;
+        ensure!(
+            release.coordinate() == coordinate,
+            "search identity mismatch"
+        );
+        Ok(Some(release))
+    }
+
     pub async fn search(&self, snapshot: &Snapshot, query: &str) -> Result<Vec<Release>> {
         let index = SearchIndex::new(self.store.clone(), SearchIndexOptions::default());
         let root = snapshot

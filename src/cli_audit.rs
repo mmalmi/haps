@@ -100,7 +100,8 @@ pub(super) async fn run(
         }
         AuditAction::Prepare { package, version } => {
             let package = resolve_package(config, &package)?;
-            let choices = candidates(home, config, None, Some(&package)).await?;
+            let choices =
+                candidates_for_version(home, config, &package, version.as_ref(), target()).await?;
             let releases = choices
                 .iter()
                 .map(|c| c.release.clone())
