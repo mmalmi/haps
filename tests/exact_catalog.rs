@@ -263,6 +263,10 @@ struct Server {
 }
 impl Server {
     fn new(root: PathBuf, stall_missing: bool) -> Self {
+        Self::with_delay(root, stall_missing, Duration::ZERO)
+    }
+
+    fn with_delay(root: PathBuf, stall_missing: bool, delay: Duration) -> Self {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let url = format!("http://{}", server.server_addr());
         let stop = Arc::new(AtomicBool::new(false));
@@ -275,6 +279,7 @@ impl Server {
                 if let Some(request) = server.recv_timeout(Duration::from_millis(10)).unwrap() {
                     let path = request.url().trim_start_matches('/');
                     received.lock().unwrap().push(path.to_string());
+                    std::thread::sleep(delay);
                     if let Ok(path) = haps::model::safe_path(path)
                         && let Ok(file) = fs::File::open(root.join(path))
                     {
@@ -366,7 +371,7 @@ fn command(fixture: &Fixture, home: &Path, args: &[&str]) -> anyhow::Result<(boo
             break status;
         }
         anyhow::ensure!(
-            started.elapsed() < Duration::from_secs(6),
+            started.elapsed() < Duration::from_secs(13),
             "exact lookup exceeded its deadline"
         );
         std::thread::sleep(Duration::from_millis(10));
@@ -410,10 +415,71 @@ async fn exact_cli_ignores_unavailable_unrelated_releases_but_fails_on_selected_
     }
     fs::remove_file(fixture.repo.path().unwrap().join(&requested))?;
     let server = Server::new(fixture.repo.path().unwrap().into(), true);
+    let started = Instant::now();
     let (success, output) = info(&fixture, &server.url, "missing-selected")?;
     assert!(!success);
     assert!(output.contains("unavailable or incomplete"), "{output}");
+    assert!(started.elapsed() < Duration::from_secs(12));
     assert!(server.requests.lock().unwrap().contains(&requested));
+    Ok(())
+}
+
+#[tokio::test]
+async fn selected_package_allows_cold_metadata_round_trips_without_extending_browse()
+-> anyhow::Result<()> {
+    let fixture = Fixture::new("iris-chat").await?;
+    let server = Server::with_delay(
+        fixture.repo.path().unwrap().into(),
+        true,
+        Duration::from_millis(650),
+    );
+    for exact in [true, false] {
+        let home = fixture.temp.path().join(format!("cold-selected-{exact}"));
+        configure(&fixture, &home, &fixture.keys, Some(&server.url))?;
+        server.requests.lock().unwrap().clear();
+        let identity = fixture.release.identity();
+        let mut args = vec!["info", &identity, "--json"];
+        if exact {
+            args.extend(["--version", "2026.10.2401"]);
+        }
+        let started = Instant::now();
+        let (success, output) = command(&fixture, &home, &args)?;
+        let elapsed = started.elapsed();
+        assert!(success, "cold selected lookup failed ({exact}): {output}");
+        assert!(output.contains(&fixture.release.event.id.to_hex()));
+        assert!(elapsed > Duration::from_secs(3));
+        assert!(elapsed < Duration::from_secs(10), "must return when ready");
+        let requests = server.requests.lock().unwrap();
+        assert!((6..16).contains(&requests.len()), "{requests:?}");
+    }
+
+    for operation in ["search", "info"] {
+        let home = fixture.temp.path().join(format!("cold-browse-{operation}"));
+        configure(&fixture, &home, &fixture.keys, Some(&server.url))?;
+        let before: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join("config.json"))?)?;
+        let started = Instant::now();
+        let (success, output) = command(&fixture, &home, &[operation, "iris-chat", "--json"])?;
+        if operation == "search" {
+            assert!(success, "{output}");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&output)?,
+                serde_json::json!([])
+            );
+        } else {
+            assert!(
+                !success && output.contains("unavailable or incomplete"),
+                "{output}"
+            );
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "browsing must keep its short deadline"
+        );
+        let after: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join("config.json"))?)?;
+        assert_eq!(after["sources"], before["sources"]);
+    }
     Ok(())
 }
 

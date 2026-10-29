@@ -1026,7 +1026,18 @@ fn check_checkpoint(source: &mut Source, snapshot: &Snapshot) -> Result<()> {
 }
 
 async fn query_metadata<T>(read: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    tokio::time::timeout(std::time::Duration::from_secs(3), read)
+    query_metadata_until(
+        tokio::time::Instant::now() + std::time::Duration::from_secs(3),
+        read,
+    )
+    .await
+}
+
+async fn query_metadata_until<T>(
+    deadline: tokio::time::Instant,
+    read: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    tokio::time::timeout_at(deadline, read)
         .await
         .context("package metadata response deadline elapsed")?
 }
@@ -1137,7 +1148,7 @@ async fn direct_candidates(
                 {
                     observed.record(version);
                 }
-                let result = query_metadata(async {
+                let result = query_metadata_until(deadline, async {
                     let repo = Arc::new(Repository::open(&head.payload, &home.join("cache"))?);
                     let mut releases = Vec::new();
                     for pointer in &head.releases {
@@ -1196,8 +1207,12 @@ async fn candidates_matching(
     package: Option<&str>,
     selection: Option<PackageSelection<'_>>,
 ) -> Result<Vec<Candidate>> {
-    // One metadata budget covers both direct heads and queued legacy catalogs.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    // A selected package can need several authenticated directory/index reads
+    // on a cold connection. Allow those round trips to finish without extending
+    // browsing's short response budget. Both return as soon as reads complete;
+    // one absolute deadline still bounds direct heads and queued catalogs.
+    let budget = if selection.is_some() { 10 } else { 3 };
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(budget);
     let observed = ObservedLatest::default();
     let mut found = direct_candidates(home, query, package, deadline, selection, &observed).await?;
     let mut available = usize::from(!found.is_empty());
@@ -1220,7 +1235,7 @@ async fn candidates_matching(
         .map(|(name, location, author)| {
             let observed = &observed;
             async move {
-                let result = query_metadata(async {
+                let result = query_metadata_until(deadline, async {
                     let repo = Arc::new(Repository::open(&location, &home.join("cache"))?);
                     let snapshot = repo.catalog(&author).await?;
                     let releases = if let Some(selection) = selection {
