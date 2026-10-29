@@ -151,7 +151,11 @@ async fn stale_fast_head_does_not_exclude_late_release_or_wait_for_stalled_relay
     )
     .await?;
     let fast = TestRelay::start(vec![old_head.clone(), old_release.event], false).await?;
-    let later = TestRelay::start(vec![head.clone(), release.event.clone()], true).await?;
+    let later = TestRelay::start(
+        vec![old_head.clone(), head.clone(), release.event.clone()],
+        true,
+    )
+    .await?;
     let stalled = TestRelay::start(vec![], true).await?;
     let bus = Arc::new(
         RelayEventBus::new(
@@ -185,7 +189,11 @@ async fn stale_fast_head_does_not_exclude_late_release_or_wait_for_stalled_relay
         .await
         .context("late relay did not contribute before the deadline")?
         .expect("late relay must contribute within the same lookup")?;
-    assert_eq!(second, vec![head.clone()]);
+    assert_eq!(
+        second,
+        vec![head.clone()],
+        "duplicate relay events must not hide the new head"
+    );
     while let Some(batch) =
         tokio::time::timeout_at(started + Duration::from_secs(4), updates.next()).await?
     {

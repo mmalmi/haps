@@ -3,7 +3,11 @@ use futures::StreamExt;
 use nostr::{Event, Filter};
 use nostr_pubsub::*;
 use nostr_pubsub_relay::RelayEventBus;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+    time::Duration,
+};
 
 /// Unlike a one-shot relay query, retain the subscription past EOSE. A completed
 /// observation is a time bound, not evidence that all matching events exist here.
@@ -176,7 +180,22 @@ impl Lookup {
                                 .boxed()
                             })
                             .collect();
-                        futures::stream::select_all(streams).take(2048).boxed()
+                        let mut seen = BTreeSet::new();
+                        futures::stream::select_all(streams)
+                            .filter_map(move |batch| {
+                                futures::future::ready(match batch {
+                                    Ok(events) => {
+                                        let events: Vec<_> = events
+                                            .into_iter()
+                                            .filter(|event| seen.insert(event.id))
+                                            .collect();
+                                        (!events.is_empty()).then_some(Ok(events))
+                                    }
+                                    Err(error) => Some(Err(error)),
+                                })
+                            })
+                            .take(2048)
+                            .boxed()
                     })
                     .flatten()
                     .boxed(),
