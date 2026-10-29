@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -18,6 +18,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
+
+#[path = "support/audit.rs"]
+mod audit;
 
 struct Fixture {
     temp: tempfile::TempDir,
@@ -83,9 +86,13 @@ impl Fixture {
     }
 
     async fn write_catalog(&self, catalog: &Catalog) -> anyhow::Result<()> {
+        self.write_catalog_at(catalog, 1).await
+    }
+
+    async fn write_catalog_at(&self, catalog: &Catalog, sequence: u64) -> anyhow::Result<()> {
         let head = CatalogRoot {
             schema: "haps.catalog.v1".into(),
-            sequence: 1,
+            sequence,
             root: self.repo.put_json(catalog).await?,
         };
         fs::write(
@@ -305,26 +312,47 @@ impl Drop for ChildGuard {
 
 fn info(fixture: &Fixture, location: &str, label: &str) -> anyhow::Result<(bool, String)> {
     let home = fixture.temp.path().join(label);
-    fs::create_dir_all(&home)?;
+    configure(fixture, &home, &fixture.keys, Some(location))?;
+    command(
+        fixture,
+        &home,
+        &[
+            "info",
+            &fixture.release.identity(),
+            "--version",
+            "2026.10.2401",
+            "--json",
+        ],
+    )
+}
+
+fn configure(
+    fixture: &Fixture,
+    home: &Path,
+    reader: &Keys,
+    location: Option<&str>,
+) -> anyhow::Result<()> {
+    fs::create_dir_all(home)?;
+    let sources = location.map(|location| serde_json::json!({
+        "fixture": {"location": location, "author": fixture.release.author(), "sequence": 0, "event_id": ""}
+    })).unwrap_or_else(|| serde_json::json!({}));
     fs::write(
         home.join("config.json"),
         serde_json::to_vec(&serde_json::json!({
-            "identity": fixture.release.author(),
-            "sources": {"fixture": {"location": location, "author": fixture.release.author(), "sequence": 0, "event_id": ""}},
+            "identity": reader.public_key().to_hex(),
+            "sources": sources,
             "indexes": {}, "starting_point": null, "discovery_defaults_version": 2
         }))?,
     )?;
+    Ok(())
+}
+
+fn command(fixture: &Fixture, home: &Path, args: &[&str]) -> anyhow::Result<(bool, String)> {
     let mut child = ChildGuard(
         Command::new(env!("CARGO_BIN_EXE_haps"))
             .args(["--no-defaults", "--home"])
-            .arg(&home)
-            .args([
-                "info",
-                &fixture.release.identity(),
-                "--version",
-                "2026.10.2401",
-                "--json",
-            ])
+            .arg(home)
+            .args(args)
             .env_remove("NOSTR_RELAYS")
             .env("HTREE_CONFIG_DIR", fixture.temp.path().join("htree"))
             .stdin(Stdio::null())
@@ -497,5 +525,482 @@ async fn missing_local_index_value_is_unavailable_and_does_not_advance_checkpoin
     )?)?;
     assert_eq!(config["sources"]["fixture"]["sequence"], 0);
     assert_eq!(config["sources"]["fixture"]["event_id"], "");
+    Ok(())
+}
+
+async fn payload_release(fixture: &Fixture, version: &str) -> anyhow::Result<Release> {
+    let payload = fixture.temp.path().join(format!("payload-{version}"));
+    fs::create_dir(&payload)?;
+    fs::write(payload.join("data"), version)?;
+    let mut data = fixture.release.data.clone();
+    data.package.version = version.parse()?;
+    data.manifest = fixture.repo.pack_payload(&data.package, &payload).await?;
+    Release::verify(sign_release(&fixture.keys, &data)?)
+}
+
+async fn latest_catalog(
+    fixture: &Fixture,
+    releases: &[Release],
+    sequence: u64,
+) -> anyhow::Result<Catalog> {
+    let mut catalog = Catalog::default();
+    let mut entries = Vec::new();
+    // These historical release and index-value blobs need not be available.
+    // Version selection needs their authenticated keys, not their contents.
+    for i in 0..150 {
+        let cid = unavailable_cid(i);
+        entries.push((
+            format!("iris:{}@1.0.{i}#{}", fixture.release.identity(), target()),
+            cid.clone(),
+        ));
+        catalog.releases.push(cid);
+    }
+    for (version, platform, i) in [
+        ("9999.0.0-rc.1", target(), 200),
+        ("9999.0.0", "other-platform", 201),
+    ] {
+        let cid = unavailable_cid(i);
+        entries.push((
+            format!("iris:{}@{version}#{platform}", fixture.release.identity()),
+            cid.clone(),
+        ));
+        catalog.releases.push(cid);
+    }
+    // A shared keyword must not broaden the requested package/publisher scope.
+    for (identity, i) in [
+        (format!("{}-extra", fixture.release.identity()), 202),
+        (
+            format!("{}/iris", Keys::generate().public_key().to_hex()),
+            203,
+        ),
+    ] {
+        let cid = unavailable_cid(i);
+        entries.push((
+            format!("iris:{identity}@9999.0.0#{}", target()),
+            cid.clone(),
+        ));
+        catalog.releases.push(cid);
+    }
+    for release in releases {
+        let cid = fixture.repo.put_json(&release.event).await?;
+        entries.push((format!("iris:{}", release.coordinate()), cid.clone()));
+        catalog.releases.push(cid);
+    }
+    let root = BTree::new(fixture.repo.store.clone(), BTreeOptions::default())
+        .build(entries)
+        .await?
+        .unwrap();
+    catalog.search = Some(root.to_string());
+    fixture.write_catalog_at(&catalog, sequence).await?;
+    // Remove one historical index value too, to catch broad value scans.
+    let cid = fixture
+        .repo
+        .store
+        .tree()
+        .put(unavailable_cid(0).as_bytes())
+        .await?
+        .0;
+    fs::remove_file(
+        fixture
+            .repo
+            .path()
+            .unwrap()
+            .join("blobs")
+            .join(block_path(&cid.hash)),
+    )?;
+    Ok(catalog)
+}
+
+async fn direct_head(
+    fixture: &Fixture,
+    home: &Path,
+    location: &str,
+    releases: &[Release],
+    sequence: u64,
+) -> anyhow::Result<()> {
+    use haps::{
+        discovery::Discovery,
+        package_head::{PackageHead, ReleasePointer},
+    };
+    use nostr::{EventBuilder, Tag, Timestamp};
+    let mut pointers = vec![];
+    for (version, platform, i) in [
+        ("1.0.0", target(), 300),
+        ("9999.0.0-rc.1", target(), 301),
+        ("9999.0.0", "other-platform", 302),
+    ] {
+        pointers.push(ReleasePointer {
+            id: hex::encode(Sha256::digest(format!("pointer {i}"))),
+            cid: unavailable_cid(i),
+            version: version.parse()?,
+            target: platform.into(),
+        });
+    }
+    for release in releases {
+        pointers.push(ReleasePointer {
+            id: release.event.id.to_hex(),
+            cid: fixture.repo.put_json(&release.event).await?,
+            version: release.data.package.version.clone(),
+            target: target().into(),
+        });
+    }
+    let head = PackageHead {
+        schema: "haps.package-head.v1".into(),
+        description: "Latest fixture".into(),
+        payload: location.into(),
+        card: unavailable_cid(303),
+        releases: pointers,
+    };
+    let event = EventBuilder::new(
+        haps::discovery::SOFTWARE_KIND,
+        serde_json::to_string(&head)?,
+    )
+    .tags([
+        Tag::identifier("iris"),
+        Tag::parse(["name", "iris"])?,
+        Tag::parse(["haps_head", "1"])?,
+    ])
+    .custom_created_at(Timestamp::from(1_700_000_000 + sequence))
+    .sign_with_keys(&fixture.keys)?;
+    let discovery = Discovery::open(home)?;
+    discovery.ingest([event]).await?;
+    Ok(())
+}
+
+fn assert_current(home: &Path, identity: &str, release: &Release) -> anyhow::Result<()> {
+    let install = haps::install::Installation::new(home.into())?;
+    let receipt = install.receipt(identity)?;
+    assert_eq!(receipt.current.id, release.event.id);
+    assert_eq!(receipt.minimum_attestations, 1);
+    assert_eq!(
+        fs::read_to_string(install.path(identity)?.join("data"))?,
+        release.data.package.version.to_string()
+    );
+    Ok(())
+}
+
+async fn unversioned_flow(direct: bool) -> anyhow::Result<()> {
+    let fixture = Fixture::new("iris").await?;
+    let reader = Keys::generate();
+    let home = fixture.temp.path().join("retained-home");
+    let server = Server::new(fixture.repo.path().unwrap().into(), true);
+    let identity = fixture.release.identity();
+    let old = payload_release(&fixture, "1.9.0").await?;
+    let new = payload_release(&fixture, "1.10.0").await?;
+    latest_catalog(&fixture, std::slice::from_ref(&old), 1).await?;
+    configure(
+        &fixture,
+        &home,
+        &reader,
+        (!direct).then_some(server.url.as_str()),
+    )?;
+    if direct {
+        direct_head(&fixture, &home, &server.url, std::slice::from_ref(&old), 1).await?;
+    }
+    let (ok, output) = command(&fixture, &home, &["info", &identity, "--json"])?;
+    assert!(
+        ok && output.contains(&old.event.id.to_hex()),
+        "unversioned info must select only the requested package: {output}"
+    );
+    assert!(
+        server.requests.lock().unwrap().len() < 20,
+        "latest lookup read historical index values/releases"
+    );
+    audit::record(&home, &reader, old.event.id)?;
+    let (ok, output) = command(
+        &fixture,
+        &home,
+        &[
+            "install",
+            &identity,
+            "--require-attestations",
+            "1",
+            "--json",
+        ],
+    )?;
+    assert!(ok, "unversioned install failed: {output}");
+    assert_current(&home, &identity, &old)?;
+
+    latest_catalog(&fixture, &[old.clone(), new.clone()], 2).await?;
+    if direct {
+        direct_head(&fixture, &home, &server.url, &[old.clone(), new.clone()], 2).await?;
+    }
+    let (ok, output) = command(&fixture, &home, &["info", &identity, "--json"])?;
+    assert!(
+        ok && output.contains(&new.event.id.to_hex()),
+        "latest stable SemVer/target selection failed: {output}"
+    );
+    let (ok, output) = command(&fixture, &home, &["update", &identity, "--json"])?;
+    assert!(
+        !ok && output.contains("requires 1 audit"),
+        "update must require the new release's audit: {output}"
+    );
+    assert_current(&home, &identity, &old)?;
+    audit::record(&home, &reader, new.event.id)?;
+    let (ok, output) = command(&fixture, &home, &["update", &identity, "--json"])?;
+    assert!(
+        ok,
+        "retained unversioned update must select the new audited release: {output}"
+    );
+    assert_current(&home, &identity, &new)?;
+    let receipt = haps::install::Installation::new(home.clone())?.receipt(&identity)?;
+    assert_eq!(receipt.previous.unwrap().id, old.event.id);
+    if !direct {
+        let config: serde_json::Value =
+            serde_json::from_slice(&fs::read(home.join("config.json"))?)?;
+        assert_eq!(config["sources"]["fixture"]["sequence"], 2);
+    }
+
+    // A new home must also install the latest release without first caching an
+    // exact-version lookup, which is how the production defect escaped.
+    let fresh = fixture.temp.path().join("fresh-home");
+    configure(
+        &fixture,
+        &fresh,
+        &reader,
+        (!direct).then_some(server.url.as_str()),
+    )?;
+    if direct {
+        direct_head(&fixture, &fresh, &server.url, &[old, new.clone()], 2).await?;
+    }
+    audit::record(&fresh, &reader, new.event.id)?;
+    let (ok, output) = command(&fixture, &fresh, &["install", &identity, "--json"])?;
+    assert!(ok, "fresh unversioned install failed: {output}");
+    assert_current(&fresh, &identity, &new)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unversioned_catalog_info_install_and_retained_update() -> anyhow::Result<()> {
+    unversioned_flow(false).await
+}
+
+#[tokio::test]
+async fn unversioned_direct_head_info_install_and_retained_update() -> anyhow::Result<()> {
+    unversioned_flow(true).await
+}
+
+#[tokio::test]
+async fn latest_missing_release_or_index_branch_cannot_downgrade_or_advance_checkpoint()
+-> anyhow::Result<()> {
+    let fixture = Fixture::new("iris").await?;
+    let old = payload_release(&fixture, "1.9.0").await?;
+    let new = payload_release(&fixture, "1.10.0").await?;
+    let home = fixture.temp.path().join("latest-errors");
+    let location = fixture.repo.path().unwrap().to_str().unwrap();
+    configure(&fixture, &home, &fixture.keys, Some(location))?;
+    latest_catalog(&fixture, std::slice::from_ref(&old), 1).await?;
+    assert!(command(&fixture, &home, &["info", &old.identity(), "--json"])?.0);
+    let before = fs::read(home.join("config.json"))?;
+    let catalog = latest_catalog(&fixture, &[old, new.clone()], 2).await?;
+    let cid = Cid::parse(&fixture.repo.put_json(&new.event).await?)?;
+    fs::remove_file(
+        fixture
+            .repo
+            .path()
+            .unwrap()
+            .join("blobs")
+            .join(block_path(&cid.hash)),
+    )?;
+    let (ok, output) = command(&fixture, &home, &["info", &new.identity(), "--json"])?;
+    assert!(
+        !ok && output.contains("unavailable or incomplete"),
+        "must not downgrade to available old release: {output}"
+    );
+    assert_eq!(fs::read(home.join("config.json"))?, before);
+    fixture.repo.put_json(&new.event).await?;
+    let root = Cid::parse(catalog.search.as_ref().unwrap())?;
+    let entries = fixture
+        .repo
+        .store
+        .tree()
+        .list_directory_required(&root)
+        .await?;
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry.link_type == hashtree_core::LinkType::Dir)
+    );
+    // The package's lower-version branch is part of the prefix traversal even
+    // though only the latest release's value will ultimately be fetched.
+    let child = entries
+        .iter()
+        .min_by_key(|entry| hashtree_index::unescape_key(&entry.name))
+        .unwrap();
+    fs::remove_file(
+        fixture
+            .repo
+            .path()
+            .unwrap()
+            .join("blobs")
+            .join(block_path(&child.hash)),
+    )?;
+    let (ok, output) = command(&fixture, &home, &["info", &new.identity(), "--json"])?;
+    assert!(
+        !ok && output.contains("unavailable or incomplete"),
+        "partial index must not select a latest release: {output}"
+    );
+    assert_eq!(fs::read(home.join("config.json"))?, before);
+    Ok(())
+}
+
+#[tokio::test]
+async fn latest_index_key_contradiction_is_not_absence() -> anyhow::Result<()> {
+    use hashtree_core::{DirEntry, LinkType};
+    let mut fixture = Fixture::new("iris").await?;
+    let root = BTree::new(fixture.repo.store.clone(), BTreeOptions::default())
+        .build([(
+            format!("iris:{}", fixture.release.coordinate()),
+            fixture.cid.clone(),
+        )])
+        .await?
+        .unwrap();
+    let entries = fixture
+        .repo
+        .store
+        .tree()
+        .list_directory_required(&root)
+        .await?;
+    let entry = &entries[0];
+    let renamed = entry.name.replace("%2F", "%2f");
+    assert_ne!(renamed, entry.name);
+    let root = fixture
+        .repo
+        .store
+        .tree()
+        .put_directory(vec![
+            DirEntry::from_cid(
+                renamed,
+                &Cid {
+                    hash: entry.hash,
+                    key: entry.key,
+                },
+            )
+            .with_size(entry.size)
+            .with_link_type(LinkType::Blob),
+        ])
+        .await?;
+    fixture.catalog.search = Some(root.to_string());
+    fixture.write_catalog(&fixture.catalog).await?;
+    let snapshot = fixture.repo.catalog(&fixture.release.author()).await?;
+    let result = fixture
+        .repo
+        .latest_release(&snapshot, &fixture.release.identity(), target(), |_| {})
+        .await;
+    assert!(
+        result.is_err(),
+        "selected key contradiction must not become absence"
+    );
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("selected release missing")
+    );
+    let home = fixture.temp.path().join("contradictory-index");
+    configure(
+        &fixture,
+        &home,
+        &fixture.keys,
+        fixture.repo.path().unwrap().to_str(),
+    )?;
+    let before: serde_json::Value = serde_json::from_slice(&fs::read(home.join("config.json"))?)?;
+    let (ok, output) = command(
+        &fixture,
+        &home,
+        &["info", &fixture.release.identity(), "--json"],
+    )?;
+    assert!(
+        !ok && output.contains("unavailable or incomplete"),
+        "{output}"
+    );
+    let after: serde_json::Value = serde_json::from_slice(&fs::read(home.join("config.json"))?)?;
+    assert_eq!(after["sources"], before["sources"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn latest_mixed_sources_cannot_hide_known_newest_fetch_failure() -> anyhow::Result<()> {
+    let fixture = Fixture::new("iris").await?;
+    let old = payload_release(&fixture, "1.9.0").await?;
+    let new = payload_release(&fixture, "1.10.0").await?;
+    latest_catalog(&fixture, &[old.clone(), new.clone()], 2).await?;
+    let newest_cid = fixture.repo.put_json(&new.event).await?;
+    let old_repo = Repository::local(fixture.temp.path().join("old-catalog"))?;
+    let cid = old_repo.put_json(&old.event).await?;
+    let index = BTree::new(old_repo.store.clone(), BTreeOptions::default())
+        .build([(format!("iris:{}", old.coordinate()), cid.clone())])
+        .await?
+        .unwrap();
+    let root = old_repo
+        .put_json(&Catalog {
+            releases: vec![cid],
+            search: Some(index.to_string()),
+            packages: BTreeMap::new(),
+        })
+        .await?;
+    fs::write(
+        old_repo.path().unwrap().join("catalog.json"),
+        serde_json::to_vec(&sign(
+            &fixture.keys,
+            "haps/catalog/v1",
+            &CatalogRoot {
+                schema: "haps.catalog.v1".into(),
+                sequence: 1,
+                root,
+            },
+        )?)?,
+    )?;
+
+    for direct in [false, true] {
+        for stalled in [false, true] {
+            let server = Server::new(fixture.repo.path().unwrap().into(), stalled);
+            let home = fixture
+                .temp
+                .path()
+                .join(format!("mixed-{direct}-{stalled}"));
+            configure(
+                &fixture,
+                &home,
+                &fixture.keys,
+                old_repo.path().unwrap().to_str(),
+            )?;
+            if direct {
+                direct_head(&fixture, &home, &server.url, std::slice::from_ref(&new), 3).await?;
+            } else {
+                let path = home.join("config.json");
+                let mut config: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+                config["sources"]["newest"] = serde_json::json!({
+                    "location": server.url, "author": fixture.release.author(), "sequence": 0, "event_id": ""
+                });
+                fs::write(path, serde_json::to_vec(&config)?)?;
+            }
+            // direct_head creates its release record while signing the pointer.
+            let path = fixture
+                .repo
+                .path()
+                .unwrap()
+                .join("blobs")
+                .join(block_path(&Cid::parse(&newest_cid)?.hash));
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+            let before: serde_json::Value =
+                serde_json::from_slice(&fs::read(home.join("config.json"))?)?;
+            let (ok, output) = command(&fixture, &home, &["info", &new.identity(), "--json"])?;
+            assert!(
+                !ok,
+                "known newer release must block older mixed-source result: {output}"
+            );
+            assert!(
+                output.contains("newest observed release 1.10.0")
+                    && output.contains("unavailable or incomplete"),
+                "{output}"
+            );
+            let after: serde_json::Value =
+                serde_json::from_slice(&fs::read(home.join("config.json"))?)?;
+            assert_eq!(after["sources"], before["sources"]);
+        }
+    }
     Ok(())
 }

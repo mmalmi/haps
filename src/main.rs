@@ -1032,10 +1032,34 @@ async fn query_metadata<T>(read: impl std::future::Future<Output = Result<T>>) -
 }
 
 #[derive(Clone, Copy)]
-struct ExactRelease<'a> {
+struct PackageSelection<'a> {
     identity: &'a str,
-    version: &'a semver::Version,
+    version: Option<&'a semver::Version>,
     target: &'a str,
+}
+
+#[derive(Default)]
+struct ObservedLatest(std::sync::Mutex<Option<semver::Version>>);
+
+impl ObservedLatest {
+    fn record(&self, version: &semver::Version) {
+        let mut observed = self.0.lock().expect("observed version lock");
+        if observed.as_ref().is_none_or(|old| version > old) {
+            *observed = Some(version.clone());
+        }
+    }
+
+    fn require_available(&self, candidates: &[Candidate]) -> Result<()> {
+        if let Some(version) = self.0.lock().expect("observed version lock").as_ref() {
+            ensure!(
+                candidates
+                    .iter()
+                    .any(|candidate| &candidate.release.data.package.version >= version),
+                "newest observed release {version} is unavailable or incomplete; refusing an older release"
+            );
+        }
+        Ok(())
+    }
 }
 
 async fn candidates_for_version(
@@ -1045,14 +1069,12 @@ async fn candidates_for_version(
     version: Option<&semver::Version>,
     target: &str,
 ) -> Result<Vec<Candidate>> {
-    let exact = version
-        .filter(|_| package.contains('/'))
-        .map(|version| ExactRelease {
-            identity: package,
-            version,
-            target,
-        });
-    candidates_matching(home, config, None, Some(package), exact).await
+    let selection = package.contains('/').then_some(PackageSelection {
+        identity: package,
+        version,
+        target,
+    });
+    candidates_matching(home, config, None, Some(package), selection).await
 }
 
 async fn direct_candidates(
@@ -1060,7 +1082,8 @@ async fn direct_candidates(
     query: Option<&str>,
     package: Option<&str>,
     deadline: tokio::time::Instant,
-    exact: Option<ExactRelease<'_>>,
+    selection: Option<PackageSelection<'_>>,
+    observed: &ObservedLatest,
 ) -> Result<Vec<Candidate>> {
     let discovery = Discovery::open(home)?;
     let announcements = discovery.announcements(None).await?;
@@ -1098,12 +1121,29 @@ async fn direct_candidates(
             let cached = &cached;
             async move {
                 let head = announcement.head.expect("direct announcement");
+                let selected_version = selection.and_then(|selection| {
+                    selection.version.or_else(|| {
+                        head.releases
+                            .iter()
+                            .filter(|pointer| {
+                                pointer.target == selection.target && pointer.version.pre.is_empty()
+                            })
+                            .map(|pointer| &pointer.version)
+                            .max()
+                    })
+                });
+                if selection.is_some_and(|selection| selection.version.is_none())
+                    && let Some(version) = selected_version
+                {
+                    observed.record(version);
+                }
                 let result = query_metadata(async {
                     let repo = Arc::new(Repository::open(&head.payload, &home.join("cache"))?);
                     let mut releases = Vec::new();
                     for pointer in &head.releases {
-                        if exact.is_some_and(|exact| {
-                            &pointer.version != exact.version || pointer.target != exact.target
+                        if selection.is_some_and(|selection| {
+                            selected_version != Some(&pointer.version)
+                                || pointer.target != selection.target
                         }) {
                             continue;
                         }
@@ -1154,11 +1194,12 @@ async fn candidates_matching(
     config: &mut Config,
     query: Option<&str>,
     package: Option<&str>,
-    exact: Option<ExactRelease<'_>>,
+    selection: Option<PackageSelection<'_>>,
 ) -> Result<Vec<Candidate>> {
     // One metadata budget covers both direct heads and queued legacy catalogs.
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-    let mut found = direct_candidates(home, query, package, deadline, exact).await?;
+    let observed = ObservedLatest::default();
+    let mut found = direct_candidates(home, query, package, deadline, selection, &observed).await?;
     let mut available = usize::from(!found.is_empty());
     let mut seen: BTreeMap<_, _> = found
         .iter()
@@ -1169,28 +1210,48 @@ async fn candidates_matching(
     let sources: Vec<_> = config
         .sources
         .iter()
-        .filter(|(_, source)| !(package.is_some() && direct_authors.contains(&source.author)))
+        .filter(|(_, source)| {
+            selection.is_some_and(|selection| selection.version.is_none())
+                || !(package.is_some() && direct_authors.contains(&source.author))
+        })
         .map(|(name, source)| (name.clone(), source.location.clone(), source.author.clone()))
         .collect();
     let mut responses = futures::stream::iter(sources)
-        .map(|(name, location, author)| async move {
-            let result = query_metadata(async {
-                let repo = Arc::new(Repository::open(&location, &home.join("cache"))?);
-                let snapshot = repo.catalog(&author).await?;
-                let releases = if let Some(exact) = exact {
-                    repo.exact_release(&snapshot, exact.identity, exact.version, exact.target)
-                        .await?
-                        .into_iter()
-                        .collect()
-                } else if let Some(query) = query {
-                    repo.search(&snapshot, query).await?
-                } else {
-                    repo.releases(&snapshot).await?
-                };
-                Ok((repo, snapshot, releases))
-            })
-            .await;
-            (name, result)
+        .map(|(name, location, author)| {
+            let observed = &observed;
+            async move {
+                let result = query_metadata(async {
+                    let repo = Arc::new(Repository::open(&location, &home.join("cache"))?);
+                    let snapshot = repo.catalog(&author).await?;
+                    let releases = if let Some(selection) = selection {
+                        let release = if let Some(version) = selection.version {
+                            repo.exact_release(
+                                &snapshot,
+                                selection.identity,
+                                version,
+                                selection.target,
+                            )
+                            .await?
+                        } else {
+                            repo.latest_release(
+                                &snapshot,
+                                selection.identity,
+                                selection.target,
+                                |version| observed.record(version),
+                            )
+                            .await?
+                        };
+                        release.into_iter().collect()
+                    } else if let Some(query) = query {
+                        repo.search(&snapshot, query).await?
+                    } else {
+                        repo.releases(&snapshot).await?
+                    };
+                    Ok((repo, snapshot, releases))
+                })
+                .await;
+                (name, result)
+            }
         })
         .buffer_unordered(8);
     while let Ok(Some((name, result))) = tokio::time::timeout_at(deadline, responses.next()).await {
@@ -1225,6 +1286,7 @@ async fn candidates_matching(
             });
         }
     }
+    observed.require_available(&found)?;
     save_config(home, config)?;
     ensure!(
         available > 0,
@@ -2240,7 +2302,8 @@ async fn execute(mut cli: Cli) -> Result<u8> {
                 )
             };
             progress.stage("Reading package catalogs");
-            let choices = candidates(&home, &mut config, None, Some(&identity)).await?;
+            let choices =
+                candidates_for_version(&home, &mut config, &identity, None, target()).await?;
             let releases: Vec<_> = choices.iter().map(|c| c.release.clone()).collect();
             progress.stage("Checking release attestations and warnings");
             refresh_feedback(&home, &config, &mut trust, &releases).await?;

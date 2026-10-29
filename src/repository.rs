@@ -4,7 +4,7 @@ use crate::{
     transport::CatalogTransport,
 };
 use anyhow::{Context, Result, bail, ensure};
-use hashtree_core::{Cid, Hash, Store, StoreError};
+use hashtree_core::{Cid, Hash, LinkType, Store, StoreError};
 use hashtree_index::{BTree, BTreeOptions, SearchIndex, SearchIndexOptions, SearchOptions};
 use nostr::{Event, Keys};
 use serde::{Deserialize, Serialize};
@@ -291,6 +291,183 @@ impl Repository {
             "search identity mismatch"
         );
         Ok(Some(release))
+    }
+
+    /// Select the newest observed stable coordinate for one package and target.
+    /// Read authenticated index keys before fetching the selected value/release;
+    /// historical values and releases are not needed to compare versions.
+    pub async fn latest_release(
+        &self,
+        snapshot: &Snapshot,
+        identity: &str,
+        target: &str,
+        observe: impl Fn(&semver::Version),
+    ) -> Result<Option<Release>> {
+        let (_, name) = identity
+            .split_once('/')
+            .context("expected publisher/package")?;
+        safe_name(name)?;
+        let keywords = SearchIndex::new(self.store.clone(), SearchIndexOptions::default())
+            .parse_keywords(name);
+        let Some(root) = snapshot
+            .catalog
+            .search
+            .as_deref()
+            .filter(|_| !keywords.is_empty())
+        else {
+            let release = self
+                .releases(snapshot)
+                .await?
+                .into_iter()
+                .filter(|release| {
+                    release.identity() == identity
+                        && release.data.package.target == target
+                        && release.data.package.version.pre.is_empty()
+                })
+                .max_by(|a, b| a.data.package.version.cmp(&b.data.package.version));
+            if let Some(release) = &release {
+                observe(&release.data.package.version);
+            }
+            return Ok(release);
+        };
+        let root = Cid::parse(root)?;
+        let mut latest = None;
+        ensure!(
+            snapshot
+                .catalog
+                .releases
+                .iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+                == snapshot.catalog.releases.len(),
+            "duplicate release in catalog"
+        );
+        for keyword in keywords {
+            let prefix = format!("{keyword}:{identity}@");
+            for key in self
+                .package_index_keys(&root, &prefix, snapshot.catalog.releases.len())
+                .await?
+            {
+                let suffix = key
+                    .strip_prefix(&prefix)
+                    .context("catalog index identity mismatch")?;
+                let (version, indexed_target) = suffix
+                    .rsplit_once('#')
+                    .context("invalid indexed release coordinate")?;
+                let parsed: semver::Version =
+                    version.parse().context("invalid indexed release version")?;
+                ensure!(
+                    parsed.to_string() == version,
+                    "noncanonical indexed release version"
+                );
+                safe_name(indexed_target)?;
+                if indexed_target == target
+                    && parsed.pre.is_empty()
+                    && latest.as_ref().is_none_or(|old| &parsed > old)
+                {
+                    latest = Some(parsed);
+                }
+            }
+        }
+        match latest {
+            Some(version) => {
+                observe(&version);
+                Ok(Some(
+                    self.exact_release(snapshot, identity, &version, target)
+                        .await?
+                        .context("selected release missing from authenticated catalog index")?,
+                ))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// SearchIndex's string-value BTree has no key-only range API. Traverse only
+    /// intersecting directory nodes, using the same decoded-key ordering and
+    /// half-open child ranges as BTree::prefix, without reading value blobs.
+    async fn package_index_keys(
+        &self,
+        root: &Cid,
+        prefix: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        use hashtree_index::unescape_key;
+        let end = format!(
+            "{}A",
+            prefix.strip_suffix('@').context("invalid package prefix")?
+        );
+        let tree = self.store.tree();
+        let mut pending = vec![(root.clone(), None::<String>, None::<String>, 0)];
+        let mut visited = BTreeSet::new();
+        let mut found = BTreeSet::new();
+        while let Some((cid, lower, upper, depth)) = pending.pop() {
+            ensure!(
+                depth <= 64 && visited.len() < 10_000 && visited.insert(cid.to_string()),
+                "invalid or oversized catalog index traversal"
+            );
+            let mut entries = tree
+                .list_directory_required(&cid)
+                .await
+                .context("catalog index unavailable or invalid")?;
+            entries.sort_by_key(|entry| unescape_key(&entry.name));
+            let keys: Vec<_> = entries
+                .iter()
+                .map(|entry| unescape_key(&entry.name))
+                .collect();
+            ensure!(
+                keys.windows(2).all(|pair| pair[0] < pair[1]),
+                "duplicate catalog index keys"
+            );
+            if let Some(lower) = lower {
+                ensure!(
+                    keys.first() == Some(&lower),
+                    "catalog index child boundary mismatch"
+                );
+            }
+            ensure!(
+                upper
+                    .as_ref()
+                    .is_none_or(|upper| keys.last().is_none_or(|key| key < upper)),
+                "catalog index child range mismatch"
+            );
+            let leaf = entries
+                .iter()
+                .all(|entry| entry.link_type == LinkType::Blob);
+            ensure!(
+                leaf || entries.iter().all(|entry| entry.link_type == LinkType::Dir),
+                "invalid catalog index node type"
+            );
+            for (i, entry) in entries.iter().enumerate() {
+                let key = &keys[i];
+                if key >= &end {
+                    break;
+                }
+                if leaf {
+                    if key.as_str() >= prefix {
+                        ensure!(
+                            found.insert(key.clone()),
+                            "duplicate catalog index coordinate"
+                        );
+                        ensure!(found.len() <= limit, "catalog index exceeds release count");
+                    }
+                } else {
+                    let child_end = keys.get(i + 1).cloned().or_else(|| upper.clone());
+                    if child_end.as_ref().is_some_and(|end| end.as_str() <= prefix) {
+                        continue;
+                    }
+                    pending.push((
+                        Cid {
+                            hash: entry.hash,
+                            key: entry.key,
+                        },
+                        Some(key.clone()),
+                        child_end,
+                        depth + 1,
+                    ));
+                }
+            }
+        }
+        Ok(found.into_iter().collect())
     }
 
     pub async fn search(&self, snapshot: &Snapshot, query: &str) -> Result<Vec<Release>> {
