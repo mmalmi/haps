@@ -340,8 +340,8 @@ See [source publication](README.md#package-discovery-and-event-catalogs)
 for checkout and identity requirements. CI can independently run
 `scripts/verify-public-source.py` with checksum-pinned Git helpers, without a
 signing key, before creating a public binary release.
-Large repositories can set `--clone-timeout 1800` (seconds; default 300,
-maximum 1800). Allow additional time in the CI job for the revision and
+Large repositories can set `--clone-timeout 2700` (seconds; default 300,
+maximum 3600). Allow additional time in the CI job for the revision and
 complete-history checks, which retain their own command deadlines.
 
 To select established public read servers explicitly:
@@ -349,7 +349,7 @@ To select established public read servers explicitly:
 ```sh
 python3 scripts/verify-public-source.py --commit FULL_COMMIT --helpers PATH_TO_HELPERS \
   --read-server https://cdn.iris.to --read-server https://upload.iris.to \
-  --clone-timeout 1800
+  --clone-timeout 2700
 ```
 
 Only these two exact HTTPS origins are accepted. With both selected, the pinned

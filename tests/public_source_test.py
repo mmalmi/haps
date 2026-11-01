@@ -87,7 +87,7 @@ class PublicSourceGate(unittest.TestCase):
             config = Path(temporary) / 'release.json'
             config.write_text('{"source":"htree://npub1fixture/source"}')
             argv = [str(ROOT / 'scripts/verify-public-source.py'), '--config', str(config),
-                    '--commit', revision, '--helpers', str(ROOT), '--clone-timeout', '1800',
+                    '--commit', revision, '--helpers', str(ROOT), '--clone-timeout', '2700',
                     '--read-server', 'https://cdn.iris.to', '--read-server', 'https://upload.iris.to']
 
             def inspect_clone(*args, **options):
@@ -99,7 +99,7 @@ class PublicSourceGate(unittest.TestCase):
                     patch.object(module.subprocess, 'run', side_effect=inspect_clone) as clone, \
                     patch.object(module.subprocess, 'check_output', side_effect=[revision, 'false', 'objects']):
                 runpy.run_path(argv[0], run_name='__main__')
-            self.assertEqual(clone.call_args.kwargs['timeout'], 1800)
+            self.assertEqual(clone.call_args.kwargs['timeout'], 2700)
             with patch.object(sys, 'argv', argv[:-1] + ['https://other.example']), \
                     patch.object(module.subprocess, 'run') as clone, \
                     patch('sys.stderr'):
@@ -147,16 +147,17 @@ class PublicSourceGate(unittest.TestCase):
 
     def test_larger_clone_deadline_preserves_history_checks(self):
         revision = 'a' * 40
-        with patch.object(module.subprocess, 'run') as clone, \
-                patch.object(module.subprocess, 'check_output', side_effect=[revision, 'false', 'objects']) as read:
-            module.verify('htree://npub1fixture/source', revision, ROOT, clone_timeout=1800)
-        self.assertEqual(clone.call_args.kwargs['timeout'], 1800)
-        self.assertEqual(read.call_count, 3)
-        self.assertTrue(all(call.kwargs['timeout'] == 120 for call in read.call_args_list))
-        self.assertEqual(read.call_args.args[0][-5:], ['rev-list', '--objects', '--missing=error', revision, '--'])
+        for timeout in (1800, 2700, 3600):
+            with self.subTest(timeout=timeout), patch.object(module.subprocess, 'run') as clone, \
+                    patch.object(module.subprocess, 'check_output', side_effect=[revision, 'false', 'objects']) as read:
+                module.verify('htree://npub1fixture/source', revision, ROOT, clone_timeout=timeout)
+                self.assertEqual(clone.call_args.kwargs['timeout'], timeout)
+                self.assertEqual(read.call_count, 3)
+                self.assertTrue(all(call.kwargs['timeout'] == 120 for call in read.call_args_list))
+                self.assertEqual(read.call_args.args[0][-5:], ['rev-list', '--objects', '--missing=error', revision, '--'])
 
     def test_invalid_deadlines_stop_before_fetch(self):
-        for timeout in (0, -1, 1801, '1.5', 'inf'):
+        for timeout in (0, -1, 3601, '1.5', 'inf'):
             with self.subTest(timeout=timeout), patch.object(module.subprocess, 'run') as clone:
                 with self.assertRaises(argparse.ArgumentTypeError):
                     module.verify('htree://npub1fixture/source', 'a' * 40, ROOT, clone_timeout=timeout)

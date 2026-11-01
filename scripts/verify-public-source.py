@@ -9,15 +9,18 @@ import subprocess
 import tempfile
 
 PUBLIC_READ_SERVERS = ('https://cdn.iris.to', 'https://upload.iris.to')
+MAX_CLONE_TIMEOUT_SECONDS = 3600
 
 
 def clone_timeout_seconds(value):
     try:
         seconds = int(value)
     except (TypeError, ValueError, OverflowError):
-        raise argparse.ArgumentTypeError('Clone timeout must be an integer from 1 to 1800 seconds') from None
-    if not 1 <= seconds <= 1800:
-        raise argparse.ArgumentTypeError('Clone timeout must be from 1 to 1800 seconds')
+        raise argparse.ArgumentTypeError(
+            f'Clone timeout must be an integer from 1 to {MAX_CLONE_TIMEOUT_SECONDS} seconds') from None
+    if not 1 <= seconds <= MAX_CLONE_TIMEOUT_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f'Clone timeout must be from 1 to {MAX_CLONE_TIMEOUT_SECONDS} seconds')
     return seconds
 
 
@@ -67,7 +70,7 @@ if __name__ == '__main__':
     parser.add_argument('--commit', required=True)
     parser.add_argument('--helpers', type=Path, required=True)
     parser.add_argument('--clone-timeout', type=clone_timeout_seconds, default=300, metavar='SECONDS',
-                        help='Cold clone deadline, from 1 to 1800 seconds (default: 300)')
+                        help=f'Cold clone deadline, from 1 to {MAX_CLONE_TIMEOUT_SECONDS} seconds (default: 300)')
     parser.add_argument('--read-server', action='append', choices=PUBLIC_READ_SERVERS,
                         help='Public read server; repeat to select both (default: helper defaults)')
     args = parser.parse_args()
