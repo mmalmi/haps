@@ -277,7 +277,13 @@ async fn build_reviewed(
         );
     }
     let mut package = checkout.recipe.package.clone();
-    let manifest = repo.pack_payload(&package, &payload).await?;
+    let mode = upstream
+        .map(|upstream| haps::repository::rebuild_mode(&upstream.release))
+        .transpose()?
+        .unwrap_or_default();
+    let manifest = repo
+        .pack_payload_with_mode(&package, &payload, mode)
+        .await?;
     let method = reviewer
         .as_ref()
         .map_or("trusted-source-build".to_owned(), |r| {
@@ -342,6 +348,13 @@ async fn build_reviewed(
     }
     // Include both inputs and output so two local builds cannot silently replace
     // one immutable release when a toolchain or dependency changes its output.
+    // A new local release uses the current writer, even when we compared its
+    // bytes against a legacy release above. Bind its version to its own ID.
+    let manifest = if mode == hashtree_core::EncryptionMode::LegacyChk {
+        repo.pack_payload(&package, &payload).await?
+    } else {
+        manifest
+    };
     package.version.build = haps::audit::local_build_metadata(&recipe_hash, &manifest)?;
     let release = repo.publish_reusable(&keys, package, &payload).await?;
     let recipe_cid = repo.put_json(&checkout.recipe).await?;

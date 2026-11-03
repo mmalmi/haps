@@ -381,7 +381,11 @@ async fn rebuild(
     let rebuilt_repo =
         crate::repository::Repository::local(checkout.root().parent().unwrap().join("comparison"))?;
     let rebuilt = rebuilt_repo
-        .pack_payload(&release.data.package, &payload)
+        .pack_payload_with_mode(
+            &release.data.package,
+            &payload,
+            crate::repository::rebuild_mode(release)?,
+        )
         .await?;
     let binary_match = rebuilt == release.data.manifest;
     progress.clear();

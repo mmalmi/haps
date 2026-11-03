@@ -122,14 +122,19 @@ pub async fn prepare(args: &ReleaseArgs, home: &Path) -> Result<Option<PreparedR
             Vec::new()
         };
         for package in &plan {
-            let manifest = temporary
-                .pack_payload(&package.spec, &package.payload)
-                .await?;
-            if let Some(previous) = existing.iter().find(|r| {
+            let previous = existing.iter().find(|r| {
                 r.data.package.name == package.spec.name
                     && r.data.package.version == package.spec.version
                     && r.data.package.target == package.spec.target
-            }) {
+            });
+            let mode = previous
+                .map(crate::repository::rebuild_mode)
+                .transpose()?
+                .unwrap_or_default();
+            let manifest = temporary
+                .pack_payload_with_mode(&package.spec, &package.payload, mode)
+                .await?;
+            if let Some(previous) = previous {
                 ensure!(
                     previous.data.package == package.spec && previous.data.manifest == manifest,
                     "immutable release differs from its existing package; publish a new version"

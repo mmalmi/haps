@@ -124,6 +124,19 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
     let store = Arc::new(MemoryStore::new());
     let tree = HashTree::new(HashTreeConfig::new(store.clone()));
     let root = add_directory(&tree, &repo_dir).await?;
+    use hashtree_core::EncryptionMode;
+    assert_eq!(root.key.unwrap().mode(), EncryptionMode::ChkV1);
+    let mut extra_roots = Vec::new();
+    for mode in [EncryptionMode::LegacyChk, EncryptionMode::RndV1] {
+        let writer = HashTree::new(HashTreeConfig::new(store.clone())).with_encryption_mode(mode);
+        let cid = add_directory(&writer, &repo_dir).await?;
+        assert_eq!(cid.key.unwrap().mode(), mode);
+        let location = haps::event_catalog::root_url(&cid)?;
+        let signed = haps::event_catalog::IndexAnnouncement::sign(&host, "fixture", &location)?;
+        let verified = haps::event_catalog::IndexAnnouncement::verify(signed)?;
+        assert_eq!(haps::event_catalog::decode_root(&verified.location)?, cid);
+        extra_roots.push(location);
+    }
     let mut tags = vec![
         Tag::identifier("packages"),
         Tag::parse(["hash", &hex::encode(root.hash)])?,
@@ -254,12 +267,12 @@ async fn signed_catalog_search_and_install_through_daemon_and_standalone() -> an
         decrypt_key: root.key,
     })?;
     let named_requests = root_requests.load(Ordering::Relaxed);
-    for reference in [hash.clone(), format!("htree://{hash}")] {
-        let home = temp.path().join(if reference.starts_with("htree:") {
-            "hash-url"
-        } else {
-            "bare-hash"
-        });
+    for (i, reference) in [hash.clone(), format!("htree://{hash}")]
+        .into_iter()
+        .chain(extra_roots)
+        .enumerate()
+    {
+        let home = temp.path().join(format!("immutable-reader-{i}"));
         let run_hash = |args: &[&str]| {
             std::process::Command::new(env!("CARGO_BIN_EXE_haps"))
                 .env("HAPS_HOME", &home)

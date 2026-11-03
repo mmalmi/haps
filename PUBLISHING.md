@@ -102,6 +102,14 @@ give `pack` an external key with `--key-file`.
 and content-addressed files. It checks the complete payload, including ignore
 rules and whether declared commands are included. It does not upload anything.
 
+Haps 0.1.24 reads both legacy Hashtree keys and the versioned keys used by
+Hashtree 0.3. New packages and catalogs use versioned CHK references. Readers
+through Haps 0.1.23 need a legacy catalog to install their upgrade. Publish
+that transition package with the previous verified Haps publisher, or upgrade
+the CLI using its prebuilt installer or Cargo. When checking a previously
+signed Haps payload, 0.1.24 reproduces the original CHK encoding so an
+unchanged legacy release keeps its exact manifest ID.
+
 Try the staged app's basic functionality inside a VM or container before sharing.
 After publishing, test discovery and installation from a separate Haps profile as
 shown below. A successful install alone does not prove the app works.

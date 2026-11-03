@@ -25,6 +25,106 @@ fn package(root: &std::path::Path, version: &str) -> PackageSpec {
 }
 
 #[tokio::test]
+async fn legacy_payload_keeps_its_identity_through_rebuild_retry_update_and_rollback()
+-> anyhow::Result<()> {
+    use haps::model::{ReleaseData, sign, sign_release};
+    use haps::repository::{Catalog, CatalogRoot, rebuild_mode};
+    use hashtree_core::{Cid, EncryptionMode};
+
+    let tmp = tempdir()?;
+    let author = Keys::generate();
+    let payload = tmp.path().join("payload");
+    fs::create_dir(&payload)?;
+    fs::write(payload.join("hello"), b"legacy payload\n")?;
+    let repo = Repository::local(tmp.path().join("repository"))?;
+    let mut spec = PackageSpec {
+        name: "hello".into(),
+        version: "1.0.0".parse()?,
+        target: target().into(),
+        description: "Migration fixture".into(),
+        commands: BTreeMap::from([("hello".into(), "hello".into())]),
+        dependencies: vec![],
+        source: None,
+        app: None,
+        desktop: None,
+    };
+    // Captured with Haps 0.1.23 pack. Includes the exact file path, bytes, and executable bit.
+    let original = "06eb5e16263367d3059cae3cd1761b1d3f85e101e695e295158b1fc7cce6143f:45e81c011a09c29a9dc3622f2a71b1c8e44bfff6e26312bbcf77f535c2d6cb7b";
+    let event = sign_release(
+        &author,
+        &ReleaseData {
+            schema: "haps.release.v1".into(),
+            package: spec.clone(),
+            manifest: original.into(),
+        },
+    )?;
+    let legacy = repo
+        .store
+        .tree()
+        .with_encryption_mode(EncryptionMode::LegacyChk);
+    let record = legacy.put(&serde_json::to_vec(&event)?).await?.0;
+    let catalog = Catalog {
+        releases: vec![record.to_string()],
+        ..Default::default()
+    };
+    let root = legacy.put(&serde_json::to_vec(&catalog)?).await?.0;
+    let head = CatalogRoot {
+        schema: "haps.catalog.v1".into(),
+        sequence: 1,
+        root: root.to_string(),
+    };
+    fs::write(
+        repo.path().unwrap().join("catalog.json"),
+        serde_json::to_vec(&sign(&author, "haps/catalog/v1", &head)?)?,
+    )?;
+    let snapshot = repo.catalog(&author.public_key().to_hex()).await?;
+    let old = repo.releases(&snapshot).await?.remove(0);
+    assert_eq!(
+        repo.pack_payload_with_mode(&spec, &payload, rebuild_mode(&old)?)
+            .await?,
+        original
+    );
+    assert_eq!(
+        repo.publish_reusable(&author, spec.clone(), &payload)
+            .await?
+            .event
+            .id,
+        event.id
+    );
+    let installed = Installation::new(tmp.path().join("reader"))?;
+    installed.install(&repo, &old).await?;
+    fs::write(payload.join("hello"), b"versioned payload\n")?;
+    assert!(
+        repo.publish_reusable(&author, spec.clone(), &payload)
+            .await
+            .is_err()
+    );
+    spec.version = "1.1.0".parse()?;
+    let new = repo.publish(&author, spec.clone(), &payload).await?;
+    assert_eq!(
+        Cid::parse(&new.data.manifest)?.key.unwrap().mode(),
+        EncryptionMode::ChkV1
+    );
+    let snapshot = repo.catalog(&author.public_key().to_hex()).await?;
+    let latest = repo
+        .latest_release(&snapshot, &old.identity(), target(), |_| {})
+        .await?
+        .unwrap();
+    assert_eq!(latest.event.id, new.event.id);
+    installed.install(&repo, &latest).await?;
+    assert_eq!(
+        fs::read(installed.command("hello", None)?)?,
+        b"versioned payload\n"
+    );
+    installed.rollback("hello")?;
+    assert_eq!(
+        fs::read(installed.command("hello", None)?)?,
+        b"legacy payload\n"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn signed_publish_search_install_update_rollback_and_remove() -> anyhow::Result<()> {
     let tmp = tempdir()?;
     let author = Keys::generate();

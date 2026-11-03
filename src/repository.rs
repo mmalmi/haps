@@ -44,6 +44,23 @@ pub struct Repository {
     pub store: Arc<VerifiedStore>,
 }
 
+/// Haps used unprefixed CHK references before hashtree-core 0.3. The
+/// deterministic encoding is part of an immutable payload's manifest ID.
+pub fn rebuild_mode(release: &Release) -> Result<hashtree_core::EncryptionMode> {
+    use hashtree_core::EncryptionMode;
+    let cid = Cid::parse(&release.data.manifest)?;
+    Ok(
+        if cid
+            .key
+            .is_some_and(|key| key.mode() == EncryptionMode::LegacyChk)
+        {
+            EncryptionMode::LegacyChk
+        } else {
+            EncryptionMode::default()
+        },
+    )
+}
+
 enum Location {
     Local(PathBuf),
     Http(reqwest::Url),
@@ -199,9 +216,25 @@ impl Repository {
         Ok(serde_json::from_slice(&bytes)?)
     }
     pub async fn put_json(&self, value: &impl Serialize) -> Result<String> {
+        self.put_json_with_mode(value, hashtree_core::EncryptionMode::default())
+            .await
+    }
+
+    async fn put_json_with_mode(
+        &self,
+        value: &impl Serialize,
+        mode: hashtree_core::EncryptionMode,
+    ) -> Result<String> {
         let bytes = serde_json::to_vec(value)?;
         ensure!(bytes.len() <= MAX_METADATA, "metadata is too large");
-        Ok(self.store.tree().put(&bytes).await?.0.to_string())
+        Ok(self
+            .store
+            .tree()
+            .with_encryption_mode(mode)
+            .put(&bytes)
+            .await?
+            .0
+            .to_string())
     }
     pub async fn releases(&self, snapshot: &Snapshot) -> Result<Vec<Release>> {
         let mut results = Vec::new();
@@ -555,7 +588,12 @@ impl Repository {
             catalog = previous.catalog;
         }
         ensure!(catalog.releases.len() < 10_000, "catalog is full");
-        let manifest = self.pack_payload(&spec, payload).await?;
+        let mode = existing
+            .as_ref()
+            .map(rebuild_mode)
+            .transpose()?
+            .unwrap_or_default();
+        let manifest = self.pack_payload_with_mode(&spec, payload, mode).await?;
         let data = ReleaseData {
             schema: "haps.release.v1".into(),
             package: spec.clone(),
@@ -610,6 +648,16 @@ impl Repository {
     }
     /// Validate and address a payload without creating any signed event.
     pub async fn pack_payload(&self, spec: &PackageSpec, payload: &Path) -> Result<String> {
+        self.pack_payload_with_mode(spec, payload, hashtree_core::EncryptionMode::default())
+            .await
+    }
+
+    pub async fn pack_payload_with_mode(
+        &self,
+        spec: &PackageSpec,
+        payload: &Path,
+        mode: hashtree_core::EncryptionMode,
+    ) -> Result<String> {
         spec.validate()?;
         let payload = payload
             .canonicalize()
@@ -625,7 +673,7 @@ impl Repository {
         );
         let mut files = Vec::new();
         let mut total = 0u64;
-        let tree = self.store.tree();
+        let tree = self.store.tree().with_encryption_mode(mode);
         let mut overrides = ignore::overrides::OverrideBuilder::new(&payload);
         for pattern in [
             "!**/.git",
@@ -715,6 +763,6 @@ impl Repository {
             files,
         };
         manifest.validate(spec)?;
-        self.put_json(&manifest).await
+        self.put_json_with_mode(&manifest, mode).await
     }
 }
