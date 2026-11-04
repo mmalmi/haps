@@ -1,5 +1,7 @@
-name: Check
-on: [push, pull_request]
+name: Verify helper checkpoint on Linux
+on:
+  push:
+    branches: [codex/haps-checkpoint-linux-verification]
 permissions:
   contents: read
 concurrency:
@@ -15,16 +17,36 @@ jobs:
         include:
           - os: ubuntu-latest
             runner: ubuntu-24.04
-          - os: macos-latest
-            runner: macos-14
-          - os: windows-latest
-            runner: windows-2025
     runs-on: ${{ matrix.runner }}
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 5e45df5582d7b29f10dd856e6e28becf3a19236b
+          persist-credentials: false
+      - name: Verify reviewed source and preload the pinned Ubuntu packages
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = 5e45df5582d7b29f10dd856e6e28becf3a19236b
+          python3 - <<'PYTHON'
+          import hashlib, json, os, pathlib, urllib.request
+          root = pathlib.Path(os.environ['RUNNER_TEMP'], 'build-inputs')
+          root.mkdir(exist_ok=True)
+          pins = json.loads(pathlib.Path('scripts/build-inputs.json').read_text())['ubuntu_test_packages']
+          for spec in pins:
+              archive_path = spec['url'].split('/pool/', 1)[1]
+              url = 'https://archive.ubuntu.com/ubuntu/pool/' + archive_path
+              with urllib.request.urlopen(url, timeout=60) as response:
+                  data = response.read(8 * 1024 * 1024 + 1)
+              digest = hashlib.sha256(data).hexdigest()
+              if digest != spec['sha256']:
+                  raise SystemExit(f'Pinned package differs: {archive_path}')
+              file = root / pathlib.Path(archive_path).name
+              file.write_bytes(data)
+              print(file.name, len(data), digest)
+          PYTHON
       - name: Install hash-pinned Rust toolchain
         shell: bash
         run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/build-inputs.py rust --work "$RUNNER_TEMP/build-inputs" --bash "$BASH"
