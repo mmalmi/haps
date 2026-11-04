@@ -85,6 +85,23 @@ class BuildInputs(unittest.TestCase):
                 module.install_ubuntu_test_tools(lock, Path(temporary))
             execute.assert_not_called()
 
+    def test_unavailable_snapshot_uses_mirror_with_the_same_checksum(self):
+        data = b'reviewed package'
+        spec = {'url': 'https://snapshot.invalid/tool.deb', 'mirror': 'https://archive.invalid/tool.deb',
+                'sha256': hashlib.sha256(data).hexdigest()}
+        unavailable = module.urllib.error.HTTPError(spec['url'], 503, 'Unavailable', {}, None)
+        for payload in (data, b'tampered mirror'):
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as temporary, \
+                    patch.object(module.urllib.request, 'urlopen', side_effect=[unavailable, io.BytesIO(payload)]) as fetch:
+                path = Path(temporary) / 'tool.deb'
+                if payload == data:
+                    self.assertEqual(module.download(spec, path).read_bytes(), data)
+                else:
+                    with self.assertRaisesRegex(ValueError, 'checksum mismatch'):
+                        module.download(spec, path)
+                    self.assertFalse(path.exists())
+                self.assertEqual([call.args[0] for call in fetch.call_args_list], [spec['url'], spec['mirror']])
+
     def test_arch_package_databases_cannot_refresh_after_verification(self):
         script = (ROOT / 'scripts/test-makepkg.sh').read_text()
         lock = json.loads(module.LOCK.read_text())

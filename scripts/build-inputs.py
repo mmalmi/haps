@@ -10,6 +10,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import urllib.error
 import urllib.request
 
 LOCK = Path(__file__).with_suffix('.json')
@@ -17,7 +18,9 @@ LOCK = Path(__file__).with_suffix('.json')
 
 def download(spec, destination):
     """Verify a source-controlled checksum before any extraction or execution."""
-    if not re.fullmatch(r'[0-9a-f]{64}', spec['sha256']) or not spec['url'].startswith('https://'):
+    mirror = spec.get('mirror')
+    if (not re.fullmatch(r'[0-9a-f]{64}', spec['sha256']) or not spec['url'].startswith('https://')
+            or (mirror is not None and not mirror.startswith('https://'))):
         raise ValueError('Build input needs an HTTPS URL and fixed SHA-256')
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -26,7 +29,14 @@ def download(spec, destination):
         try:
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as output:
                 temporary = Path(output.name)
-                with urllib.request.urlopen(spec['url'], timeout=120) as response:
+                try:
+                    response = urllib.request.urlopen(spec['url'], timeout=120)
+                except (urllib.error.URLError, TimeoutError):
+                    if mirror is None:
+                        raise
+                    print(f'Primary input unavailable; trying {mirror}', flush=True)
+                    response = urllib.request.urlopen(mirror, timeout=120)
+                with response:
                     shutil.copyfileobj(response, output)
             verify(temporary, spec['sha256'])
             temporary.replace(destination)
