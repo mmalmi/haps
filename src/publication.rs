@@ -22,7 +22,7 @@ pub(crate) fn supports(helper: &Path, command: &str, option: &str) -> bool {
         })
 }
 
-pub(crate) fn scope(home: &Path, input: &impl Serialize) -> Result<PathBuf> {
+fn scope(home: &Path, input: &impl Serialize) -> Result<PathBuf> {
     let config = hashtree_config::Config::load()?;
     let data = std::env::var_os("HTREE_DATA_DIR")
         .map(PathBuf::from)
@@ -64,16 +64,26 @@ fn canonical_path(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-pub(crate) fn helper_identity(helper: &Path) -> Result<impl Serialize> {
-    let metadata = fs::metadata(helper)?;
-    Ok((
-        helper.canonicalize()?,
-        metadata.len(),
-        metadata
-            .modified()?
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_nanos(),
-    ))
+fn helper_identity(helper: &Path) -> Result<Option<(PathBuf, String)>> {
+    let path = helper.canonicalize()?;
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut digest = Sha256::new();
+    std::io::copy(&mut file, &mut digest)?;
+    Ok(Some((path, hex::encode(digest.finalize()))))
+}
+
+pub(crate) fn helper_scope(
+    home: &Path,
+    input: &impl Serialize,
+    helper: &Path,
+) -> Result<Option<PathBuf>> {
+    helper_identity(helper)?
+        .map(|identity| scope(home, &(input, identity)))
+        .transpose()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -105,21 +115,27 @@ pub(crate) fn remember(scope: &Path, root: &str) -> Result<()> {
 }
 
 pub(crate) fn upload_directory(home: &Path, helper: &Path, path: &Path) -> Result<String> {
-    let scope = scope(home, &(path.canonicalize()?, helper_identity(helper)?))?;
-    ensure!(
-        !scope.starts_with(path.canonicalize()?),
-        "publication cache must be outside the catalog"
-    );
-    let _guard = lock(&scope.join("publish.lock"))?;
+    let catalog = path.canonicalize()?;
+    let scope = helper_scope(home, &catalog, helper)?;
     let mut command = Command::new(helper);
     command.arg("add").arg(path).arg("--local");
-    if cfg!(unix) && supports(helper, "add", "--cache") {
-        command.arg("--cache").arg(scope.join("files.json"));
-    } else {
-        eprintln!(
-            "This htree helper does not support source-file caching; addressing the complete catalog. Update htree to enable incremental addressing."
+    let _guard = if let Some(scope) = &scope {
+        ensure!(
+            !scope.starts_with(&catalog),
+            "publication cache must be outside the catalog"
         );
-    }
+        let guard = lock(&scope.join("publish.lock"))?;
+        if cfg!(unix) && supports(helper, "add", "--cache") {
+            command.arg("--cache").arg(scope.join("files.json"));
+        } else {
+            eprintln!(
+                "This htree helper does not support source-file caching; addressing the complete catalog. Update htree to enable incremental addressing."
+            );
+        }
+        Some(guard)
+    } else {
+        None
+    };
     let output = command.output()?;
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
     ensure!(
@@ -127,7 +143,7 @@ pub(crate) fn upload_directory(home: &Path, helper: &Path, path: &Path) -> Resul
         "Hashtree catalog publication failed"
     );
     let root = crate::event_catalog::uploaded_root(&output.stdout)?;
-    let previous = uploaded(&scope);
+    let previous = scope.as_deref().and_then(uploaded);
     if previous.as_deref() == Some(&root) {
         return Ok(root);
     }
@@ -151,6 +167,64 @@ pub(crate) fn upload_directory(home: &Path, helper: &Path, path: &Path) -> Resul
         output.status.success(),
         "Hashtree content upload failed; catalog was not announced"
     );
-    remember(&scope, &root)?;
+    if let Some(scope) = &scope {
+        remember(scope, &root)?;
+    }
     Ok(root)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn checkpoint_identity_follows_helper_bytes() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("htree");
+        let identity = || helper_identity(&path)?.context("readable test helper");
+        let set_time = |seconds| {
+            fs::OpenOptions::new()
+                .write(true)
+                .open(&path)?
+                .set_modified(UNIX_EPOCH + Duration::from_secs(seconds))
+        };
+
+        fs::write(&path, b"helper A")?;
+        set_time(1_600_000_000)?;
+        let original = identity()?;
+        set_time(1_700_000_000)?;
+        assert_eq!(
+            identity()?,
+            original,
+            "touching the same bytes keeps the scope"
+        );
+
+        fs::write(&path, b"helper B")?;
+        set_time(1_600_000_000)?;
+        assert_ne!(
+            identity()?,
+            original,
+            "different bytes with the original length and timestamp need a fresh scope"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_only_helpers_do_not_share_checkpoints() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("htree");
+        fs::write(&path, b"helper")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o111))?;
+        if fs::File::open(&path).is_ok() {
+            // A privileged test runner can still hash this file.
+            return Ok(());
+        }
+        assert!(helper_scope(directory.path(), &"index", &path)?.is_none());
+        assert!(!directory.path().join("publication").exists());
+        Ok(())
+    }
 }

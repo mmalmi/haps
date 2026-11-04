@@ -94,15 +94,16 @@ pub fn upload_index(home: &Path, events: &[Event]) -> Result<String> {
         "catalog is empty; add a package before publishing"
     );
     let helper = crate::helpers::find("htree").context("Publishing needs htree. Install the Haps bundle or run `cargo install hashtree-cli --locked`.")?;
-    let scope = crate::publication::scope(
+    let scope = crate::publication::helper_scope(
         home,
-        &(
-            events.iter().map(|event| event.id).collect::<Vec<_>>(),
-            crate::publication::helper_identity(&helper)?,
-        ),
+        &events.iter().map(|event| event.id).collect::<Vec<_>>(),
+        &helper,
     )?;
-    let _guard = lock(&scope.join("publish.lock"))?;
-    if let Some(root) = crate::publication::uploaded(&scope) {
+    let _guard = scope
+        .as_ref()
+        .map(|scope| lock(&scope.join("publish.lock")))
+        .transpose()?;
+    if let Some(root) = scope.as_deref().and_then(crate::publication::uploaded) {
         return Ok(root);
     }
     let staging = tempfile::tempdir()?;
@@ -136,7 +137,9 @@ pub fn upload_index(home: &Path, events: &[Event]) -> Result<String> {
         "Hashtree content upload failed; catalog was not announced"
     );
     let location = root_url(&root)?;
-    crate::publication::remember(&scope, &location)?;
+    if let Some(scope) = &scope {
+        crate::publication::remember(scope, &location)?;
+    }
     Ok(location)
 }
 
