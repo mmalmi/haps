@@ -92,6 +92,7 @@ fn main() {
             .status()?
             .success()
     );
+    let helper = tools.join(format!("htree{}", std::env::consts::EXE_SUFFIX));
     let mut path = vec![tools];
     path.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
@@ -146,6 +147,10 @@ fn main() {
         String::from_utf8_lossy(&published.stderr)
     );
     assert_eq!(pushes()?.len(), 2);
+    fs::File::options()
+        .write(true)
+        .open(&helper)?
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_600_000_000))?;
     assert!(run(&root_a, false, "first-data").status.success());
     assert_eq!(
         pushes()?.len(),

@@ -204,9 +204,10 @@ outside the published directory. With a compatible `htree`, later publications
 reuse unchanged source-file addresses and upload only changes since the last
 successfully uploaded root. An unchanged retry preserves signed release and head
 events. Failed uploads never advance that checkpoint. Changing the catalog,
-helper, storage directory, or file-server configuration starts a separate scope;
-existing history remains included. The first publication without a valid cache
-still addresses the complete catalog.
+helper path or bytes, storage directory, or file-server configuration starts a
+separate scope. Restoring the same helper at the same path preserves the
+checkpoint even when its modification time changes. The first publication after upgrading from
+metadata-based checkpoints addresses the complete catalog once.
 
 Haps probes optional helper capabilities: directory addressing caches require the
 new Unix `htree add --cache` option; retained-root delta upload is available from
