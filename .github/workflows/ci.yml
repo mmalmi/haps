@@ -1,120 +1,88 @@
-name: Check
-on: [push, pull_request]
+name: Verify published Haps Darwin checkpoint
+on:
+  push:
+    branches: [codex/haps-025-publisher-handoff]
 permissions:
   contents: read
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  actions: read
 jobs:
-  test:
-    name: Test (${{ matrix.os }})
+  verify:
+    runs-on: macos-14
     timeout-minutes: 35
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            runner: ubuntu-24.04
-          - os: macos-latest
-            runner: macos-14
-          - os: windows-latest
-            runner: windows-2025
-    runs-on: ${{ matrix.runner }}
     env:
-      CARGO_TERM_COLOR: always
-      RUST_BACKTRACE: 1
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Install hash-pinned Rust toolchain
+      CARGO_INCREMENTAL: 0
+      RELEASE_COMMIT: 3bbb4177d244b3be76172419bf9611a74ec53ff9
+      RELEASE_RUN: '41843932486'
+    defaults:
+      run:
+        working-directory: source
         shell: bash
-        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/build-inputs.py rust --work "$RUNNER_TEMP/build-inputs" --bash "$BASH"
-      - name: Check formatting
-        run: cargo fmt --all --check
-      - name: Install Linux build isolation
-        if: runner.os == 'Linux'
+    steps:
+      - name: Read verification harness
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: harness
+          persist-credentials: false
+      - name: Check out exact official source and ancestry
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: source
+          ref: 3bbb4177d244b3be76172419bf9611a74ec53ff9
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Bind freshly downloaded tagged companion bytes
         run: |
-          python3 scripts/build-inputs.py ubuntu-test-tools --work "$RUNNER_TEMP/build-inputs"
-          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ] &&
-             [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1 ]; then
-            # Load Ubuntu's scoped bwrap profile; retain the host-wide restriction.
-            if [ ! -f /etc/apparmor.d/bwrap-userns-restrict ]; then
-              sudo install -m 644 /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
-                /etc/apparmor.d/bwrap-userns-restrict
-            fi
-            sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
-          fi
-          # Fail before compiling if this runner cannot provide build isolation.
-          /usr/bin/bwrap --unshare-all --unshare-user --die-with-parent \
-            --disable-userns --cap-drop ALL --ro-bind / / -- /bin/true
-      - name: Install the supported Omarchy picker
-        if: runner.os == 'Linux'
+          set -eu
+          test "$(git rev-parse 'v0.1.25^{commit}')" = "$RELEASE_COMMIT"
+          git merge-base --is-ancestor 0f00ad99d97b4be3a5280d50eddd2d2daa96630d "$RELEASE_COMMIT"
+          python3 scripts/bundle.py --target aarch64-apple-darwin --destination "$RUNNER_TEMP/companions" --cache "$RUNNER_TEMP/companion-cache"
+      - name: Verify complete cold public Hashtree source
         run: |
-          curl --fail --location --retry 3 https://github.com/junegunn/fzf/releases/download/v0.74.5/fzf-0.74.5-linux_amd64.tar.gz -o "$RUNNER_TEMP/fzf.tar.gz"
-          echo 'd47d7f882972c7d674dbbba998ffa4116e68379616ffac7695d0671e9a722c5f  '"$RUNNER_TEMP/fzf.tar.gz" | sha256sum --check
-          mkdir "$RUNNER_TEMP/fzf"
-          tar -xzf "$RUNNER_TEMP/fzf.tar.gz" -C "$RUNNER_TEMP/fzf" fzf
-          sudo install -m 755 "$RUNNER_TEMP/fzf/fzf" /usr/local/bin/fzf
-          /usr/local/bin/fzf --version
-      - name: Test the Omarchy picker
-        if: runner.os == 'Linux'
+          python3 scripts/verify-public-source.py --commit "$RELEASE_COMMIT" --helpers "$RUNNER_TEMP/companions/libexec" --read-server https://cdn.iris.to --read-server https://upload.iris.to --clone-timeout 600
+      - name: Compare official release, hosted native archive and extracted binaries
         env:
-          HAPS_TEST_FZF: /usr/local/bin/fzf
-        run: python3 -m unittest discover -s tests -p omarchy_test.py
-      - name: Check all targets with Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Test native installation and package lifecycle
-        run: cargo test --locked --no-fail-fast
-      - name: Test installers and audit integration
-        if: runner.os == 'Linux'
+          GH_TOKEN: ${{ github.token }}
         run: |
-          python3 - <<'PY'
-          import pathlib, sys, unittest
-          sys.path.insert(0, 'tests')
-          modules = [path.stem for path in sorted(pathlib.Path('tests').glob('*_test.py'))
-                     if path.name != 'omarchy_test.py']
-          suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
-          sys.exit(not unittest.TextTestRunner().run(suite).wasSuccessful())
-          PY
-      - name: Verify the publishable crate
-        if: runner.os == 'Linux'
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: cargo publish --dry-run --locked
-      - name: Retain the verified crate
-        if: runner.os == 'Linux'
+          python3 -IB ../harness/qualification/verify-darwin.py --commit "$RELEASE_COMMIT" --release-run "$RELEASE_RUN" --companions "$RUNNER_TEMP/companions/libexec" --output "$RUNNER_TEMP/verified-tools"
+      - name: Install the tag’s pinned native Rust compiler
+        run: python3 scripts/build-inputs.py rust --target aarch64-apple-darwin --work "$RUNNER_TEMP/build-inputs" --bash "$BASH"
+      - name: Run the tagged checkpoint fixture against the delivered Haps
+        run: |
+          set -eu
+          cargo test --locked --test incremental_publish --no-run --message-format=json > "$RUNNER_TEMP/test-build.jsonl"
+          python3 - <<'PYTHON'
+          import hashlib, json, os, shutil, subprocess
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])
+          target=Path('target/debug').resolve()
+          records=[json.loads(line) for line in (root/'test-build.jsonl').read_text().splitlines()]
+          tests=[r['executable'] for r in records if r.get('reason')=='compiler-artifact' and r['target']['name']=='incremental_publish' and r.get('executable')]
+          assert len(tests)==1 and Path(tests[0]).parent==target/'deps'
+          verified=root/'verified-tools';receipt=json.loads((verified/'qualification.json').read_text())
+          expected=receipt['bundle_members_sha256']['haps']
+          executable=target/'haps'
+          assert executable.is_file() and not executable.is_symlink()
+          def sha(path):
+              h=hashlib.sha256()
+              with path.open('rb') as f:
+                  for chunk in iter(lambda:f.read(1024*1024),b''):h.update(chunk)
+              return h.hexdigest()
+          copy=target/'qualification-published-haps'
+          shutil.copy2(verified/'haps',copy); copy.replace(executable)
+          assert sha(executable)==expected
+          result=subprocess.run([tests[0],'--exact','no_op_and_failed_upload_retry_keep_server_scoped_successful_checkpoints','--nocapture'],
+                                text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=300)
+          print(result.stdout);result.check_returncode()
+          assert '1 passed' in result.stdout and sha(executable)==expected
+          evidence={'source':receipt['commit'],'tag':receipt['tag'],'tested_published_haps_sha256':expected,'scope':'isolated loopback catalog and mocked helper','fixture':tests[0].split('/')[-1],'passed':True}
+          (verified/'checkpoint-smoke.json').write_text(json.dumps(evidence,indent=2)+'\n')
+          PYTHON
+      - name: Preserve qualification receipts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: haps-crate-verified
-          path: target/package/**/haps-*.crate
+          name: haps-v0.1.25-iris-publisher-receipts
+          path: |
+            ${{ runner.temp }}/verified-tools/qualification.json
+            ${{ runner.temp }}/verified-tools/checkpoint-smoke.json
           if-no-files-found: error
-          retention-days: 7
-      - name: Build and install an audited PKGBUILD using Arch tooling
-        if: runner.os == 'Linux'
-        run: bash scripts/test-makepkg.sh
-      - name: Test the interactive chooser in a macOS terminal
-        if: runner.os == 'macOS'
-        run: python3 -m unittest discover -s tests -p chooser_test.py
-      - name: Verify macOS build containment
-        if: runner.os == 'macOS'
-        run: python3 -m unittest discover -s tests -p build_isolation_test.py
-      - name: Build a locked dependency with explicit network access
-        if: runner.os == 'Linux' || runner.os == 'macOS'
-        env:
-          HAPS_LIVE_BUILD_NETWORK: '1'
-        run: python3 -m unittest discover -s tests -p build_isolation_test.py -k locked_cargo
-      - name: Launch a desktop entry through GIO
-        if: runner.os == 'Linux'
-        run: HAPS_TEST_DESKTOP=1 cargo test --locked desktop_launcher_tracks_install_update_rollback_and_removal
-      - name: Install real published example apps
-        if: runner.os == 'Linux' || runner.os == 'macOS'
-        timeout-minutes: 25
-        env:
-          HAPS_TEST_APPS: iris-chat,iris-drive,nostr-vpn
-        run: cargo test --locked --test published_apps -- --ignored --nocapture
-      - name: Retain the verified Linux worker binary
-        if: runner.os == 'Linux'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: haps-linux-verified
-          path: target/debug/haps
-          retention-days: 7
+          retention-days: 14
