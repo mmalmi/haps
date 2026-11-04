@@ -22,7 +22,7 @@ pub(crate) fn supports(helper: &Path, command: &str, option: &str) -> bool {
         })
 }
 
-pub(crate) fn scope(home: &Path, input: &impl Serialize) -> Result<PathBuf> {
+fn scope(home: &Path, input: &impl Serialize) -> Result<PathBuf> {
     let config = hashtree_config::Config::load()?;
     let data = std::env::var_os("HTREE_DATA_DIR")
         .map(PathBuf::from)
@@ -64,60 +64,42 @@ fn canonical_path(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-pub(crate) fn helper_identity(helper: &Path) -> Result<(PathBuf, String)> {
+pub(crate) enum CheckpointDir {
+    Persistent(PathBuf),
+    Temporary(tempfile::TempDir),
+}
+
+impl CheckpointDir {
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            Self::Persistent(path) => path,
+            Self::Temporary(dir) => dir.path(),
+        }
+    }
+}
+
+fn helper_identity(helper: &Path) -> Result<Option<(PathBuf, String)>> {
     let path = helper.canonicalize()?;
-    let digest = helper_digest(&path)?;
-    Ok((path, digest))
-}
-
-fn hash_helper(file: &mut fs::File) -> Result<String> {
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
     let mut digest = Sha256::new();
-    std::io::copy(file, &mut digest)?;
-    Ok(hex::encode(digest.finalize()))
+    std::io::copy(&mut file, &mut digest)?;
+    Ok(Some((path, hex::encode(digest.finalize()))))
 }
 
-#[cfg(not(unix))]
-fn helper_digest(path: &Path) -> Result<String> {
-    hash_helper(&mut fs::File::open(path)?)
-}
-
-#[cfg(unix)]
-fn helper_digest(path: &Path) -> Result<String> {
-    use std::os::unix::fs::MetadataExt;
-    use std::sync::Mutex;
-    use std::time::UNIX_EPOCH;
-
-    // File metadata never enters the persistent scope. Cache one digest in this process
-    // on systems that expose the inode's change time (including restored mtimes).
-    type Stamp = (u64, u64, u64, i64, i64);
-    static LAST: Mutex<Option<(Stamp, String)>> = Mutex::new(None);
-    let stamp = |m: &fs::Metadata| (m.dev(), m.ino(), m.len(), m.ctime(), m.ctime_nsec());
-    let mut file = fs::File::open(path)?;
-    let meta = file.metadata()?;
-    let original = stamp(&meta);
-    // A coarse or freshly stamped file might still change within the same clock tick.
-    let reusable = meta.ctime() > 0
-        && meta.ctime_nsec() > 0
-        && UNIX_EPOCH
-            .elapsed()
-            .is_ok_and(|now| now.as_secs().saturating_sub(meta.ctime() as u64) > 2);
-    if reusable
-        && let Some((cached, digest)) = &*LAST.lock().unwrap()
-        && *cached == original
-    {
-        return Ok(digest.clone());
+pub(crate) fn helper_scope(
+    home: &Path,
+    input: &impl Serialize,
+    helper: &Path,
+) -> Result<CheckpointDir> {
+    match helper_identity(helper)? {
+        Some(identity) => Ok(CheckpointDir::Persistent(scope(home, &(input, identity))?)),
+        // An execute-only helper can publish, but its checkpoints cannot be safely reused.
+        None => Ok(CheckpointDir::Temporary(tempfile::tempdir()?)),
     }
-
-    let digest = hash_helper(&mut file)?;
-    ensure!(
-        stamp(&fs::metadata(path)?) == original && stamp(&file.metadata()?) == original,
-        "htree helper changed while hashing: {}",
-        path.display()
-    );
-    if reusable {
-        *LAST.lock().unwrap() = Some((original, digest.clone()));
-    }
-    Ok(digest)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -149,7 +131,8 @@ pub(crate) fn remember(scope: &Path, root: &str) -> Result<()> {
 }
 
 pub(crate) fn upload_directory(home: &Path, helper: &Path, path: &Path) -> Result<String> {
-    let scope = scope(home, &(path.canonicalize()?, helper_identity(helper)?))?;
+    let checkpoints = helper_scope(home, &path.canonicalize()?, helper)?;
+    let scope = checkpoints.path();
     ensure!(
         !scope.starts_with(path.canonicalize()?),
         "publication cache must be outside the catalog"
@@ -171,7 +154,7 @@ pub(crate) fn upload_directory(home: &Path, helper: &Path, path: &Path) -> Resul
         "Hashtree catalog publication failed"
     );
     let root = crate::event_catalog::uploaded_root(&output.stdout)?;
-    let previous = uploaded(&scope);
+    let previous = uploaded(scope);
     if previous.as_deref() == Some(&root) {
         return Ok(root);
     }
@@ -195,7 +178,7 @@ pub(crate) fn upload_directory(home: &Path, helper: &Path, path: &Path) -> Resul
         output.status.success(),
         "Hashtree content upload failed; catalog was not announced"
     );
-    remember(&scope, &root)?;
+    remember(scope, &root)?;
     Ok(root)
 }
 
@@ -208,7 +191,7 @@ mod tests {
     fn checkpoint_identity_follows_helper_bytes() -> Result<()> {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("htree");
-        let identity = || helper_identity(&path);
+        let identity = || helper_identity(&path)?.context("readable test helper");
         let set_time = |seconds| {
             fs::OpenOptions::new()
                 .write(true)
@@ -233,6 +216,28 @@ mod tests {
             original,
             "different bytes with the original length and timestamp need a fresh scope"
         );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_only_helpers_do_not_share_checkpoints() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("htree");
+        fs::write(&path, b"helper")?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o111))?;
+        if fs::File::open(&path).is_ok() {
+            // A privileged test runner can still hash this file.
+            return Ok(());
+        }
+        let first = helper_scope(directory.path(), &"index", &path)?;
+        let second = helper_scope(directory.path(), &"index", &path)?;
+        assert_ne!(first.path(), second.path());
+        let scratch = first.path().to_owned();
+        drop(first);
+        assert!(!scratch.exists());
         Ok(())
     }
 }

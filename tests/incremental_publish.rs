@@ -84,15 +84,19 @@ fn main() {
 }
 "#,
     )?;
-    assert!(
-        Command::new("rustc")
-            .arg(&source)
-            .arg("-o")
-            .arg(tools.join(format!("htree{}", std::env::consts::EXE_SUFFIX)))
-            .status()?
-            .success()
-    );
     let helper = tools.join(format!("htree{}", std::env::consts::EXE_SUFFIX));
+    let compile_helper = || -> anyhow::Result<()> {
+        assert!(
+            Command::new("rustc")
+                .arg(&source)
+                .arg("-o")
+                .arg(&helper)
+                .status()?
+                .success()
+        );
+        Ok(())
+    };
+    compile_helper()?;
     let mut path = vec![tools];
     path.extend(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
@@ -195,6 +199,27 @@ fn main() {
         ["push", &root_b],
         "a new store must not reuse the old upload checkpoint"
     );
+    let count = pushes()?.len();
+    let mtime = fs::metadata(&helper)?.modified()?;
+    fs::write(
+        &source,
+        fs::read_to_string(&source)?.replace("htree 0.2.155", "htree 0.2.156"),
+    )?;
+    compile_helper()?;
+    fs::File::options()
+        .write(true)
+        .open(&helper)?
+        .set_modified(mtime)?;
+    assert!(run(&root_b, false, "second-data").status.success());
+    assert_eq!(
+        &pushes()?[count..],
+        &[
+            vec!["push".to_owned(), root_b.clone()],
+            vec!["push".to_owned(), root_b.clone()]
+        ],
+        "a different helper must upload both roots anew"
+    );
+
     #[cfg(unix)]
     {
         fs::rename(home.join("publication"), home.join("retained-publication"))?;
