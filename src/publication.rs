@@ -64,20 +64,6 @@ fn canonical_path(path: &Path) -> Result<PathBuf> {
     Ok(resolved)
 }
 
-pub(crate) enum CheckpointDir {
-    Persistent(PathBuf),
-    Temporary(tempfile::TempDir),
-}
-
-impl CheckpointDir {
-    pub(crate) fn path(&self) -> &Path {
-        match self {
-            Self::Persistent(path) => path,
-            Self::Temporary(dir) => dir.path(),
-        }
-    }
-}
-
 fn helper_identity(helper: &Path) -> Result<Option<(PathBuf, String)>> {
     let path = helper.canonicalize()?;
     let mut file = match fs::File::open(&path) {
@@ -94,12 +80,10 @@ pub(crate) fn helper_scope(
     home: &Path,
     input: &impl Serialize,
     helper: &Path,
-) -> Result<CheckpointDir> {
-    match helper_identity(helper)? {
-        Some(identity) => Ok(CheckpointDir::Persistent(scope(home, &(input, identity))?)),
-        // An execute-only helper can publish, but its checkpoints cannot be safely reused.
-        None => Ok(CheckpointDir::Temporary(tempfile::tempdir()?)),
-    }
+) -> Result<Option<PathBuf>> {
+    helper_identity(helper)?
+        .map(|identity| scope(home, &(input, identity)))
+        .transpose()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -131,22 +115,27 @@ pub(crate) fn remember(scope: &Path, root: &str) -> Result<()> {
 }
 
 pub(crate) fn upload_directory(home: &Path, helper: &Path, path: &Path) -> Result<String> {
-    let checkpoints = helper_scope(home, &path.canonicalize()?, helper)?;
-    let scope = checkpoints.path();
-    ensure!(
-        !scope.starts_with(path.canonicalize()?),
-        "publication cache must be outside the catalog"
-    );
-    let _guard = lock(&scope.join("publish.lock"))?;
+    let catalog = path.canonicalize()?;
+    let scope = helper_scope(home, &catalog, helper)?;
     let mut command = Command::new(helper);
     command.arg("add").arg(path).arg("--local");
-    if cfg!(unix) && supports(helper, "add", "--cache") {
-        command.arg("--cache").arg(scope.join("files.json"));
-    } else {
-        eprintln!(
-            "This htree helper does not support source-file caching; addressing the complete catalog. Update htree to enable incremental addressing."
+    let _guard = if let Some(scope) = &scope {
+        ensure!(
+            !scope.starts_with(&catalog),
+            "publication cache must be outside the catalog"
         );
-    }
+        let guard = lock(&scope.join("publish.lock"))?;
+        if cfg!(unix) && supports(helper, "add", "--cache") {
+            command.arg("--cache").arg(scope.join("files.json"));
+        } else {
+            eprintln!(
+                "This htree helper does not support source-file caching; addressing the complete catalog. Update htree to enable incremental addressing."
+            );
+        }
+        Some(guard)
+    } else {
+        None
+    };
     let output = command.output()?;
     eprint!("{}", String::from_utf8_lossy(&output.stderr));
     ensure!(
@@ -154,7 +143,7 @@ pub(crate) fn upload_directory(home: &Path, helper: &Path, path: &Path) -> Resul
         "Hashtree catalog publication failed"
     );
     let root = crate::event_catalog::uploaded_root(&output.stdout)?;
-    let previous = uploaded(scope);
+    let previous = scope.as_deref().and_then(uploaded);
     if previous.as_deref() == Some(&root) {
         return Ok(root);
     }
@@ -178,7 +167,9 @@ pub(crate) fn upload_directory(home: &Path, helper: &Path, path: &Path) -> Resul
         output.status.success(),
         "Hashtree content upload failed; catalog was not announced"
     );
-    remember(scope, &root)?;
+    if let Some(scope) = &scope {
+        remember(scope, &root)?;
+    }
     Ok(root)
 }
 
@@ -232,12 +223,8 @@ mod tests {
             // A privileged test runner can still hash this file.
             return Ok(());
         }
-        let first = helper_scope(directory.path(), &"index", &path)?;
-        let second = helper_scope(directory.path(), &"index", &path)?;
-        assert_ne!(first.path(), second.path());
-        let scratch = first.path().to_owned();
-        drop(first);
-        assert!(!scratch.exists());
+        assert!(helper_scope(directory.path(), &"index", &path)?.is_none());
+        assert!(!directory.path().join("publication").exists());
         Ok(())
     }
 }
