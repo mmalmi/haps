@@ -1090,9 +1090,9 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22700b3e7821fdcfe9f74aebbbcdd019cb42444ccd33422b821fcfb3bdb0af46"
+checksum = "381059616e65a3154eeac615a811ef18d854400958f78dfb8e11024f65800501"
 dependencies = [
  "futures",
  "hashtree-collection",
@@ -1114,9 +1114,9 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr-pubsub"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3a382f11cbff77cc56667fbe8fba34cc1ae802e9ef3b8289e2a3831dd1487a28"
+checksum = "114ab31557c3e5466969fcfa9d7f0a294fbd7069bc501274f47860ff763b6b5b"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -1713,9 +1713,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-social-graph"
-version = "0.1.4"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe75a62e7939ca311dce77039443ea14af0c8e0a9969c01746992acf7ef40b17"
+checksum = "83a7c3e6dedf8c0474c9e09938496abde4a9c77cd38ec4832d9b56ee9602b8f8"
 dependencies = [
  "hex",
  "indexmap",
