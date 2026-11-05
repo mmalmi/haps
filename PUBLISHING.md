@@ -199,6 +199,12 @@ required announcements receive positive relay acknowledgements. Older unrelated
 outbox entries remain queued and are reported separately. `haps sync` retries
 the whole queue and exits unsuccessfully if anything remains unacknowledged.
 
+Package announcements include up to 64 recent release references, preserving the
+latest release and latest stable release for each platform. The signed catalog
+and event index retain the complete history. Haps 0.1.27 can resolve older
+versions outside that announcement window with `--version`; earlier readers can
+install them from the immutable catalog URL.
+
 Managed catalogs and `import-release --publish` keep private upload checkpoints
 outside the published directory. With a compatible `htree`, later publications
 reuse unchanged source-file addresses and upload only changes since the last

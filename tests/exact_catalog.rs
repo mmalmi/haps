@@ -847,6 +847,51 @@ async fn unversioned_direct_head_info_install_and_retained_update() -> anyhow::R
 }
 
 #[tokio::test]
+async fn direct_head_finds_historical_versions_outside_its_window() -> anyhow::Result<()> {
+    let fixture = Fixture::new("iris").await?;
+    let home = fixture.temp.path().join("historical-reader");
+    let server = Server::new(fixture.repo.path().unwrap().into(), true);
+    configure(&fixture, &home, &fixture.keys, None)?;
+    direct_head(&fixture, &home, &server.url, &[], 1).await?;
+    for name in [fixture.release.identity(), "iris".into()] {
+        let (ok, output) = command(
+            &fixture,
+            &home,
+            &["info", &name, "--version", "2026.10.2401", "--json"],
+        )?;
+        assert!(
+            ok && output.contains(&fixture.release.event.id.to_hex()),
+            "{output}"
+        );
+    }
+    assert!(
+        server.requests.lock().unwrap().len() < 16,
+        "historical lookup must use the authenticated exact index"
+    );
+    let snapshot = fixture.repo.catalog(&fixture.release.author()).await?;
+    fs::write(
+        fixture.repo.path().unwrap().join("catalog.json"),
+        serde_json::to_vec(&sign(&Keys::generate(), "haps/catalog/v1", &snapshot.head)?)?,
+    )?;
+    let (ok, _) = command(
+        &fixture,
+        &home,
+        &[
+            "info",
+            &fixture.release.identity(),
+            "--version",
+            "2026.10.2401",
+            "--json",
+        ],
+    )?;
+    assert!(
+        !ok,
+        "historical lookup must retain the package's publisher pin"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn latest_missing_release_or_index_branch_cannot_downgrade_or_advance_checkpoint()
 -> anyhow::Result<()> {
     let fixture = Fixture::new("iris").await?;

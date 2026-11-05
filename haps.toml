@@ -1,7 +1,7 @@
 # https://haps.hashtree.cc
 [package]
 name = "haps"
-version = "0.1.26"
+version = "0.1.27"
 target = "host"
 description = "Hashtree Package System"
 

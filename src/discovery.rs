@@ -19,6 +19,7 @@ use std::{
 };
 
 pub const SOFTWARE_KIND: Kind = Kind::Custom(32267);
+pub(crate) const MAX_SOFTWARE_CONTENT: usize = 16_384;
 const LIMIT: usize = 2048;
 const INDEX_ID: &str = "haps/discovery-index/v1";
 
@@ -33,7 +34,7 @@ impl Announcement {
     pub fn verify(event: Event) -> Result<Self> {
         event.verify()?;
         ensure!(
-            event.kind == SOFTWARE_KIND && event.content.len() <= 16_384,
+            event.kind == SOFTWARE_KIND && event.content.len() <= MAX_SOFTWARE_CONTENT,
             "invalid software announcement"
         );
         let name = tag_value(&event, "d")?.to_owned();

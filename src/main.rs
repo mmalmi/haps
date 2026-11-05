@@ -1080,7 +1080,7 @@ async fn candidates_for_version(
     version: Option<&semver::Version>,
     target: &str,
 ) -> Result<Vec<Candidate>> {
-    let selection = package.contains('/').then_some(PackageSelection {
+    let selection = (package.contains('/') || version.is_some()).then_some(PackageSelection {
         identity: package,
         version,
         target,
@@ -1151,6 +1151,25 @@ async fn direct_candidates(
                 let result = query_metadata_until(deadline, async {
                     let repo = Arc::new(Repository::open(&head.payload, &home.join("cache"))?);
                     let mut releases = Vec::new();
+                    if let Some(selection) = selection
+                        && let Some(version) = selection.version
+                        && !head.releases.iter().any(|pointer| {
+                            pointer.version == *version && pointer.target == selection.target
+                        })
+                    {
+                        let snapshot = repo.catalog(&author).await?;
+                        if let Some(release) = repo
+                            .exact_release(&snapshot, &identity, version, selection.target)
+                            .await?
+                        {
+                            releases.push(Candidate {
+                                repository: repo.clone(),
+                                package_card: Some(head.card.clone()),
+                                release,
+                            });
+                        }
+                        return Ok(releases);
+                    }
                     for pointer in &head.releases {
                         if selection.is_some_and(|selection| {
                             selected_version != Some(&pointer.version)
@@ -1240,13 +1259,13 @@ async fn candidates_matching(
                     let snapshot = repo.catalog(&author).await?;
                     let releases = if let Some(selection) = selection {
                         let release = if let Some(version) = selection.version {
-                            repo.exact_release(
-                                &snapshot,
-                                selection.identity,
-                                version,
-                                selection.target,
-                            )
-                            .await?
+                            let identity = if selection.identity.contains('/') {
+                                selection.identity.to_owned()
+                            } else {
+                                format!("{author}/{}", selection.identity)
+                            };
+                            repo.exact_release(&snapshot, &identity, version, selection.target)
+                                .await?
                         } else {
                             repo.latest_release(
                                 &snapshot,
