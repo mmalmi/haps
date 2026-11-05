@@ -3,7 +3,7 @@
 # https://haps.hashtree.cc
 [package]
 name = "haps"
-version = "0.1.25"
+version = "0.1.26"
 target = "host"
 description = "Hashtree Package System"
 
