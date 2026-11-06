@@ -30,7 +30,7 @@ ignore = "0.4"
 nostr = "=0.44.8"
 nostr-pubsub = "=0.1.18"
 nostr-pubsub-relay = "=0.1.13"
-nostr-social-graph = "=0.2.0"
+nostr-social-graph = "=0.2.1"
 nostr-identity = "=0.5.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 semver = { version = "1", features = ["serde"] }
