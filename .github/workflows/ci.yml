@@ -20,11 +20,26 @@ jobs:
           - os: windows-latest
             runner: windows-2025
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
+      HAPS_CI_PYTHON: ${{ runner.os == 'Windows' && 'python' || 'python3' }}
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUSTC_WRAPPER: ''
+      RUSTC_WORKSPACE_WRAPPER: ''
+      RUSTFLAGS: ''
+      CARGO_ENCODED_RUSTFLAGS: ''
+      RUSTDOCFLAGS: ''
+      CARGO_ENCODED_RUSTDOCFLAGS: ''
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Check hosted filesystem capacity before acquiring inputs
+        run: '"$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase job --work "$RUNNER_TEMP/build-inputs"'
       - name: Install hash-pinned Rust toolchain
         shell: bash
         run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/build-inputs.py rust --work "$RUNNER_TEMP/build-inputs" --bash "$BASH"
@@ -49,6 +64,7 @@ jobs:
       - name: Install the supported Omarchy picker
         if: runner.os == 'Linux'
         run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase inputs --work "$RUNNER_TEMP/build-inputs" --path /usr/local/bin
           curl --fail --location --retry 3 https://github.com/junegunn/fzf/releases/download/v0.74.5/fzf-0.74.5-linux_amd64.tar.gz -o "$RUNNER_TEMP/fzf.tar.gz"
           echo 'd47d7f882972c7d674dbbba998ffa4116e68379616ffac7695d0671e9a722c5f  '"$RUNNER_TEMP/fzf.tar.gz" | sha256sum --check
           mkdir "$RUNNER_TEMP/fzf"
@@ -59,14 +75,21 @@ jobs:
         if: runner.os == 'Linux'
         env:
           HAPS_TEST_FZF: /usr/local/bin/fzf
-        run: python3 -m unittest discover -s tests -p omarchy_test.py
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs"
+          python3 -m unittest discover -s tests -p omarchy_test.py
       - name: Check all targets with Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs"
+          cargo clippy --locked --all-targets -- -D warnings
       - name: Test native installation and package lifecycle
-        run: cargo test --locked --no-fail-fast
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs"
+          cargo test --locked --no-fail-fast
       - name: Test installers and audit integration
         if: runner.os == 'Linux'
         run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs"
           python3 - <<'PY'
           import pathlib, sys, unittest
           sys.path.insert(0, 'tests')
@@ -79,7 +102,9 @@ jobs:
         if: runner.os == 'Linux'
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-        run: cargo publish --dry-run --locked
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs"
+          cargo publish --dry-run --locked
       - name: Retain the verified crate
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -90,27 +115,44 @@ jobs:
           retention-days: 7
       - name: Build and install an audited PKGBUILD using Arch tooling
         if: runner.os == 'Linux'
-        run: bash scripts/test-makepkg.sh
+        run: |
+          docker_root="$(docker info --format '{{.DockerRootDir}}')"
+          case "$docker_root" in /*) ;; *) echo 'Docker data path must be absolute'; exit 1 ;; esac
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs" --path "$docker_root"
+          bash scripts/test-makepkg.sh
       - name: Test the interactive chooser in a macOS terminal
         if: runner.os == 'macOS'
-        run: python3 -m unittest discover -s tests -p chooser_test.py
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs"
+          python3 -m unittest discover -s tests -p chooser_test.py
       - name: Verify macOS build containment
         if: runner.os == 'macOS'
-        run: python3 -m unittest discover -s tests -p build_isolation_test.py
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs"
+          python3 -m unittest discover -s tests -p build_isolation_test.py
       - name: Build a locked dependency with explicit network access
         if: runner.os == 'Linux' || runner.os == 'macOS'
         env:
           HAPS_LIVE_BUILD_NETWORK: '1'
-        run: python3 -m unittest discover -s tests -p build_isolation_test.py -k locked_cargo
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs"
+          python3 -m unittest discover -s tests -p build_isolation_test.py -k locked_cargo
       - name: Launch a desktop entry through GIO
         if: runner.os == 'Linux'
-        run: HAPS_TEST_DESKTOP=1 cargo test --locked desktop_launcher_tracks_install_update_rollback_and_removal
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs"
+          HAPS_TEST_DESKTOP=1 cargo test --locked desktop_launcher_tracks_install_update_rollback_and_removal
       - name: Install real published example apps
         if: runner.os == 'Linux' || runner.os == 'macOS'
         timeout-minutes: 25
         env:
           HAPS_TEST_APPS: iris-chat,iris-drive,nostr-vpn
-        run: cargo test --locked --test published_apps -- --ignored --nocapture
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs"
+          cargo test --locked --test published_apps -- --ignored --nocapture
+      - name: Record final filesystem reserve
+        if: always()
+        run: '"$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase boundary --work "$RUNNER_TEMP/build-inputs"'
       - name: Retain the verified Linux worker binary
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

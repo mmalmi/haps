@@ -14,6 +14,12 @@ spec.loader.exec_module(module)
 
 
 class BuildInputs(unittest.TestCase):
+    def setUp(self):
+        # These input/provenance cases do not depend on the test host's free disk.
+        capacity = patch.object(module, 'require_capacity')
+        self.capacity = capacity.start()
+        self.addCleanup(capacity.stop)
+
     def test_macos_helper_loads_only_the_compilers_bundled_llvm(self):
         target = 'aarch64-apple-darwin'
         with tempfile.TemporaryDirectory() as temporary, \
