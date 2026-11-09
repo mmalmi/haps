@@ -1,10 +1,13 @@
 //! Real public-catalog acceptance test. CI explicitly opts into network access.
 use haps::{install::Installation, model::Release};
-use std::{fs, process::Command};
+use std::{fs, process::Command, time::Duration};
 
-#[test]
+#[path = "support/search.rs"]
+mod search;
+
+#[tokio::test]
 #[ignore = "downloads signed application payloads from the public Hashtree catalog"]
-fn published_example_apps_respect_audit_gate_and_download_payloads() -> anyhow::Result<()> {
+async fn published_example_apps_respect_audit_gate_and_download_payloads() -> anyhow::Result<()> {
     anyhow::ensure!(
         matches!(
             haps::model::target(),
@@ -44,21 +47,11 @@ fn published_example_apps_respect_audit_gate_and_download_payloads() -> anyhow::
         };
         // The website's names must be searchable without an earlier exact
         // package lookup having imported their metadata into the local cache.
-        let search = command().args(["search", app, "--json"]).output()?;
-        anyhow::ensure!(
-            search.status.success(),
-            "{app} cold search failed: {} {}",
-            String::from_utf8_lossy(&search.stderr),
-            String::from_utf8_lossy(&search.stdout)
-        );
-        let matches: serde_json::Value = serde_json::from_slice(&search.stdout)?;
-        assert!(
-            matches
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|item| { item["publisher"] == publisher && item["package"]["name"] == app })
-        );
+        // Snapshot search deliberately returns partial results after three
+        // seconds. Live acceptance waits for the final streamed view instead.
+        let mut discover = command();
+        discover.args(["search", app, "--json", "--stream"]);
+        search::complete(discover, &publisher, app, Duration::from_secs(60)).await?;
         let mut install = command();
         install.args([
             "--non-interactive",

@@ -48,6 +48,7 @@ rustix = { version = "1", features = ["fs"] }
 [dev-dependencies]
 tiny_http = "0.12"
 axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1", features = ["io-util", "process"] }
 
 [profile.dev]
 debug = 0
