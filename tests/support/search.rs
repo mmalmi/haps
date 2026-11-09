@@ -10,6 +10,67 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader};
 const SNAPSHOT_LIMIT: usize = 1024 * 1024;
 const STDOUT_LIMIT: usize = 16 * 1024 * 1024;
 const STDERR_LIMIT: usize = 64 * 1024;
+const CLOSURE_BUDGET: Duration = Duration::from_secs(5);
+
+// This narrow interface lets tests exercise OS errors and a stalled wait
+// without leaving a real process alive or depending on scheduler races.
+trait ClosingProcess {
+    fn probe_reaped(&mut self) -> std::io::Result<bool>;
+    fn send_kill(&mut self) -> std::io::Result<()>;
+    async fn wait_reaped(&mut self) -> std::io::Result<()>;
+}
+
+impl ClosingProcess for tokio::process::Child {
+    fn probe_reaped(&mut self) -> std::io::Result<bool> {
+        self.try_wait().map(|status| status.is_some())
+    }
+    fn send_kill(&mut self) -> std::io::Result<()> {
+        self.start_kill()
+    }
+    async fn wait_reaped(&mut self) -> std::io::Result<()> {
+        self.wait().await.map(|_| ())
+    }
+}
+
+async fn close(
+    child: &mut impl ClosingProcess,
+    pid: Option<u32>,
+    budget: Duration,
+    outcome: Result<()>,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + budget;
+    let mut errors = Vec::new();
+    let mut reaped = match child.probe_reaped() {
+        Ok(reaped) => reaped,
+        Err(error) => {
+            errors.push(format!("try_wait failed: {error:?}"));
+            false
+        }
+    };
+    if !reaped {
+        if let Err(error) = child.send_kill() {
+            errors.push(format!("start_kill failed: {error:?}"));
+        }
+        match tokio::time::timeout_at(deadline, child.wait_reaped()).await {
+            Ok(Ok(())) => reaped = true,
+            Ok(Err(error)) => errors.push(format!("wait failed: {error:?}")),
+            Err(_) => errors.push(format!("closure deadline elapsed after {budget:?}")),
+        }
+    }
+    if !reaped || !errors.is_empty() {
+        let proof = if reaped {
+            "reaped with cleanup errors"
+        } else {
+            "closure unproved"
+        };
+        let closure = format!("owned search PID {pid:?}: {proof}; {}", errors.join("; "));
+        return match outcome {
+            Ok(()) => Err(anyhow::anyhow!(closure)),
+            Err(original) => Err(original.context(closure)),
+        };
+    }
+    outcome
+}
 
 async fn snapshots(reader: impl AsyncRead + Unpin, last: &mut Option<Vec<Value>>) -> Result<()> {
     let mut reader = BufReader::new(reader);
@@ -82,6 +143,7 @@ pub async fn complete(
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
+    let pid = child.id();
     let stdout = child.stdout.take().context("search stdout missing")?;
     let stderr = child.stderr.take().context("search stderr missing")?;
     let mut last = None;
@@ -102,25 +164,131 @@ pub async fn complete(
         Ok(())
     })
     .await;
-    // A parser error, output overflow or deadline must not leave a process or
-    // pipe reader behind. kill() waits for the owned child to be reaped.
-    if child.try_wait()?.is_none() {
-        child
-            .kill()
-            .await
-            .context("failed to kill and reap search")?;
-    }
-    let last = serde_json::to_vec(&last)?;
-    outcome
+    let outcome = outcome
         .context("search exceeded its absolute deadline")
-        .and_then(|result| result)
+        .and_then(|result| result);
+    close(&mut child, pid, CLOSURE_BUDGET, outcome)
+        .await
         .with_context(|| {
+            let last = serde_json::to_vec(&last)
+                .unwrap_or_else(|error| format!("snapshot encoding failed: {error}").into_bytes());
             format!(
                 "{app} cold search failed; final snapshot: {}; stderr: {}",
                 preview(&last),
                 preview(&captured)
             )
         })
+}
+
+#[cfg(test)]
+mod closure_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct Process {
+        probe_error: bool,
+        kill_error: bool,
+        wait_error: bool,
+        stalled_wait: bool,
+        kills: usize,
+        waits: usize,
+    }
+
+    impl ClosingProcess for Process {
+        fn probe_reaped(&mut self) -> std::io::Result<bool> {
+            if self.probe_error {
+                Err(std::io::Error::other("probe fixture"))
+            } else {
+                Ok(false)
+            }
+        }
+        fn send_kill(&mut self) -> std::io::Result<()> {
+            self.kills += 1;
+            if self.kill_error {
+                Err(std::io::Error::other("kill fixture"))
+            } else {
+                Ok(())
+            }
+        }
+        async fn wait_reaped(&mut self) -> std::io::Result<()> {
+            self.waits += 1;
+            if self.stalled_wait {
+                std::future::pending::<()>().await;
+            }
+            if self.wait_error {
+                Err(std::io::Error::other("wait fixture"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn probe_error_still_kills_and_reaps_and_preserves_original_failure() {
+        let mut process = Process {
+            probe_error: true,
+            ..Process::default()
+        };
+        let error = close(
+            &mut process,
+            Some(12345),
+            Duration::from_secs(5),
+            Err(anyhow::anyhow!("original search failure")),
+        )
+        .await
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("probe fixture") && message.contains("original search failure"));
+        assert!(message.contains("reaped with cleanup errors"));
+        assert_eq!((process.kills, process.waits), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn kill_and_wait_errors_keep_owned_pid_and_prevent_acceptance() {
+        let mut process = Process {
+            kill_error: true,
+            wait_error: true,
+            ..Process::default()
+        };
+        let error = close(&mut process, Some(12345), Duration::from_secs(5), Ok(()))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        for expected in ["12345", "closure unproved", "kill fixture", "wait fixture"] {
+            assert!(message.contains(expected), "{message}");
+        }
+        assert_eq!((process.kills, process.waits), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn stalled_cleanup_has_its_own_deadline_and_retains_original_outcome() {
+        let mut process = Process {
+            stalled_wait: true,
+            ..Process::default()
+        };
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            close(
+                &mut process,
+                Some(12345),
+                Duration::from_millis(10),
+                Err(anyhow::anyhow!("original active deadline")),
+            ),
+        )
+        .await
+        .expect("cleanup exceeded the independent outer test bound")
+        .unwrap_err();
+        let message = format!("{error:#}");
+        for expected in [
+            "12345",
+            "closure unproved",
+            "closure deadline elapsed",
+            "original active deadline",
+        ] {
+            assert!(message.contains(expected), "{message}");
+        }
+        assert_eq!((process.kills, process.waits), (1, 1));
+    }
 }
 
 #[cfg(all(test, unix))]
