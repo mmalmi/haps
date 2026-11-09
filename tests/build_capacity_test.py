@@ -61,6 +61,48 @@ class BuildCapacity(unittest.TestCase):
                 module.require_capacity([first, second], 4*module.GIB, 'inputs')
             self.assertEqual(usage.call_count, 2)
 
+    @contextlib.contextmanager
+    def windows_layout(self, system_gib):
+        system = self.root / 'system'; work = self.root / 'work'
+        system.mkdir(); work.mkdir()
+        prefix = system / '.rustup'; prefix.mkdir()
+        cache = system / '.cargo'; cache.mkdir()
+        original_stat = Path.stat
+        def device(path, *args, **kwargs):
+            values = list(original_stat(path, *args, **kwargs))
+            values[2] = 2 if path == work else 1
+            return os.stat_result(values)
+        def space(path):
+            return SimpleNamespace(free=(147 if path == work else system_gib) * module.GIB)
+        with patch.object(Path, 'stat', device), patch.object(module.shutil, 'disk_usage', side_effect=space):
+            yield prefix, cache, work
+
+    def test_dedicated_toolchain_and_work_drives_keep_full_reserves(self):
+        with self.windows_layout(31) as (prefix, cache, work):
+            result = module.require_capacity([prefix, work], 12 * module.GIB, 'job', toolchain_root=prefix)
+        self.assertEqual([v['required_free_bytes'] for v in result['filesystems']],
+                         [27 * module.GIB, 35 * module.GIB])
+        self.assertEqual(result['reserve_bytes'], 20 * module.GIB)
+
+    def test_dedicated_toolchain_cannot_borrow_work_drive_reserve(self):
+        with self.windows_layout(26) as (prefix, cache, work):
+            with self.assertRaisesRegex(ValueError, 'Insufficient filesystem capacity'):
+                module.require_capacity([prefix, work], 12 * module.GIB, 'job', toolchain_root=prefix)
+
+    def test_cache_left_on_toolchain_drive_keeps_full_phase_budget(self):
+        with self.windows_layout(31) as (prefix, cache, work):
+            with self.assertRaisesRegex(ValueError, 'Insufficient filesystem capacity'):
+                module.require_capacity([prefix, cache, work], 12 * module.GIB, 'job', toolchain_root=prefix)
+
+    def test_shared_filesystem_keeps_full_budget_in_either_path_order(self):
+        prefix = self.root / '.rustup'; prefix.mkdir()
+        for paths in ([prefix, self.root], [self.root, prefix]):
+            with self.subTest(paths=paths), patch.object(module.shutil, 'disk_usage',
+                    return_value=SimpleNamespace(free=31 * module.GIB)) as usage:
+                with self.assertRaisesRegex(ValueError, 'Insufficient filesystem capacity'):
+                    module.require_capacity(paths, 12 * module.GIB, 'job', toolchain_root=prefix)
+                self.assertEqual(usage.call_count, 1)
+
     def test_unreadable_filesystem_fails_closed(self):
         with patch.object(module.shutil, 'disk_usage', side_effect=OSError('unavailable filesystem')):
             with self.assertRaises(OSError):module.require_capacity([self.root], 0, 'boundary')

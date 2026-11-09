@@ -27,12 +27,16 @@ PHASE_GROWTH = {'job': 12 * GIB, 'inputs': 4 * GIB, 'build': 8 * GIB, 'boundary'
 # caches/targets, packaging, isolated test builds and the pinned Arch image.
 
 
-def require_capacity(paths, planned_bytes, phase):
+def require_capacity(paths, planned_bytes, phase, toolchain_root=None):
     if type(planned_bytes) is not int or planned_bytes < 0:
         raise ValueError('Invalid disk growth plan')
     required = DISK_RESERVE + planned_bytes + BACKGROUND_GROWTH + RESPONSE_MARGIN
     filesystems = {}
     for path in paths:
+        # The fixed compiler prefix can grow only within the authenticated input
+        # plan. Other outputs retain the full phase allowance. On a shared
+        # filesystem the larger allowance wins; free space is never pooled.
+        growth = min(planned_bytes, PHASE_GROWTH['inputs']) if path == toolchain_root else planned_bytes
         probe = Path(path).resolve()
         while True:
             try:
@@ -48,16 +52,23 @@ def require_capacity(paths, planned_bytes, phase):
             info = probe.stat()
         device = info.st_dev
         if device not in filesystems:
-            filesystems[device] = {'path': str(probe), 'free_bytes': shutil.disk_usage(probe).free}
+            filesystems[device] = {'path': str(probe), 'free_bytes': shutil.disk_usage(probe).free,
+                                   'planned_growth_bytes': growth}
+        else:
+            filesystems[device]['planned_growth_bytes'] = max(filesystems[device]['planned_growth_bytes'], growth)
     if not filesystems:
         raise ValueError('No output filesystems specified')
+    for volume in filesystems.values():
+        volume['required_free_bytes'] = (DISK_RESERVE + volume['planned_growth_bytes']
+                                         + BACKGROUND_GROWTH + RESPONSE_MARGIN)
     report = {'phase': phase, 'required_free_bytes': required, 'reserve_bytes': DISK_RESERVE,
               'planned_growth_bytes': planned_bytes, 'background_bytes': BACKGROUND_GROWTH,
               'response_bytes': RESPONSE_MARGIN, 'filesystems': list(filesystems.values())}
     print(json.dumps(report), flush=True)
-    if any(volume['free_bytes'] < required for volume in filesystems.values()):
+    if any(volume['free_bytes'] < volume['required_free_bytes'] for volume in filesystems.values()):
         raise ValueError(f'Insufficient filesystem capacity before {phase}; '
-                         f'need {required} free bytes including the 20 GiB reserve. No cleanup attempted.')
+                         'each filesystem needs its planned growth plus the 20 GiB reserve, '
+                         'background and response allowances. No cleanup attempted.')
     return report
 
 
@@ -71,7 +82,8 @@ def capacity_paths(work):
 
 def check_capacity(work, phase, extra_paths=(), planned_bytes=None):
     return require_capacity([*capacity_paths(work), *extra_paths],
-                            PHASE_GROWTH[phase] if planned_bytes is None else planned_bytes, phase)
+                            PHASE_GROWTH[phase] if planned_bytes is None else planned_bytes, phase,
+                            toolchain_root=Path.home() / '.rustup')
 
 
 def rust_expansion(archive, root, components):

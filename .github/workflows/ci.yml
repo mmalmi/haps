@@ -16,7 +16,7 @@ jobs:
           - os: ubuntu-latest
             runner: ubuntu-24.04
           - os: macos-latest
-            runner: macos-14
+            runner: macos-15
           - os: windows-latest
             runner: windows-2025
     runs-on: ${{ matrix.runner }}
@@ -38,6 +38,17 @@ jobs:
       CARGO_ENCODED_RUSTDOCFLAGS: ''
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Place Windows build scratch on the work drive
+        if: runner.os == 'Windows'
+        run: |
+          "$HAPS_CI_PYTHON" - <<'PY'
+          import os, pathlib
+          scratch = pathlib.Path(os.environ['RUNNER_TEMP'])
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              for name in ('TMPDIR', 'TMP', 'TEMP'):
+                  output.write(name + '=' + str(scratch) + '\n')
+              output.write('CARGO_HOME=' + str(scratch / 'cargo') + '\n')
+          PY
       - name: Check hosted filesystem capacity before acquiring inputs
         run: '"$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase job --work "$RUNNER_TEMP/build-inputs"'
       - name: Install hash-pinned Rust toolchain
