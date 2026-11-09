@@ -1304,13 +1304,29 @@ use full commits. Builds use default Cargo features,
 `--release --locked`, and the selected native target. The five release targets
 are Linux GNU x86_64/aarch64, macOS x86_64/aarch64, and Windows x86_64 MSVC.
 Linux release runners use Ubuntu 22.04 and its preinstalled GNU linker/glibc;
-macOS uses Xcode/Apple SDKs on macOS 14 ARM or macOS 15 Intel with
+macOS uses Xcode/Apple SDKs on standard macOS 15 ARM or macOS 15 Intel with
 `MACOSX_DEPLOYMENT_TARGET=11.0`; Windows uses the preinstalled Visual Studio/MSVC
 and Windows SDK on Windows Server 2025. Git, Python 3 (with tar extraction
 filters), Bash, curl, archive tools, and the platform C toolchain must already be
 installed. Ubuntu's source-check job additionally requires Python 3.11+.
 Runner OS images and system libraries are external prerequisites, recorded in
 the hosted job logs; this does not claim bit-for-bit OS or compiler bootstrapping.
+
+Each binary-release job has a 35-minute deadline. Native builds use two Cargo
+workers, disable incremental compilation, and clear compiler wrappers and flags.
+On Windows, Cargo's cache and temporary files share the runner's work drive;
+the pinned compiler stays in its normal prefix. Before input acquisition,
+compilation, packaging, artifact transfers, and indexing, capacity checks require
+20 GiB free reserve on every output filesystem, plus the phase's planned growth,
+2 GiB for background writers, and 1 GiB response margin. The build entry plan is
+12 GiB: 4 GiB for authenticated Rust extraction and installation overlap, plus
+8 GiB for Cargo caches/targets, helper downloads, archive creation and the
+temporary extraction, signed package and installed payload copies. Source-helper
+staging and cold history share a 4 GiB plan; the publisher also allows 4 GiB for
+all five artifacts, overlapping download/extraction copies, indexing and upload
+scratch. Fresh checks precede each phase and record each job's final boundary.
+These are phase observations and planning allowances, not continuous quotas or
+free-space guarantees. A failed check stops the job without deleting runner data.
 
 Linux CI uses Ubuntu 24.04 with its existing AppArmor parser and runtime libraries.
 Its two additional test-tool packages are hash-pinned and installed without

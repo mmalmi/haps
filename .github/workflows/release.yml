@@ -13,6 +13,7 @@ concurrency:
 jobs:
   source:
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     permissions:
       actions: read
       contents: read
@@ -48,7 +49,11 @@ jobs:
         env:
           SOURCE_SHA: ${{ steps.commit.outputs.sha }}
         run: |
+          # The 4 GiB input plan includes the helper archive/cache, selected
+          # extracted helpers, and the cold Git/Hashtree history and data cache.
+          python3 scripts/build-inputs.py check-capacity --phase inputs --work "$RUNNER_TEMP/source-tools" --path "$RUNNER_TEMP/source-tools-cache"
           python3 scripts/bundle.py --target x86_64-unknown-linux-gnu --destination "$RUNNER_TEMP/source-tools" --cache "$RUNNER_TEMP/source-tools-cache"
+          python3 scripts/build-inputs.py check-capacity --phase inputs --work "$RUNNER_TEMP/source-tools" --path "$RUNNER_TEMP/source-tools-cache"
           python3 scripts/verify-public-source.py --commit "$SOURCE_SHA" --helpers "$RUNNER_TEMP/source-tools/libexec"
       - name: Require successful CI for this exact source
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
@@ -75,28 +80,67 @@ jobs:
               }
             }
             core.setFailed('Wait for successful Check CI on the tagged source commit, then run this workflow again.');
+      - name: Record source job filesystem boundary
+        if: always()
+        run: python3 scripts/build-inputs.py check-capacity --phase boundary --work "$RUNNER_TEMP/source-tools" --path "$RUNNER_TEMP/source-tools-cache"
   build:
+    # Keep existing job identities when the corresponding runner image changes.
+    name: build (${{ matrix.os }}, ${{ matrix.target }})
     needs: source
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 35
+    defaults:
+      run:
+        shell: bash
+    env:
+      HAPS_CI_PYTHON: ${{ matrix.os == 'windows-2025' && 'python' || 'python3' }}
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      RUSTC_WRAPPER: ''
+      RUSTC_WORKSPACE_WRAPPER: ''
+      RUSTFLAGS: ''
+      CARGO_ENCODED_RUSTFLAGS: ''
+      RUSTDOCFLAGS: ''
+      CARGO_ENCODED_RUSTDOCFLAGS: ''
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-22.04
+            runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-22.04-arm
+            runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
           - os: macos-15-intel
+            runner: macos-15-intel
             target: x86_64-apple-darwin
           - os: macos-14
+            runner: macos-15
             target: aarch64-apple-darwin
           - os: windows-2025
+            runner: windows-2025
             target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.source.outputs.sha }}
+      - name: Place Windows build scratch on the work drive
+        if: runner.os == 'Windows'
+        run: |
+          "$HAPS_CI_PYTHON" - <<'PY'
+          import os, pathlib
+          scratch = pathlib.Path(os.environ['RUNNER_TEMP'])
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              for name in ('TMPDIR', 'TMP', 'TEMP'):
+                  output.write(name + '=' + str(scratch) + '\n')
+              output.write('CARGO_HOME=' + str(scratch / 'cargo') + '\n')
+          PY
+      - name: Check hosted filesystem capacity before acquiring inputs
+        # 4 GiB authenticated Rust staging plus 8 GiB for Cargo caches/targets,
+        # helper downloads, archives, temporary payload and signed install copies.
+        run: '"$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase job --work "$RUNNER_TEMP/build-inputs" --path dist --path work/hashtree-bundle'
       - name: Install hash-pinned native Rust toolchain
         env:
           TARGET: ${{ matrix.target }}
@@ -107,28 +151,42 @@ jobs:
           TARGET: ${{ matrix.target }}
           MACOSX_DEPLOYMENT_TARGET: '11.0'
         shell: bash
-        run: cargo build --release --locked --target "$TARGET"
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs" --path dist --path work/hashtree-bundle
+          cargo build --release --locked --target "$TARGET"
       - name: Package and install the archive on its target platform
         env:
           TARGET: ${{ matrix.target }}
           TAG: ${{ inputs.tag }}
         shell: bash
-        run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/release.py package --tag "$TAG" --target "$TARGET"
+        run: |
+          "$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase build --work "$RUNNER_TEMP/build-inputs" --path dist --path work/hashtree-bundle
+          "$HAPS_CI_PYTHON" scripts/release.py package --tag "$TAG" --target "$TARGET"
+      - name: Check capacity before staging the artifact upload
+        run: '"$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase inputs --work "$RUNNER_TEMP/build-inputs" --path dist --path work/hashtree-bundle'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: haps-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
           retention-days: 14
+      - name: Record build job filesystem boundary
+        if: always()
+        run: '"$HAPS_CI_PYTHON" scripts/build-inputs.py check-capacity --phase boundary --work "$RUNNER_TEMP/build-inputs" --path dist --path work/hashtree-bundle'
   publish:
     needs: [source, build]
     runs-on: ubuntu-24.04
+    timeout-minutes: 35
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ needs.source.outputs.sha }}
+      - name: Check capacity before downloading all five artifacts
+        # 4 GiB covers retained archives plus concurrent download/extraction
+        # copies, manifest/checksum/installer files, and upload scratch.
+        run: python3 scripts/build-inputs.py check-capacity --phase inputs --work "$RUNNER_TEMP/release-artifacts" --path dist
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: haps-*
@@ -138,12 +196,18 @@ jobs:
         env:
           TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
-        run: python3 scripts/release.py index --tag "$TAG" --commit "$SOURCE_SHA"
+        run: |
+          python3 scripts/build-inputs.py check-capacity --phase inputs --work "$RUNNER_TEMP/release-artifacts" --path dist
+          python3 scripts/release.py index --tag "$TAG" --commit "$SOURCE_SHA"
       - name: Publish complete release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
           SOURCE_SHA: ${{ needs.source.outputs.sha }}
         run: |
+          python3 scripts/build-inputs.py check-capacity --phase inputs --work "$RUNNER_TEMP/release-artifacts" --path dist
           printf 'Haps bundles for macOS, Linux, and Windows, including checksum-pinned htree and git-remote-htree helpers.\n\nBuilt from commit %s and tested on each target platform. SHA256SUMS covers all binary archives.\n\nInstallation: https://haps.hashtree.cc/#install\n' "$SOURCE_SHA" > release-notes.txt
           gh release create "$TAG" dist/* --verify-tag --title "Haps $TAG" --notes-file release-notes.txt
+      - name: Record publication job filesystem boundary
+        if: always()
+        run: python3 scripts/build-inputs.py check-capacity --phase boundary --work "$RUNNER_TEMP/release-artifacts" --path dist
